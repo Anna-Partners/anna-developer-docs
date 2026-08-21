@@ -1,0 +1,436 @@
+{
+  "section_id": "executa-image",
+  "items": [
+    {
+      "slug": "image-generate",
+      "name": "image/generate",
+      "kind": "Reverse RPC method · Image",
+      "group": "Image · LLM image generation",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST → Image provider",
+      "summary": "Ask the host to generate **N images from a text prompt** on the user's behalf. The plugin ships no provider API key, holds no R2 credentials, and pays no quota of its own — Anna routes through the user's preferred image provider (DALL·E 3, Stable Diffusion XL, FLUX, …), bills the user's plan, persists the bytes to host storage, and returns short-lived HTTPS URLs.",
+      "wire": {
+        "json_rpc_method": "image/generate",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 180,
+        "max_timeout_s": 240,
+        "max_frame_bytes": null
+      },
+      "signature": "generate(*, prompt: str, n: int = 1, size: str | None = None, reference_image_urls: list[str] | None = None, model_preferences: dict | None = None, metadata: dict | None = None, quality: str | None = None, resolution: str | None = None, output_format: str | None = None, enable_web_search: bool | None = None, thinking_level: str | None = None, timeout: float = 120.0) -> dict",
+      "params": [
+        {
+          "name": "prompt",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Non-empty natural-language description of the image you want.",
+          "notes": [
+            "Validated by `_validate_generate` in the Anna Agent runtime: empty or whitespace-only → `IMAGE_ERR_INVALID_REQUEST` (`-32104`).",
+            "Forwarded verbatim to the provider. Anna does **not** rewrite, translate, or moderate the prompt; provider-side safety filters apply (DALL·E 3 may refuse and surface as `IMAGE_ERR_PROVIDER_ERROR`)."
+          ]
+        },
+        {
+          "name": "n",
+          "type": "int",
+          "default": "1",
+          "required": false,
+          "desc": "",
+          "summary": "Number of images to generate in one call. Three independent caps apply — each surfaces a **different** error code.",
+          "notes": [
+            "**Host hard cap `_MAX_N = 8`**. Enforced by the matrix Agent's `_validate_generate` BEFORE the request leaves the plugin host. `n > 8` → `MAX_IMAGES_EXCEEDED` (`-32106`) with `data.hostCap = 8`.",
+            "**Per-call grant cap** = `image_token.max_per_call_generate` (default **4**, `DEFAULT_IMAGE_MAX_PER_CALL_GEN`). Enforced by the Nexus gate AFTER token decode. `n > max_per_call_generate` → `IMAGE_PER_CALL_EXCEEDED` (`-32107`).",
+            "**Per-invoke rolling counter** `img:invoke:{tool_invoke_id}` (Redis HASH `images` field, **30-min TTL** = `_INVOKE_TTL_SECONDS`). Caps the cumulative total across all `image/generate` + `image/edit` calls in the same `tool_invoke_id` at `image_token.max_images` (default **4** = `DEFAULT_IMAGE_MAX_IMAGES`). Exceed → `MAX_IMAGES_EXCEEDED` (`-32106`) with `data.images` and `data.maxImages` set.",
+            "Not every provider supports `n > 1` (DALL·E 3 does not). The host attempts to batch and silently degrades to N serial single-image calls when the provider can't batch — billing is identical; latency is N×."
+          ]
+        },
+        {
+          "name": "size",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Requested pixel dimensions as `\"WxH\"` (e.g. `\"1024x1024\"`, `\"1792x1024\"`).",
+          "notes": [
+            "REST schema default is `\"1024x1024\"` (see `_ImageGenerateBody.size` in the Nexus host); omitting on the SDK lets Nexus apply that default.",
+            "Provider-specific. DALL·E 3 supports `1024x1024` / `1792x1024` / `1024x1792`; SDXL/FLUX accept arbitrary multiples of 8 up to provider limit. Invalid size → `IMAGE_ERR_INVALID_REQUEST`.",
+            "The actually-returned `width` / `height` may differ if the provider rounds; always read them from the response, not from `size`."
+          ]
+        },
+        {
+          "name": "reference_image_urls",
+          "type": "list[str] | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Up to 4 HTTPS URLs to feed as style / composition references (provider-dependent).",
+          "notes": [
+            "Hard cap **4** entries (`_MAX_REFERENCE_IMAGES`); exceed → `IMAGE_ERR_INVALID_REQUEST`. Non-string entries → same error.",
+            "Each URL passes `validate_image_url` server-side (HTTPS only, host allowlist, anti-SSRF); unreachable or rejected URLs surface as `IMAGE_ERR_REFERENCE_FETCH_FAILED` (`-32314`).",
+            "Each fetched reference counts against the user's monthly bandwidth quota; keep the count small.",
+            "Most providers ignore the field outright. Stable Diffusion XL with IP-Adapter respects it; DALL·E 3 does not. Use `image/edit` instead when you have a single source image to mutate."
+          ]
+        },
+        {
+          "name": "model_preferences",
+          "type": "dict | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "MCP-style request-level model hint, e.g. `{\"hints\": [{\"name\": \"fal-ai/nano-banana-2\"}]}`. Sent on the wire as `modelPreferences` (camelCase). When a hint resolves, it wins over the user's `image_gen` preference for this call.",
+          "notes": [
+            "Resolution (Nexus gate `resolve_image_model_hint`): hints are tried in order — case-insensitive exact model-name match first, then substring — against ACTIVE models whose `model_types` include `text-to-image`. Models outside the user's plan (`allowed_plans`) are skipped.",
+            "Hints are advisory — if nothing matches, the host silently falls back to the user's `image_gen` preference → auto-detect → default. No error is raised.",
+            "The actually-used model is always reported in the response `model` field — read it instead of assuming the hint won.",
+            "Omit unless you have a strong reason; user-level preferences are usually the right answer."
+          ]
+        },
+        {
+          "name": "metadata",
+          "type": "dict | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Opaque audit metadata. **Always inject `{\"executa_invoke_id\": invoke_id}`** so billing rows correlate.",
+          "notes": [
+            "Echoed into the LLM usage log; never affects routing or pricing.",
+            "Do NOT put PII or credentials here — usage rows are visible to the user in Anna Admin."
+          ]
+        },
+        {
+          "name": "quality",
+          "type": "str | None",
+          "default": "None (model default, typically \"high\")",
+          "required": false,
+          "desc": "",
+          "summary": "`\"low\" | \"medium\" | \"high\"` — rendering-quality tier for GPT-Image-family models. Strongly drives per-image cost (GPT Image 2 @1024²: low $0.006 / medium $0.053 / high $0.211); the billed quota follows the actually-requested tier.",
+          "notes": [
+            "Validated by the Nexus gate (`parse_image_options`) — any other value → `IMAGE_ERR_INVALID_REQUEST` (`-32104`).",
+            "Models without a quality knob (Nano Banana, Seedream, Qwen, Doubao) silently ignore it; no surcharge is billed."
+          ]
+        },
+        {
+          "name": "resolution",
+          "type": "str | None",
+          "default": "None (auto-derived from `size`)",
+          "required": false,
+          "desc": "",
+          "summary": "`\"0.5K\" | \"1K\" | \"2K\" | \"4K\"` — native output tier for Nano-Banana-family models, billed at 0.75× / 1× / 1.5× / 2× the base per-image rate.",
+          "notes": [
+            "When omitted the gate derives the tier from `size` (max edge ≤512 → 0.5K, ≤1440 → 1K, ≤2880 → 2K, else 4K).",
+            "Invalid value → `IMAGE_ERR_INVALID_REQUEST` (`-32104`); non-Nano-Banana models ignore the option."
+          ]
+        },
+        {
+          "name": "output_format",
+          "type": "str | None",
+          "default": "None (png)",
+          "required": false,
+          "desc": "",
+          "summary": "`\"png\" | \"jpeg\" | \"webp\"` — encoded output format for fal-hosted models. Falls back to png when the routed model does not support the format. No billing impact.",
+          "notes": []
+        },
+        {
+          "name": "enable_web_search",
+          "type": "bool | None",
+          "default": "None (off)",
+          "required": false,
+          "desc": "",
+          "summary": "Ground the generation in live web results (Nano Banana 2 only). Adds a small per-call surcharge (currently $0.015) that is folded into the billed quota.",
+          "notes": [
+            "Ignored — and NOT surcharged — on models without `supports_web_search`.",
+            "Non-boolean → `IMAGE_ERR_INVALID_REQUEST` (`-32104`)."
+          ]
+        },
+        {
+          "name": "thinking_level",
+          "type": "str | None",
+          "default": "None (provider default)",
+          "required": false,
+          "desc": "",
+          "summary": "`\"minimal\" | \"high\"` — reasoning depth before rendering (Nano Banana 2). `high` improves compositional planning and adds a small surcharge (currently $0.002).",
+          "notes": [
+            "Invalid value → `IMAGE_ERR_INVALID_REQUEST` (`-32104`)."
+          ]
+        },
+        {
+          "name": "timeout",
+          "type": "float",
+          "default": "120.0",
+          "required": false,
+          "desc": "",
+          "summary": "SDK-side per-call deadline in seconds (default 120 s; `ImageClient.DEFAULT_TIMEOUT`).",
+          "notes": [
+            "The SDK does **not** forward `timeout` to the Agent automatically. To make the host honour the same deadline, the SDK passes `params._clientTimeoutS` (the matrix Agent reads it via `_resolve_image_timeout` and strips it before calling Nexus).",
+            "Agent default if `_clientTimeoutS` is absent: `IMAGE_DEFAULT_REQUEST_TIMEOUT_S = 180 s`. Channel-level hard cap: `IMAGE_MAX_REQUEST_TIMEOUT_S = 240 s` — any larger value is clamped down.",
+            "Local SDK timeout raises `ImageError(IMAGE_ERR_TIMEOUT, -32105)` from `asyncio.wait_for`. An upstream timeout (matrix Agent → Nexus → provider) surfaces as `ImageError(IMAGE_ERR_PROVIDER_ERROR, -32103)` with `data.subcall == \"image\"` and `data.timeout_s` set — match on `data.subcall` to differentiate provider 5xx from upstream timeout.",
+            "Cold-start providers (DALL·E 3, FLUX) routinely take 30–60 s. Do not set `timeout < 60 s`."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "Verbatim response body from `executa_image_gate._build_response` — every field is always present:\n• `images: list[dict]` — one entry per generated image. Each entry has `url: str` (HTTPS, host-stored; **expires in ~30 min**), `r2_key: str` (opaque storage key for repeat presigns), `mime_type: str` (`\"image/png\"` / `\"image/jpeg\"`), `width: int`, `height: int`, `expires_in: int` (seconds until `url` 403s).\n• `model: str` — actual model used (may differ from your hint).\n• `usage: dict` — `{imageCount, inputTokens, outputTokens, totalTokens}`; image-only providers return zeros for token counts.\n• `_meta: dict` — `{provider, latencyMs, quotaConsumed}` for debugging; do not log to user.\n\nNo bytes are returned over the wire — your plugin must `GET url` (or hand the URL back to the user) before it expires."
+      },
+      "errors": [
+        {
+          "name": "IMAGE_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Plugin's manifest does not declare `host_capabilities: [\"llm.image\"]`, OR token's `allow_generate == false`, OR the matrix Agent did not mint an `image_token` for this invoke (host did not negotiate). Wire name: `IMAGE_NOT_GRANTED` (both sides agree). SDK constant: `IMAGE_ERR_NOT_GRANTED`."
+        },
+        {
+          "name": "IMAGE_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User's plan-level LLM quota exhausted (`check_quota_available` in the Nexus host). Wire name from Nexus: `IMAGE_QUOTA_EXCEEDED`. SDK constant: `IMAGE_ERR_QUOTA_EXCEEDED`. The SDK error_name string `QUOTA_EXCEEDED` (no `IMAGE_` prefix) is only used when the matrix Agent itself synthesises the error."
+        },
+        {
+          "name": "IMAGE_PROVIDER_ERROR",
+          "code": -32103,
+          "desc": "Upstream provider 5xx / model error / safety rejection / network failure. **Also the wire shape for upstream timeouts** (matrix Agent's httpx timeout) — in that case `error_name == \"subcall_timeout\"` and `data == {\"subcall\": \"image\", \"timeout_s\": <float>}`. SDK constant: `IMAGE_ERR_PROVIDER_ERROR`."
+        },
+        {
+          "name": "IMAGE_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Empty prompt, non-positive `n`, malformed `size` (missing `'x'`), bad `reference_image_urls`, OR `executa_tool_id`/`tool_invoke_id` body field doesn't match the token claim. SDK constant: `IMAGE_ERR_INVALID_REQUEST`."
+        },
+        {
+          "name": "IMAGE_TIMEOUT",
+          "code": -32105,
+          "desc": "Raised by the **SDK** when `asyncio.wait_for(future, timeout)` fires. Never sent over the wire by the host — Nexus surfaces upstream timeouts as `IMAGE_PROVIDER_ERROR` (-32103) with `data.subcall == \"image\"`. SDK constant: `IMAGE_ERR_TIMEOUT`."
+        },
+        {
+          "name": "IMAGE_MAX_IMAGES_EXCEEDED",
+          "code": -32106,
+          "desc": "Either (a) matrix Agent local check: `n > _MAX_N (8)` with `data.hostCap = 8`; or (b) Nexus invoke-rolling counter exceeded with `data == {\"images\": <int>, \"maxImages\": <int>}`. SDK constant: `IMAGE_ERR_MAX_IMAGES_EXCEEDED`."
+        },
+        {
+          "name": "IMAGE_PER_CALL_EXCEEDED",
+          "code": -32107,
+          "desc": "⚠ **Code -32107 is one of three known matrix↔nexus divergences.** Nexus gate sends this when `n > image_token.max_per_call_generate`. The matrix SDK header file (`anna-executa-examples/sdk/python/executa_sdk/image.py`) and the Anna Agent runtime instead define `IMAGE_ERR_NOT_NEGOTIATED = -32107`. **Match on `error_name` string (in `error.data.errorCode`), not on the numeric code.** The matrix-side `IMAGE_ERR_NOT_NEGOTIATED` is only raised inside the matrix Agent (e.g. when `ctx['invoke_id']` is missing) and never reaches the plugin via a successful HTTP round-trip."
+        },
+        {
+          "name": "IMAGE_NOT_NEGOTIATED",
+          "code": -32108,
+          "desc": "⚠ **Divergence.** Wire (from Nexus): -32108 = `IMAGE_NOT_NEGOTIATED` — emitted when v2 capability handshake / token mint preconditions fail. SDK constant `IMAGE_ERR_USER_DENIED = -32108`. The matrix Agent never directly raises -32108; only Nexus does."
+        },
+        {
+          "name": "IMAGE_USER_DENIED",
+          "code": -32109,
+          "desc": "⚠ **Divergence.** Wire (from Nexus): -32109 = `IMAGE_USER_DENIED` — raised when `UserExecuta.custom_config.image_grant.enabled == false` (user toggled the grant off in Anna Admin). SDK constant `IMAGE_ERR_NO_MODEL_AVAILABLE = -32109` is **wrong** for wire-decoded errors. Always switch on `error_name`."
+        },
+        {
+          "name": "IMAGE_MODEL_UNAVAILABLE",
+          "code": -32110,
+          "desc": "⚠ **Divergence.** Wire (from Nexus): -32110 = `IMAGE_MODEL_UNAVAILABLE` — no enabled image provider on the user's plan, or no provider matches `model_hints`. SDK constant `IMAGE_ERR_STORAGE_ERROR = -32110` does NOT match wire reality."
+        },
+        {
+          "name": "IMAGE_EDIT_REFERENCE_INVALID",
+          "code": -32313,
+          "desc": "⚠ **Divergence.** Wire (from Nexus image gate): -32313 = `IMAGE_EDIT_REFERENCE_INVALID`, raised for both generate `reference_image_urls` and edit `image_url` URL-safety / unreachability failures. SDK constant `IMAGE_ERR_N_UNSUPPORTED = -32313`. Note many URL-safety rejections in the gate's `validate_image_url` path actually surface as `IMAGE_INVALID_REQUEST` (-32104) instead — depends on call site."
+        }
+      ],
+      "example": "# Inside an Executa plugin (executa_sdk).\nfrom executa_sdk import ImageClient, ImageError, IMAGE_ERR_NOT_GRANTED, IMAGE_ERR_QUOTA_EXCEEDED\n\nimage = ImageClient()                       # uses default stdout write_frame\n\nasync def make_poster(req_id: str, invoke_id: str, prompt: str) -> dict:\n    try:\n        result = await image.generate(\n            prompt=prompt,\n            n=2,\n            size=\"1024x1024\",\n            metadata={\"executa_invoke_id\": invoke_id},  # billing correlation — always include\n            timeout=120.0,\n        )\n    except ImageError as e:\n        if e.code == IMAGE_ERR_NOT_GRANTED:\n            return {\"success\": False, \"error\": \"user has not granted image generation\"}\n        if e.code == IMAGE_ERR_QUOTA_EXCEEDED:\n            return {\"success\": False, \"error\": \"image quota exhausted; ask the user to upgrade\"}\n        raise\n\n    # Each url is a transient host-stored HTTPS URL (~30 min TTL).\n    # Persist via `host/uploadFile` if you need it long-term.\n    urls = [img[\"url\"] for img in result[\"images\"]]\n    return {\"success\": True, \"data\": {\"images\": urls, \"model\": result[\"model\"]}}\n",
+      "limitations": [
+        "**Returned URLs expire in ~30 min** (`R2_TRANSIENT_PRESIGN_EXPIRY = 1800`). The exact remaining seconds are reported in `images[i].expires_in`. Do not cache `url` in user-visible state without re-presigning. For durable storage, GET the bytes within the TTL and round-trip through `host/uploadFile` or `files/upload_begin`.",
+        "**Three different error codes guard `n`** — do not lump them together: `n > 8` (host hard cap) → `IMAGE_MAX_IMAGES_EXCEEDED` (-32106) with `data.hostCap`; `n > image_token.max_per_call_generate` → `IMAGE_PER_CALL_EXCEEDED` (-32107); cumulative invoke total exceeds `image_token.max_images` → `IMAGE_MAX_IMAGES_EXCEEDED` (-32106) with `data.images`/`data.maxImages`. Tell the user which one tripped — UX language differs.",
+        "**No streaming.** Generation is fully buffered — your `invoke` blocks until the provider returns or `timeout` fires. Set `timeout ≥ 60 s` and tell the LLM how long to wait if user-facing.",
+        "**SDK-local timeout vs upstream timeout look different on the wire**: `IMAGE_TIMEOUT` (-32105) only fires inside the SDK's `asyncio.wait_for`. An upstream timeout becomes `IMAGE_PROVIDER_ERROR` (-32103) with `error_name == \"subcall_timeout\"` and `data.subcall == \"image\"`. Match on those, not on numeric code, for retry/fallback logic.",
+        "**Manifest must declare `host_capabilities: [\"llm.image\"]`** — if absent, Nexus's `_manifest_declares_capability` check fails before any provider call → `IMAGE_NOT_GRANTED` (-32101) with message mentioning the missing capability string.",
+        "**User grant lives at `UserExecuta.custom_config.image_grant.enabled` (boolean)**, NOT `image_grant.generate`. When `enabled == false`, the gate raises `IMAGE_USER_DENIED` (-32109). Distinct from `IMAGE_NOT_GRANTED` (-32101 = manifest / token problem), even though both visually mean 'no permission'.",
+        "**Matrix↔Nexus error-code divergence at -32107 / -32108 / -32109 / -32110 / -32313 / -32314 is a real bug-class trap.** The SDK constants `IMAGE_ERR_NOT_NEGOTIATED`, `IMAGE_ERR_USER_DENIED`, `IMAGE_ERR_NO_MODEL_AVAILABLE`, `IMAGE_ERR_STORAGE_ERROR`, `IMAGE_ERR_N_UNSUPPORTED`, `IMAGE_ERR_REFERENCE_FETCH_FAILED` have **the wrong numeric values for the wire**. Always: `if e.data.get(\"errorCode\") == \"IMAGE_USER_DENIED\":` — do NOT use `if e.code == IMAGE_ERR_USER_DENIED:`.",
+        "**Provider safety filters can refuse** — surfaces as `IMAGE_PROVIDER_ERROR` (-32103), NOT `IMAGE_INVALID_REQUEST`. Inspect `error.message` to triage; do not retry the same prompt verbatim.",
+        "**`reference_image_urls` cost bandwidth** — each URL is one inbound host fetch billed against the user's monthly quota. Cap at ≤ 3 in practice.",
+        "**Host implementation note (informational, not part of the plugin contract).** The reverse-RPC frame stops at the Agent; what happens next is invisible to the plugin but useful to understand when debugging:\n• The Agent mints a short-lived JWT (audience `executa-image`, TTL **600 s** = `DEFAULT_IMAGE_TTL_SECONDS`) carrying `user_id`, `executa_tool_id`, `tool_invoke_id`, `allow_generate`, `allow_edit`, `max_per_call_generate`, `max_per_call_edit`, `max_images`, `model_hints`.\n• `MatrixCopilotClient.image_create_generate` **injects `executa_tool_id` and `tool_invoke_id` into the JSON body** before POSTing to `/api/v1/copilot/image/generate`. You do NOT send these fields from the plugin — the SDK signature has no slot for them and including them in `metadata` is ignored. Nexus rejects with `IMAGE_INVALID_REQUEST` (-32104) if the body fields disagree with the token claims.\n• On the wire to Nexus the param `model_preferences` is **renamed to `modelPreferences`** (camelCase). This only matters if you inspect packet captures; the SDK call stays snake_case."
+      ]
+    },
+    {
+      "slug": "image-edit",
+      "name": "image/edit",
+      "kind": "Reverse RPC method · Image",
+      "group": "Image · LLM image generation",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST → Image provider",
+      "summary": "Mutate an existing image according to a text prompt — full-image restyle, or masked region inpainting if the provider supports it. Same auth/billing/storage envelope as `image/generate`; the only differences are an `image_url` input and optional `mask_url`.",
+      "wire": {
+        "json_rpc_method": "image/edit",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 180,
+        "max_timeout_s": 240,
+        "max_frame_bytes": null
+      },
+      "signature": "edit(*, image_url: str, prompt: str, mask_url: str | None = None, n: int = 1, size: str | None = None, model_preferences: dict | None = None, metadata: dict | None = None, quality: str | None = None, resolution: str | None = None, output_format: str | None = None, timeout: float = 120.0) -> dict",
+      "params": [
+        {
+          "name": "image_url",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "HTTPS URL of the source image to mutate.",
+          "notes": [
+            "Empty or non-string → `IMAGE_ERR_INVALID_REQUEST` (`-32104`).",
+            "Passes `validate_image_url` server-side (HTTPS only, host allowlist, anti-SSRF, max-size). Failure → `IMAGE_ERR_REFERENCE_FETCH_FAILED` (`-32314`).",
+            "Typical sources: a previous `image/generate` result url (refresh first if it's near its 30-min TTL), or a URL you obtained via `host/uploadFile`. Public CDN URLs work only if the host's allowlist covers them."
+          ]
+        },
+        {
+          "name": "prompt",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Edit instruction, e.g. `\"Restyle in cyberpunk neon\"` or `\"Add a halo above the cat's head\"`.",
+          "notes": [
+            "Validated like `image/generate.prompt` — empty rejected.",
+            "Provider-dependent: DALL·E 3 cannot do region edits without a mask; SDXL inpainting respects mask boundaries strictly; FLUX dev/Kontext takes natural-language transforms."
+          ]
+        },
+        {
+          "name": "mask_url",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Optional 1-channel PNG mask URL (white = edit, black = preserve). Must match `image_url` dimensions exactly.",
+          "notes": [
+            "Requires a mask-capable routed model: Doubao Seedream (volcengine) or a fal model whose config declares `supports_mask_editing` (GPT Image 2 — the gate forwards it as fal `mask_image_url`).",
+            "If the routed model does not support masking, the host returns `MASK_UNSUPPORTED` (`-32312`, gate code) — do not retry with a different mask, retry without one.",
+            "Dimension/format mismatches surface as `IMAGE_ERR_INVALID_REQUEST` from the provider, mapped to `PROVIDER_ERROR` (`-32103`)."
+          ]
+        },
+        {
+          "name": "n",
+          "type": "int",
+          "default": "1",
+          "required": false,
+          "desc": "",
+          "summary": "Number of edited variants to return (1 .. 8).",
+          "notes": [
+            "Capped at `_MAX_N = 8` like `generate`; per-call cap is `image_token.max_per_call_edit` (**default 1**, lower than generate). Exceeding either → `IMAGE_ERR_MAX_IMAGES_EXCEEDED` (`-32106`).",
+            "Some providers reject `n > 1` for edits — surfaces as `N_UNSUPPORTED` (`-32313`)."
+          ]
+        },
+        {
+          "name": "size",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Output pixel dimensions; most providers ignore this for edit (output matches input).",
+          "notes": [
+            "Pass only when the provider documents it (rare). Otherwise omit."
+          ]
+        },
+        {
+          "name": "quality / resolution / output_format",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Same semantics and validation as on `image/generate` — quality tier (GPT-Image family, billed per tier), resolution tier (Nano-Banana family, 0.75×–2× rate), output format. Models that lack the knob ignore it without surcharge.",
+          "notes": [
+            "Invalid values → `IMAGE_ERR_INVALID_REQUEST` (`-32104`)."
+          ]
+        },
+        {
+          "name": "model_preferences",
+          "type": "dict | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Same MCP-style hint as `image/generate`; sent as `modelPreferences` on the wire. For edit the candidate set is models whose `model_types` include `image-editing` (plan-checked); a miss silently falls back to the user's `image_edit` preference.",
+          "notes": [
+            "Not all generate-capable models support edit — hints that only match `text-to-image` models are skipped, which usually just means the fallback route is taken."
+          ]
+        },
+        {
+          "name": "metadata",
+          "type": "dict | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Opaque audit metadata; always include `{\"executa_invoke_id\": invoke_id}`.",
+          "notes": []
+        },
+        {
+          "name": "timeout",
+          "type": "float",
+          "default": "120.0",
+          "required": false,
+          "desc": "",
+          "summary": "SDK-side per-call deadline; injected as `_clientTimeoutS`. Same channel cap (240s) as `generate`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "Same envelope as `image/generate` — `{images: [...], model, usage, _meta}`. Each `images[i]` carries `url`, `r2_key`, `mime_type`, `width`, `height`, `expires_in`. The host stores edited bytes as **new objects** (the source `image_url` is not mutated)."
+      },
+      "errors": [
+        {
+          "name": "IMAGE_NOT_GRANTED",
+          "code": -32101,
+          "desc": "User has not granted `image_grant.edit = true` for this Executa."
+        },
+        {
+          "name": "QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User plan quota exhausted."
+        },
+        {
+          "name": "PROVIDER_ERROR",
+          "code": -32103,
+          "desc": "Upstream provider error / timeout (`data.subcall = \"image\"`) / safety refusal."
+        },
+        {
+          "name": "INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Empty `image_url` or `prompt`, non-positive `n`, malformed mask."
+        },
+        {
+          "name": "TIMEOUT",
+          "code": -32105,
+          "desc": "SDK-local timeout."
+        },
+        {
+          "name": "MAX_IMAGES_EXCEEDED",
+          "code": -32106,
+          "desc": "`n` exceeds host or per-call cap, or per-invoke rolling counter exhausted."
+        },
+        {
+          "name": "NOT_NEGOTIATED",
+          "code": -32107,
+          "desc": "Missing `invoke_id`, no v2 handshake, or manifest lacks `host_capabilities: [\"llm.image.edit\"]`."
+        },
+        {
+          "name": "EDIT_NOT_SUPPORTED",
+          "code": -32311,
+          "desc": "Selected provider does not support `image/edit` at all."
+        },
+        {
+          "name": "MASK_UNSUPPORTED",
+          "code": -32312,
+          "desc": "Provider supports edit but not `mask_url`."
+        },
+        {
+          "name": "N_UNSUPPORTED",
+          "code": -32313,
+          "desc": "Provider supports edit but not `n > 1`."
+        },
+        {
+          "name": "REFERENCE_FETCH_FAILED",
+          "code": -32314,
+          "desc": "Failed to fetch `image_url` or `mask_url` (host-side URL safety / network)."
+        }
+      ],
+      "example": "# Restyle a previously-generated image in cyberpunk neon.\nfrom executa_sdk import ImageClient, ImageError, IMAGE_ERR_EDIT_NOT_SUPPORTED, IMAGE_ERR_MASK_UNSUPPORTED\n\nimage = ImageClient()\n\nasync def restyle(invoke_id: str, source_url: str) -> dict:\n    try:\n        result = await image.edit(\n            image_url=source_url,\n            prompt=\"Restyle in cyberpunk neon. Preserve composition.\",\n            n=1,\n            metadata={\"executa_invoke_id\": invoke_id},\n        )\n    except ImageError as e:\n        if e.code == IMAGE_ERR_EDIT_NOT_SUPPORTED:\n            # User's provider can't edit — fall back to a fresh generate.\n            return await image.generate(prompt=\"Cyberpunk neon poster\", n=1,\n                                       metadata={\"executa_invoke_id\": invoke_id})\n        if e.code == IMAGE_ERR_MASK_UNSUPPORTED:\n            raise   # caller passed a mask the provider can't honour\n        raise\n    return {\"images\": [img[\"url\"] for img in result[\"images\"]], \"model\": result[\"model\"]}\n",
+      "limitations": [
+        "**`allow_edit` is OFF by default** in the user's image grant (`DEFAULT_IMAGE_*` in `image_token.py`); users must explicitly opt in. First call without it → `IMAGE_NOT_GRANTED`.",
+        "**Per-call cap defaults to 1** (`max_per_call_edit`), vs `max_per_call_generate` default 4. Plan accordingly — most workflows are one-edit-at-a-time anyway.",
+        "**The source `image_url` is not mutated** — the host stores edited results as new R2 objects with new transient URLs. If you need to chain edits, feed each call's output URL into the next call (refresh URLs that are near their 30-min TTL).",
+        "**Provider capability matrix is heterogeneous** — handle `EDIT_NOT_SUPPORTED` / `MASK_UNSUPPORTED` / `N_UNSUPPORTED` distinctly. Falling back from a masked edit to a full-image edit is usually safe; from any edit to a fresh `generate` requires re-prompting.",
+        "**Inherits every limitation of `image/generate`** — URL TTL, no streaming, timeout semantics, manifest declaration."
+      ]
+    }
+  ]
+}

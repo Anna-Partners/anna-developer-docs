@@ -1,0 +1,156 @@
+{
+  "section_id": "executa-sampling",
+  "items": [
+    {
+      "slug": "sampling-createmessage",
+      "name": "sampling/createMessage",
+      "kind": "Reverse RPC method",
+      "group": "Sampling",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent",
+      "summary": "Ask the host to run an LLM completion. Returns the host result dict.",
+      "wire": {
+        "json_rpc_method": "sampling/createMessage",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 90,
+        "max_frame_bytes": null
+      },
+      "signature": "create_message(*, messages: List[dict], max_tokens: int, system_prompt: Optional[str] = None, temperature: Optional[float] = None, stop_sequences: Optional[List[str]] = None, model_preferences: Optional[dict] = None, include_context: str = 'none', metadata: Optional[dict] = None, timeout: float = 90.0) -> dict",
+      "params": [
+        {
+          "name": "messages",
+          "type": "List[dict]",
+          "default": null,
+          "required": true,
+          "desc": "MCP-shaped messages, e.g. ``[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"...\"}}]``",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "max_tokens",
+          "type": "int",
+          "default": null,
+          "required": true,
+          "desc": "Required; per-call cap (host enforces hard upper bound).",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "system_prompt",
+          "type": "Optional[str]",
+          "default": "None",
+          "required": false,
+          "desc": "Optional system message.",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "temperature",
+          "type": "Optional[float]",
+          "default": "None",
+          "required": false,
+          "desc": "Optional sampling temperature. Host substitutes ``0.7`` when ``None`` — it does **not** defer to the provider default.",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "stop_sequences",
+          "type": "Optional[List[str]]",
+          "default": "None",
+          "required": false,
+          "desc": "Optional stop strings.",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "model_preferences",
+          "type": "Optional[dict]",
+          "default": "None",
+          "required": false,
+          "desc": "MCP-style ``{\"hints\":[{\"name\":\"...\"}], \"costPriority\":0..1, \"speedPriority\":..., \"intelligencePriority\":...}``. Omit (None) to let the host fall back to the user's saved ``preferred_model``.",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "include_context",
+          "type": "str",
+          "default": "'none'",
+          "required": false,
+          "desc": "Reserved. Phase 1 requires ``\"none\"``; any other value is rejected with ``SAMPLING_ERR_INVALID_REQUEST``.",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "metadata",
+          "type": "Optional[dict]",
+          "default": "None",
+          "required": false,
+          "desc": "**Reserved / not yet consumed by host.** Forwarded on the wire but currently dropped by the Nexus gate (no audit, no logging, no propagation to token-usage records). Do not rely on it for tracing until host support lands.",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "timeout",
+          "type": "float",
+          "default": "90.0",
+          "required": false,
+          "desc": "Client-side wall-clock seconds before raising ``asyncio.TimeoutError``. Also propagated to the host on the wire as ``_clientTimeoutS`` so that matrix-agent (HTTP) and nexus-gate (ChatOpenAI ``timeout`` + ``asyncio.wait_for``) can cap their own deadlines inside this budget — preventing a \"ghost success\" where the host completes and bills after the client has already given up. Host clamps the derived model budget to ``[30s, 300s]``.",
+          "summary": "",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "MCP-shaped sampling result, e.g. `{role, content:{type:'text', text}, model, stopReason}`."
+      },
+      "errors": [
+        {
+          "name": "SAMPLING_ERR_USER_DENIED",
+          "code": -32009,
+          "desc": "User declined the consent prompt."
+        },
+        {
+          "name": "SAMPLING_ERR_NOT_NEGOTIATED",
+          "code": -32008,
+          "desc": "v2 handshake never advertised sampling capability."
+        },
+        {
+          "name": "SAMPLING_ERR_MAX_TOKENS_EXCEEDED",
+          "code": -32007,
+          "desc": "Per-invoke total token budget exceeded."
+        },
+        {
+          "name": "SAMPLING_ERR_MAX_CALLS_EXCEEDED",
+          "code": -32006,
+          "desc": "Per-invoke sampling call cap exceeded."
+        },
+        {
+          "name": "SAMPLING_ERR_TIMEOUT",
+          "code": -32005,
+          "desc": "Raised either client-side (SDK `timeout` elapsed before host replied) or server-side (nexus gate's model-call budget — derived from `_clientTimeoutS - 15s`, clamped to `[30s, 300s]` — exceeded). HTTP mapping: 504."
+        },
+        {
+          "name": "SAMPLING_ERR_INVALID_REQUEST",
+          "code": -32004,
+          "desc": "Malformed `params` (e.g. empty messages)."
+        },
+        {
+          "name": "SAMPLING_ERR_PROVIDER_ERROR",
+          "code": -32003,
+          "desc": "Upstream LLM provider returned an error."
+        },
+        {
+          "name": "SAMPLING_ERR_QUOTA_EXCEEDED",
+          "code": -32002,
+          "desc": "User's daily/monthly LLM quota exhausted."
+        },
+        {
+          "name": "SAMPLING_ERR_NOT_GRANTED",
+          "code": -32001,
+          "desc": "Host did not authorize sampling for this invoke."
+        }
+      ],
+      "example": "from executa_sdk.sampling import SamplingClient\n\nsampler = SamplingClient()\n\nreply = await sampler.create_message(\n    messages=[{\"role\": \"user\", \"content\": {\"type\": \"text\", \"text\": \"Hello\"}}],\n    max_tokens=256,\n    system_prompt=\"You are concise.\",\n    model_preferences={\"hints\": [{\"name\": \"claude-3-5-sonnet\"}]},\n    timeout=60.0,\n)\nprint(reply[\"content\"][\"text\"])"
+    }
+  ]
+}

@@ -1,0 +1,598 @@
+{
+  "section_id": "host-api-files",
+  "items": [
+    {
+      "slug": "files-upload-init",
+      "name": "files.upload_init",
+      "kind": "Host API method · iframe surface",
+      "group": "Files",
+      "since": "Introduced anna-app-runtime v0.5.0 / dispatcher 0.7.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → APS → R2 presign",
+      "summary": "Phase 1 of a two-phase blob upload. Reserves a per-(user, App) `aps_entries` row (status `pending`), counts it against the user's byte quota, and returns a short-lived **R2 presigned PUT URL** the browser uses to stream the bytes directly to object storage — bypassing your server entirely. Pair every successful PUT with `files.upload_finalize`; orphaned `pending` rows expire after `ttl_seconds` and free the quota automatically.",
+      "wire": {
+        "json_rpc_method": "files.upload_init",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport: `POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, JSON-RPC envelope. See the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.files.upload_init(args: {path: string, content_type: string, size: number, ttl_seconds?: number, metadata?: object, tags?: string[], if_match?: string}, opts?: {timeoutMs?: number}) => Promise<{upload_id: string, put_url: string, headers: Record<string,string>, expires_at: string, r2_key: string}>",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "summary": "Logical path under the calling App's bucket. Subject to the same `validate_kv_key` rules as `storage.*` keys (≤ 1024 chars total, ≤ 128 per `/`-segment, no leading `/`, no `.` / `..` segments, no control / bidi / zero-width chars).",
+          "notes": [
+            "`HostRpcError(\"invalid_arg\", \"path required (string)\")` if missing / empty / non-string.",
+            "Re-uploading the same path produces a new row by default; pass `if_match` to enforce optimistic concurrency against an existing entry's `etag`."
+          ]
+        },
+        {
+          "name": "content_type",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "summary": "MIME type the browser will set in the PUT `Content-Type` header. Stored alongside the entry and returned by `download_url` / `list` so consumers can render without sniffing.",
+          "notes": [
+            "Must match the PUT exactly — R2 rejects the presigned request if the header differs from the signed value."
+          ]
+        },
+        {
+          "name": "size",
+          "type": "number (int)",
+          "default": null,
+          "required": true,
+          "summary": "Declared byte length. Reserved against the user's APS byte quota immediately; over-quota raises `quota_exceeded` *before* a presign URL is issued.",
+          "notes": [
+            "`invalid_arg` if missing or non-coercible to int.",
+            "The actual PUT body length is verified on `upload_finalize` via R2 `HEAD`; mismatch raises `precondition_failed` and the row stays `pending`."
+          ]
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "number (int)",
+          "default": "300",
+          "required": false,
+          "summary": "Presign URL lifetime AND the `pending` row's reclamation window. Orphaned rows (never finalized) are reaped after this many seconds and their quota reservation is released."
+        },
+        {
+          "name": "metadata",
+          "type": "object",
+          "default": null,
+          "required": false,
+          "summary": "Free-form JSON metadata stored on the row. Round-trips on `list`. No size limit beyond the row's total JSON budget."
+        },
+        {
+          "name": "tags",
+          "type": "string[]",
+          "default": null,
+          "required": false,
+          "summary": "Sortable / filterable tags. Round-trips on `list`. Useful for cheap server-side categorisation without a separate index."
+        },
+        {
+          "name": "if_match",
+          "type": "string (etag)",
+          "default": null,
+          "required": false,
+          "summary": "Optimistic-concurrency guard against an *existing* entry at the same path. Pass the prior `etag` you read via `download_url` / `list`; mismatch raises `precondition_failed`."
+        }
+      ],
+      "returns": [
+        {
+          "field": "upload_id",
+          "type": "string",
+          "summary": "Stable id of the `pending` row. Currently equals the APS entry UUID; treat as opaque."
+        },
+        {
+          "field": "put_url",
+          "type": "string (HTTPS URL)",
+          "summary": "Single-use R2 presigned PUT URL. Browser issues a direct `fetch(put_url, {method:'PUT', headers, body})` — no proxy through nexus."
+        },
+        {
+          "field": "headers",
+          "type": "Record<string,string>",
+          "summary": "Headers the browser MUST send with the PUT to match the signature (typically `Content-Type` and any object-lock / encryption headers R2 baked into the signature)."
+        },
+        {
+          "field": "expires_at",
+          "type": "string (ISO-8601)",
+          "summary": "Absolute deadline for the PUT and the pending-row reclamation."
+        },
+        {
+          "field": "r2_key",
+          "type": "string",
+          "summary": "Internal R2 object key chosen by the service (typically `app/<app_id>/<user_uuid>/<path>`). Opaque; not used by the bundle."
+        }
+      ],
+      "errors": [
+        {
+          "code": "invalid_arg",
+          "summary": "Missing / wrong-typed `path` / `content_type` / `size`."
+        },
+        {
+          "code": "invalid_path",
+          "summary": "Path fails `validate_kv_key` (segment length, illegal chars, leading `/`, etc.)."
+        },
+        {
+          "code": "permission_denied",
+          "summary": "`files.upload_init` is not listed in `manifest.ui.host_api.files` — that list is the ONLY ACL gate (`host_api_allows`). `manifest.permissions[]` is display/audit metadata and is never consulted by the dispatcher, and the default app-scoped files bucket needs no `host_capabilities` entry."
+        },
+        {
+          "code": "quota_exceeded",
+          "summary": "Reserving `size` would push the user past `aps_byte_quota` or `aps_entry_quota`. No presign URL issued."
+        },
+        {
+          "code": "precondition_failed",
+          "summary": "`if_match` did not match the existing entry's `etag`."
+        },
+        {
+          "code": "value_too_large",
+          "summary": "`size` exceeds the per-object hard cap (`APS_OBJECT_MAX_BYTES`)."
+        },
+        {
+          "code": "internal_error",
+          "summary": "R2 presign call failed or DB write failed."
+        }
+      ],
+      "example": "// Two-phase upload from the bundle\nconst file = fileInput.files[0];\nconst path = `images/${crypto.randomUUID()}.png`;\nconst init = await anna.files.upload_init({\n  path,\n  content_type: file.type,\n  size: file.size,\n  ttl_seconds: 600,\n  metadata: { source: 'paste' },\n  tags: ['user-upload']\n});\n// Browser streams bytes straight to R2 — server never sees them\nconst put = await fetch(init.put_url, {\n  method: 'PUT',\n  headers: init.headers,\n  body: file\n});\nif (!put.ok) throw new Error(`R2 PUT ${put.status}`);\nconst etag = put.headers.get('etag');\n// Reuse the SAME path from upload_init — finalize matches the pending row by (user, app, path).\nconst entry = await anna.files.upload_finalize({ path, etag, size: file.size });\nconsole.log('stored', entry.path, entry.etag);",
+      "limitations": [
+        "Apps cannot stream — body must be sent in a single PUT.",
+        "Presigned URL is single-use; refreshing requires a fresh `upload_init` call (and re-reserves quota).",
+        "`pending` rows reserve quota until `ttl_seconds` elapses; aggressive UI retries can transiently exhaust quota — surface `quota_exceeded` as a retry-after-delay error.",
+        "Availability: the iframe-facing `anna.files.*` surface is served by APS handlers that are only installed when the APS backend is wired. The local-dev CLI harness (`anna-app dev`) returns `not_implemented` for `files.*` unless run with APS forwarding — in that mode apps usually reach object storage indirectly through an Executa's `aps.files` capability instead.",
+        "Authoring caveat: the current `@anna-ai/app-schema` does not yet expose a `files` key under `ui.host_api`, so `anna-app validate` rejects manifests that declare `ui.host_api.files` directly. The Python runtime accepts it, but until the schema catches up most apps use `ui.host_api.tools` plus an Executa that performs the APS files reverse-RPC."
+      ]
+    },
+    {
+      "slug": "files-upload-finalize",
+      "name": "files.upload_finalize",
+      "kind": "Host API method · iframe surface",
+      "group": "Files",
+      "since": "Introduced anna-app-runtime v0.5.0 / dispatcher 0.7.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → APS (R2 HEAD verify + row flip)",
+      "summary": "Phase 2 of the upload. Verifies the PUT actually landed in R2 (`HEAD` for byte length / etag), flips the `pending` row to `active`, commits the quota reservation, and returns the canonical `etag` / `generation` you'll use for subsequent `if_match` writes.",
+      "wire": {
+        "json_rpc_method": "files.upload_finalize",
+        "auth": "Same envelope as `upload_init`.",
+        "streaming": false
+      },
+      "signature": "anna.files.upload_finalize(args: {path: string, etag?: string, size?: number, size_bytes?: number, metadata?: object}, opts?: {timeoutMs?: number}) => Promise<{path: string, etag: string, generation: number, size_bytes: number}>",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "summary": "Same logical path passed to `upload_init`. The service looks up the matching `pending` row by `(user, app, path)`."
+        },
+        {
+          "name": "etag",
+          "type": "string",
+          "required": false,
+          "summary": "R2-returned ETag from the PUT response. When provided, the service verifies it matches R2's `HEAD` reply; mismatch raises `precondition_failed`."
+        },
+        {
+          "name": "size",
+          "type": "number (int)",
+          "required": false,
+          "summary": "Alias for `size_bytes` (SDK accepts either). Cross-checked against the R2 `HEAD` content-length."
+        },
+        {
+          "name": "size_bytes",
+          "type": "number (int)",
+          "required": false,
+          "summary": "Declared byte length. Cross-checked against R2 `HEAD`."
+        },
+        {
+          "name": "metadata",
+          "type": "object",
+          "required": false,
+          "summary": "Optional metadata replacement; merges over what was set in `upload_init`."
+        }
+      ],
+      "returns": [
+        {
+          "field": "path",
+          "type": "string",
+          "summary": "Canonical path (echoes input)."
+        },
+        {
+          "field": "etag",
+          "type": "string",
+          "summary": "Stable APS etag (`W/\"<gen>-<digest>\"`) — feed into later `files.delete` / `files.upload_init` as `if_match`."
+        },
+        {
+          "field": "generation",
+          "type": "number (int)",
+          "summary": "Monotonic write counter for the row."
+        },
+        {
+          "field": "size_bytes",
+          "type": "number (int)",
+          "summary": "Authoritative byte length per R2 `HEAD`."
+        }
+      ],
+      "errors": [
+        {
+          "code": "invalid_arg",
+          "summary": "Missing `path`."
+        },
+        {
+          "code": "not_found",
+          "summary": "No `pending` row exists at `(user, app, path)` — either never called `upload_init` or it was already finalized / reaped."
+        },
+        {
+          "code": "precondition_failed",
+          "summary": "R2 `HEAD` returned a different etag / size than the client supplied (PUT body did not match the signed declaration)."
+        },
+        {
+          "code": "pending_upload",
+          "summary": "R2 `HEAD` returned 404 — bytes never arrived (PUT failed / abandoned)."
+        },
+        {
+          "code": "permission_denied",
+          "summary": "Same ACL gate as `upload_init`."
+        },
+        {
+          "code": "internal_error",
+          "summary": "R2 HEAD or DB commit failed."
+        }
+      ],
+      "example": "// continued from upload_init example\nconst entry = await anna.files.upload_finalize({\n  path: 'images/abc.png',\n  etag,            // from the R2 PUT response\n  size: file.size\n});\n// `entry.etag` is now stable — store it for future if_match writes\nawait anna.storage.set({ key: 'last_upload', value: { path: entry.path, etag: entry.etag } });",
+      "limitations": [
+        "Must be called after the PUT succeeds; calling without a successful PUT raises `pending_upload`.",
+        "Service identifies the row by `path`; you cannot rename mid-flight — the path passed here must match `upload_init`.",
+        "The `upload_id` returned by `upload_init` is NOT consumed here today (lookup is by `(user, app, path)`)."
+      ]
+    },
+    {
+      "slug": "files-download-url",
+      "name": "files.download_url",
+      "kind": "Host API method · iframe surface",
+      "group": "Files",
+      "since": "Introduced anna-app-runtime v0.5.0 / dispatcher 0.7.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → APS → R2 presign GET",
+      "summary": "Mint a short-lived R2 presigned GET URL for an `active` entry. Use this in `<img src>` / `<video src>` / `fetch()` to stream the bytes directly from object storage without proxying through nexus. Optional `disposition` controls the `Content-Disposition` header baked into the signature (e.g. force a download dialog).",
+      "wire": {
+        "json_rpc_method": "files.download_url",
+        "auth": "Same envelope as `upload_init`.",
+        "streaming": false
+      },
+      "signature": "anna.files.download_url(args: {path: string, ttl_seconds?: number, ttl?: number, disposition?: string}, opts?: {timeoutMs?: number}) => Promise<{get_url: string, expires_at: string, etag: string, size_bytes: number, content_type: string}>",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "summary": "Logical path of the existing entry."
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "number (int)",
+          "default": "300",
+          "required": false,
+          "summary": "URL lifetime in seconds. Clamped by `APS_PRESIGN_GET_TTL_MAX_S` server-side."
+        },
+        {
+          "name": "ttl",
+          "type": "number (int)",
+          "required": false,
+          "summary": "Backward-compatible alias for `ttl_seconds`."
+        },
+        {
+          "name": "disposition",
+          "type": "string",
+          "required": false,
+          "summary": "`Content-Disposition` value to bake into the signature, e.g. `attachment; filename=\"report.pdf\"` to force a download dialog instead of inline render."
+        }
+      ],
+      "returns": [
+        {
+          "field": "get_url",
+          "type": "string (HTTPS URL)",
+          "summary": "Presigned GET URL. Stream-safe; embed in `<img>` / `<video>` / `<a href>`."
+        },
+        {
+          "field": "expires_at",
+          "type": "string (ISO-8601)",
+          "summary": "Absolute deadline; after this the URL returns 403."
+        },
+        {
+          "field": "etag",
+          "type": "string",
+          "summary": "Current entry etag (use as `if_match` for subsequent `files.delete`)."
+        },
+        {
+          "field": "size_bytes",
+          "type": "number (int)",
+          "summary": "Authoritative byte length."
+        },
+        {
+          "field": "content_type",
+          "type": "string",
+          "summary": "Stored MIME type — handy for `Accept`-based UI branching."
+        }
+      ],
+      "errors": [
+        {
+          "code": "invalid_arg",
+          "summary": "Missing `path`."
+        },
+        {
+          "code": "not_found",
+          "summary": "No `active` row at `(user, app, path)` (never finalized / soft-deleted / TTL-expired)."
+        },
+        {
+          "code": "permission_denied",
+          "summary": "`files.download_url` is not listed in `manifest.ui.host_api.files` — that list is the ONLY ACL gate (`host_api_allows`). `manifest.permissions[]` is display/audit metadata and is never consulted by the dispatcher, and the default app-scoped files bucket needs no `host_capabilities` entry."
+        }
+      ],
+      "example": "const u = await anna.files.download_url({ path: 'images/abc.png', ttl_seconds: 900 });\nimg.src = u.get_url;\n// Force a download instead of inline render:\nconst dl = await anna.files.download_url({\n  path: 'reports/q3.pdf',\n  disposition: 'attachment; filename=\"q3.pdf\"'\n});\nlocation.href = dl.get_url;",
+      "limitations": [
+        "URL is single-resource; can't be used for range scans across the bucket.",
+        "Browser caches honour the presigned URL's host headers, not the entry etag — refresh by minting a new URL when content changes.",
+        "Cross-origin isolation gotcha: if your iframe is in COEP `require-corp` mode, R2 GETs need a `Cross-Origin-Resource-Policy` header — see the `iframe-coep-blocks-cross-origin-images` note.",
+        "Field name: the presigned URL is returned as `get_url` (NOT `url`). This differs from `image.generate` / `image.edit`, whose results use `images[].url`. The runtime SDK (`anna.files.download_url`) is a thin passthrough and returns `get_url` verbatim — do not expect a `url` alias."
+      ]
+    },
+    {
+      "slug": "files-download",
+      "name": "files.download",
+      "kind": "Host API method · iframe surface · host-mediated",
+      "group": "Files",
+      "since": "Introduced dispatcher 0.17.0 (forum #175)",
+      "direction": "Bundle (iframe) → Host RPC → APS → R2 presign GET → host page triggers top-level browser save",
+      "summary": "Host-mediated download for user-facing Save buttons. Same presign as `download_url`, but the `Content-Disposition` is ALWAYS forced to `attachment` and the presigned URL is consumed by the HOST PAGE, not your bundle: `anna-app-host-bridge.js` clicks a transient top-level `<a>` so the browser save dialog opens, then strips `get_url` before the result reaches the iframe. Use this instead of `download_url` + `<a download>` when the goal is saving a file — it works regardless of iframe sandbox tokens and the short-lived bearer URL never enters app-controlled DOM.",
+      "wire": {
+        "json_rpc_method": "files.download",
+        "auth": "Same envelope as `upload_init`.",
+        "streaming": false
+      },
+      "signature": "anna.files.download(args: {path: string, filename?: string, ttl_seconds?: number, scope?: string, owner?: string}, opts?: {timeoutMs?: number}) => Promise<{ok: true, filename: string, expires_at: string, etag: string, size_bytes: number, content_type: string}>",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "summary": "Logical path of the existing `active` entry."
+        },
+        {
+          "name": "filename",
+          "type": "string",
+          "required": false,
+          "summary": "Save-as filename shown in the browser dialog. Defaults to the last `path` segment. Baked into the presigned `Content-Disposition: attachment` header (ASCII fallback + RFC 5987 UTF-8 form, so non-ASCII names survive)."
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "number (int)",
+          "default": "300",
+          "required": false,
+          "summary": "Presign lifetime. The host consumes the URL immediately, so the default is almost always fine."
+        },
+        {
+          "name": "scope",
+          "type": "string",
+          "required": false,
+          "summary": "Same semantics as `files.download_url` / `files.list` — cross-app reads need `aps.scope.app.read`."
+        },
+        {
+          "name": "owner",
+          "type": "string",
+          "required": false,
+          "summary": "Owner app slug when reading another app's scope."
+        }
+      ],
+      "returns": [
+        {
+          "field": "ok",
+          "type": "boolean (true)",
+          "summary": "The host page accepted and triggered the save. NOTE: the iframe-visible result contains NO `get_url` — it is stripped by the host bridge by design."
+        },
+        {
+          "field": "filename",
+          "type": "string",
+          "summary": "Effective save-as filename (explicit arg or derived from `path`)."
+        },
+        {
+          "field": "expires_at",
+          "type": "string (ISO-8601)",
+          "summary": "Presign deadline (informational; the host already consumed the URL)."
+        },
+        {
+          "field": "etag",
+          "type": "string",
+          "summary": "Current entry etag."
+        },
+        {
+          "field": "size_bytes",
+          "type": "number (int)",
+          "summary": "Authoritative byte length."
+        },
+        {
+          "field": "content_type",
+          "type": "string",
+          "summary": "Stored MIME type."
+        }
+      ],
+      "errors": [
+        {
+          "code": "invalid_arg",
+          "summary": "Missing `path`, or non-string `filename`."
+        },
+        {
+          "code": "not_found",
+          "summary": "No `active` row at `(user, app, path)`."
+        },
+        {
+          "code": "permission_denied",
+          "summary": "`files.download` (or `\"*\"`) is not listed in `manifest.ui.host_api.files`."
+        }
+      ],
+      "example": "// Manifest: ui.host_api.files must include \"download\".\nconst r = await anna.files.download({\n  path: 'exports/q3-deck.pptx',\n  filename: 'Q3 業績報告.pptx'\n});\n// r = { ok: true, filename: 'Q3 業績報告.pptx', size_bytes: …, … }\n// The browser save dialog was opened by the HOST page; r.get_url does not exist.",
+      "limitations": [
+        "Direct in-iframe downloads (Blob URLs, `<a download>`) additionally require the iframe sandbox `allow-downloads` token — present on hosts ≥ 1.1.0-beta.97. `files.download` works on those hosts without relying on the token.",
+        "The download is triggered by a programmatic top-level anchor click; browsers may coalesce/deny rapid repeated downloads without fresh user gestures — call it from a click handler.",
+        "Only APS-stored entries are downloadable — this method never accepts raw external URLs (no open-redirect surface)."
+      ]
+    },
+    {
+      "slug": "files-list",
+      "name": "files.list",
+      "kind": "Host API method · iframe surface",
+      "group": "Files",
+      "since": "Introduced anna-app-runtime v0.5.0 / dispatcher 0.7.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → APS (Postgres)",
+      "summary": "Page through the calling App's file entries under an optional `prefix`. Returns metadata only — no bytes, no presigned URLs. Cursor-based; cursors are opaque and not stable across deploys.",
+      "wire": {
+        "json_rpc_method": "files.list",
+        "auth": "Same envelope as `upload_init`.",
+        "streaming": false
+      },
+      "signature": "anna.files.list(args: {prefix?: string, cursor?: string, limit?: number}, opts?: {timeoutMs?: number}) => Promise<{items: Array<{path: string, etag: string, size_bytes: number, content_type: string, metadata: object|null, tags: string[]|null, updated_at: string|null}>, next_cursor: string|null}>",
+      "params": [
+        {
+          "name": "prefix",
+          "type": "string",
+          "default": "''",
+          "required": false,
+          "summary": "Match entries whose `path` starts with this string. Empty / omitted lists the whole bucket."
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "required": false,
+          "summary": "Opaque pagination cursor from a prior call's `next_cursor`."
+        },
+        {
+          "name": "limit",
+          "type": "number (int)",
+          "default": "100",
+          "required": false,
+          "summary": "Max rows per page. Service clamps to `APS_LIST_LIMIT_MAX` (typically 1000)."
+        }
+      ],
+      "returns": [
+        {
+          "field": "items",
+          "type": "Array",
+          "summary": "Row metadata only. `value` is never included (use `download_url` to stream bytes)."
+        },
+        {
+          "field": "items[].path",
+          "type": "string",
+          "summary": "Logical path under the App bucket."
+        },
+        {
+          "field": "items[].etag",
+          "type": "string",
+          "summary": "Use as `if_match` for `files.delete`."
+        },
+        {
+          "field": "items[].size_bytes",
+          "type": "number (int)",
+          "summary": "Authoritative byte length."
+        },
+        {
+          "field": "items[].content_type",
+          "type": "string",
+          "summary": "Stored MIME type."
+        },
+        {
+          "field": "items[].metadata",
+          "type": "object | null",
+          "summary": "Whatever was passed at upload time."
+        },
+        {
+          "field": "items[].tags",
+          "type": "string[] | null",
+          "summary": "Whatever was passed at upload time."
+        },
+        {
+          "field": "items[].updated_at",
+          "type": "string (ISO-8601) | null",
+          "summary": "Last write timestamp (UTC)."
+        },
+        {
+          "field": "next_cursor",
+          "type": "string | null",
+          "summary": "`null` when the last page is reached."
+        }
+      ],
+      "errors": [
+        {
+          "code": "invalid_arg",
+          "summary": "`limit` not coercible to int."
+        },
+        {
+          "code": "permission_denied",
+          "summary": "`files.list` is not listed in `manifest.ui.host_api.files` — that list is the ONLY ACL gate (`host_api_allows`). `manifest.permissions[]` is display/audit metadata and is never consulted by the dispatcher, and the default app-scoped files bucket needs no `host_capabilities` entry."
+        }
+      ],
+      "example": "let cursor = null;\nconst all = [];\ndo {\n  const page = await anna.files.list({ prefix: 'images/', cursor, limit: 200 });\n  all.push(...page.items);\n  cursor = page.next_cursor;\n} while (cursor);\nconsole.log(`${all.length} images`);",
+      "limitations": [
+        "Soft-deleted and `pending` rows are excluded.",
+        "No sort options — results are returned in the service's deterministic order (typically `path` ascending).",
+        "Cursor is opaque and tied to a specific deploy / query plan; do NOT persist across reloads."
+      ]
+    },
+    {
+      "slug": "files-delete",
+      "name": "files.delete",
+      "kind": "Host API method · iframe surface",
+      "group": "Files",
+      "since": "Introduced anna-app-runtime v0.5.0 / dispatcher 0.7.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → APS (Postgres soft-delete; R2 reaped async)",
+      "summary": "Soft-delete an entry. The row is marked `deleted`, quota bytes are reclaimed immediately, and the underlying R2 object is hard-deleted asynchronously by the APS reaper. Supports `if_match` for safe concurrent-write scenarios.",
+      "wire": {
+        "json_rpc_method": "files.delete",
+        "auth": "Same envelope as `upload_init`.",
+        "streaming": false
+      },
+      "signature": "anna.files.delete(args: {path: string, if_match?: string}, opts?: {timeoutMs?: number}) => Promise<{deleted: true}>",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "summary": "Logical path of the entry to delete."
+        },
+        {
+          "name": "if_match",
+          "type": "string (etag)",
+          "required": false,
+          "summary": "Optimistic-concurrency guard. Pass the etag you last observed; mismatch raises `precondition_failed` so a concurrent re-upload isn't silently clobbered."
+        }
+      ],
+      "returns": [
+        {
+          "field": "deleted",
+          "type": "boolean (true)",
+          "summary": "Always `true` on success. The service never returns `false` — failures raise instead."
+        }
+      ],
+      "errors": [
+        {
+          "code": "invalid_arg",
+          "summary": "Missing `path`."
+        },
+        {
+          "code": "not_found",
+          "summary": "No active row at `(user, app, path)` — already deleted / never existed / TTL-expired."
+        },
+        {
+          "code": "precondition_failed",
+          "summary": "`if_match` did not match the current etag (someone else wrote first)."
+        },
+        {
+          "code": "permission_denied",
+          "summary": "`files.delete` is not listed in `manifest.ui.host_api.files` — that list is the ONLY ACL gate (`host_api_allows`). `manifest.permissions[]` is display/audit metadata and is never consulted by the dispatcher, and the default app-scoped files bucket needs no `host_capabilities` entry."
+        }
+      ],
+      "example": "// Safe delete: refuse if someone re-uploaded since we last looked\nconst page = await anna.files.list({ prefix: 'images/', limit: 1 });\nconst { path, etag } = page.items[0];\ntry {\n  await anna.files.delete({ path, if_match: etag });\n} catch (e) {\n  if (e.code === 'precondition_failed') {\n    // someone else rewrote it; reload and re-confirm with the user\n  } else {\n    throw e;\n  }\n}",
+      "limitations": [
+        "Soft-delete only from the App's perspective — the row stays in `aps_entries` until the reaper hard-deletes it.",
+        "Cannot un-delete from this API; the soft-deleted row is opaque to the iframe.",
+        "Pre-signed GET URLs minted before the delete may still resolve until R2 reaper runs (typically minutes)."
+      ]
+    }
+  ]
+}

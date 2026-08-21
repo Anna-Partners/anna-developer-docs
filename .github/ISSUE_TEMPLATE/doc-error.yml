@@ -1,0 +1,55 @@
+name: "Documentation error"
+description: "The docs say one thing, the platform does another."
+title: "[<section>/<slug>] "
+labels: ["doc-error"]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page URL
+      description: "The https://anna.partners/developers/... page (or /developers/reference/... section) containing the error."
+      placeholder: "https://anna.partners/developers/tools/executa-persistent-storage"
+    validations:
+      required: true
+  - type: textarea
+    id: docs-say
+    attributes:
+      label: What the docs say
+      description: "Quote the exact passage (copy/paste, don't paraphrase)."
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: "What actually happens — include the exact error message / wire response if there is one."
+    validations:
+      required: true
+  - type: input
+    id: runtime-version
+    attributes:
+      label: Runtime version
+      placeholder: "v1.1.0-beta.135"
+    validations:
+      required: true
+  - type: input
+    id: cli-version
+    attributes:
+      label: CLI version (`anna-app --version`)
+      placeholder: "0.1.49"
+  - type: dropdown
+    id: page-type
+    attributes:
+      label: Page type
+      options:
+        - "Docs article (Markdown — I could open a PR instead)"
+        - "Reference catalogue (structured data under reference-data/)"
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: >
+        **Prefer a PR?** Articles live under `docs/`, the reference catalogue
+        under `reference-data/` — every page has an "Edit this page" link.
+        Runtime *behavior* problems (not doc errors) belong on the
+        [forum](https://forum.anna.partners/) instead.

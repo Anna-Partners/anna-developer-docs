@@ -1,0 +1,12 @@
+# Every PR needs one maintainer approval — this is the production content
+# gate (design §3.3 / §4.3). Replace the placeholder owner with the
+# platform-docs team once the GitHub org is settled (open question §15.1).
+
+*                                   @whtcjdtc2007
+
+# Legal text: admin-only. Community ToS changes are not accepted (design §9.3).
+/docs/reference/developer-terms.md  @whtcjdtc2007
+
+# Structured reference: same review gate as articles; source-tagged sections
+# are additionally machine-checked by CI (reference-validate job).
+/reference-data/                    @whtcjdtc2007

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anna.partners/schemas/developer-reference/shard-1.json",
+  "title": "Anna Developer Reference detail shard (reference-*.json)",
+  "description": "Per-namespace rich detail items rendered under a catalogue section. Intentionally permissive on item fields (generator output evolves); structural keys are pinned. Private provenance keys (generator/sources) are stripped at migration and must not reappear.",
+  "type": "object",
+  "required": ["section_id", "items"],
+  "properties": {
+    "section_id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["slug", "name", "summary"],
+        "properties": {
+          "slug": { "type": "string", "pattern": "^[a-z0-9_-]+$" },
+          "name": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string" },
+          "group": { "type": "string" },
+          "since": { "type": "string" },
+          "direction": { "type": "string" },
+          "summary": { "type": "string" },
+          "wire": {},
+          "signature": { "type": "string" },
+          "params": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "type"],
+              "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string" },
+                "required": { "type": ["boolean", "string"] },
+                "summary": { "type": "string" },
+                "desc": { "type": "string" },
+                "default": {},
+                "notes": { "type": "array", "items": { "type": "string" } }
+              },
+              "additionalProperties": true
+            }
+          },
+          "returns": {},
+          "errors": {},
+          "example": {},
+          "limitations": {},
+          "params_schema": {},
+          "result_shape": {},
+          "billing": {},
+          "notes": {}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,168 @@
+{
+  "section_id": "host-api-chat",
+  "items": [
+    {
+      "slug": "chat-append-artifact",
+      "name": "chat.append_artifact",
+      "kind": "Host API method · iframe surface",
+      "group": "Chat",
+      "since": "Introduced anna-app-runtime v0.1 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → _h_chat_append_artifact (dispatcher) → store.emit_event",
+      "summary": "Attach a structured artifact to the conversation that hosts this App window. The handler normalises the caller's `artifact` object, stamps it with the server `ts` and `window_uuid`, and broadcasts an `artifact_appended` event over the window's event channel so the chat surface (and any other tab on the same session) can render it. This is the ONE fully-implemented chat method.",
+      "wire": {
+        "json_rpc_method": "chat.append_artifact",
+        "auth": "Handled by the host page — `X-Anna-App-Token` minted by `window.create`.",
+        "streaming": false
+      },
+      "signature": "anna.chat.append_artifact(args: {artifact: {kind?: string, app_slug?: string, summary?: string, payload_ref?: string, data?: unknown}}, opts?: {timeoutMs?: number}) => Promise<{artifact_id: string}>",
+      "params": [
+        {
+          "name": "artifact",
+          "type": "object",
+          "required": true,
+          "summary": "The artifact payload. `invalid_arg` if not an object. Every field below is optional; unknown fields are dropped (the handler only copies the five named keys)."
+        },
+        {
+          "name": "artifact.kind",
+          "type": "string",
+          "required": false,
+          "default": "\"app_event\"",
+          "summary": "Free-form category tag. Coerced to string and **truncated to 40 chars**. Defaults to `app_event`."
+        },
+        {
+          "name": "artifact.app_slug",
+          "type": "string",
+          "required": false,
+          "summary": "Optional app slug for attribution. Passed through verbatim (no validation)."
+        },
+        {
+          "name": "artifact.summary",
+          "type": "string",
+          "required": false,
+          "default": "\"\"",
+          "summary": "Human-readable one-liner. Coerced to string and **truncated to 1000 chars**."
+        },
+        {
+          "name": "artifact.payload_ref",
+          "type": "string",
+          "required": false,
+          "summary": "Optional reference (e.g. a `files.*` path or `storage` key) pointing at the full payload. Passed through verbatim."
+        },
+        {
+          "name": "artifact.data",
+          "type": "unknown",
+          "required": false,
+          "summary": "Optional inline structured data. Passed through as-is — keep it small; there is no server-side size clamp on this field, so prefer `payload_ref` for large blobs."
+        }
+      ],
+      "returns": {
+        "type": "{artifact_id: string}",
+        "desc": "`artifact_id` is generated server-side as `app-<window_uuid[:8]>-<unix_ts_seconds>`. It is NOT a durable database id — the artifact is delivered as a transient `artifact_appended` event (`{window_uuid, artifact}`), not persisted to a conversation table. Treat the id as a correlation handle for the emitted event, not a primary key you can re-fetch later."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`artifact` is present but not an object."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "`manifest.ui.host_api.chat` does not list `append_artifact` (or `*`). The dispatch ACL gate (`host_api_allows`) runs before the handler."
+        }
+      ],
+      "example": "// Surface a generated result back into the chat thread.\nconst { artifact_id } = await anna.chat.append_artifact({\n  artifact: {\n    kind: \"summary\",\n    summary: \"Generated a 3-paragraph recap of the uploaded PDF\",\n    payload_ref: savedKey,   // e.g. an anna.storage.set / anna.files key\n    data: { paragraphs: 3, words: 412 },\n  },\n});\nconsole.log(\"appended\", artifact_id); // app-1a2b3c4d-1730000000\n",
+      "limitations": [
+        "Transient delivery only — the artifact is emitted as an `artifact_appended` event, NOT written to a conversation/message table. A client that wasn't subscribed when the event fired will not see it on reload.",
+        "`kind` is truncated to 40 chars and `summary` to 1000 chars; over-long values are silently clipped (no error).",
+        "`artifact.data` has no server-side size clamp — for large payloads store the bytes via `files.*` / `storage.*` and pass a `payload_ref` instead of inlining.",
+        "ACL gate is `manifest.ui.host_api.chat` (must list `append_artifact` or `*`); `manifest.permissions[]` is display/audit only and is NEVER checked."
+      ]
+    },
+    {
+      "slug": "chat-write-message",
+      "name": "chat.write_message",
+      "kind": "Host API method · iframe surface",
+      "group": "Chat",
+      "since": "Introduced anna-app-runtime v0.1 · current v0.13.0 / dispatcher 0.17.0 · functional stub (Phase 3)",
+      "direction": "Bundle (iframe) → Host RPC → _h_chat_write_message (dispatcher) → store.emit_event",
+      "summary": "PHASE-3 FUNCTIONAL STUB. Post a message authored by the App into the live conversation. Today the handler ONLY emits a `chat_message_from_app` event ({window_uuid, role, content}) for any subscribed UI to render — it does NOT persist the message to a conversation/message table. The method IS registered (not `_h_not_implemented`), so it returns a `message_id` and does not raise, but durable thread persistence is not yet wired.",
+      "wire": {
+        "json_rpc_method": "chat.write_message",
+        "auth": "Handled by the host page — `X-Anna-App-Token` minted by `window.create`.",
+        "streaming": false
+      },
+      "signature": "anna.chat.write_message(args: {role?: string, content: string}, opts?: {timeoutMs?: number}) => Promise<{message_id: string}>",
+      "params": [
+        {
+          "name": "role",
+          "type": "string",
+          "required": false,
+          "default": "\"assistant\"",
+          "summary": "Author role for the emitted message. Passed through verbatim (no enum validation); defaults to `assistant`."
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": false,
+          "default": "\"\"",
+          "summary": "Message text. Coerced to string and **truncated to 4000 chars**. An omitted/empty value emits an empty message rather than erroring."
+        }
+      ],
+      "returns": {
+        "type": "{message_id: string}",
+        "desc": "`message_id` is generated server-side as `msg-<unix_ms>` (milliseconds). Like `append_artifact`, this is a correlation handle for the emitted `chat_message_from_app` event, NOT a durable database id you can re-fetch."
+      },
+      "errors": [
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "`manifest.ui.host_api.chat` does not list `write_message` (or `*`). The dispatch ACL gate runs before the handler."
+        }
+      ],
+      "example": "// Emit an assistant-authored line. NOTE: not persisted yet (Phase 3).\nconst { message_id } = await anna.chat.write_message({\n  role: \"assistant\",\n  content: \"Done — I exported your report to the Files panel.\",\n});\n// message_id === \"msg-1730000000123\"; the host broadcasts a\n// `chat_message_from_app` event for the chat UI to render in-session.\n",
+      "limitations": [
+        "FUNCTIONAL STUB (Phase 3): emits a `chat_message_from_app` event but does NOT persist the message. It will not survive a reload and is not part of `chat.read_history` (which is itself unimplemented).",
+        "`content` is truncated to 4000 chars; `role` is unvalidated.",
+        "ACL gate is `manifest.ui.host_api.chat` (must list `write_message` or `*`); `manifest.permissions[]` is never checked."
+      ]
+    },
+    {
+      "slug": "chat-read-history",
+      "name": "chat.read_history",
+      "kind": "Host API method · iframe surface",
+      "group": "Chat",
+      "since": "Declared in dispatch table · current v0.13.0 / dispatcher 0.17.0 · NOT yet implemented (Phase 3)",
+      "direction": "Bundle (iframe) → Host RPC → _h_chat_read_history (raises not_implemented)",
+      "summary": "PHASE-3 STUB — NOT yet implemented. The method is registered in the dispatch table (so the namespace/method name is reserved and ACL-gated), but the handler unconditionally raises `not_implemented`. Do not call it in production flows; there is currently no way to read prior conversation turns from an App bundle.",
+      "wire": {
+        "json_rpc_method": "chat.read_history",
+        "auth": "Handled by the host page — `X-Anna-App-Token` minted by `window.create`.",
+        "streaming": false
+      },
+      "signature": "anna.chat.read_history(args?: object, opts?: {timeoutMs?: number}) => Promise<never>  // always rejects with not_implemented",
+      "params": [],
+      "returns": {
+        "type": "never",
+        "desc": "Never resolves — the handler raises `HostRpcError(\"not_implemented\", \"chat.read_history is Phase 3\")` before reading any argument. The eventual shape (paginated prior turns scoped to the App's installation) is not yet contracted."
+      },
+      "errors": [
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Always raised — `chat.read_history is Phase 3`."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "`manifest.ui.host_api.chat` does not list `read_history` (or `*`). The ACL gate still runs before the (unimplemented) handler."
+        }
+      ],
+      "example": "// NOT YET IMPLEMENTED — this will reject.\ntry {\n  await anna.chat.read_history();\n} catch (err) {\n  // err.code === \"not_implemented\"  (\"chat.read_history is Phase 3\")\n}\n",
+      "limitations": [
+        "NOT IMPLEMENTED: always raises `not_implemented`. There is no supported way to read conversation history from an App today.",
+        "Even though the method is reserved + ACL-gated, granting it in `manifest.ui.host_api.chat` does nothing useful until the Phase-3 implementation lands."
+      ]
+    }
+  ]
+}

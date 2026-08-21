@@ -1,0 +1,632 @@
+{
+  "section_id": "executa-agent-sessions",
+  "items": [
+    {
+      "slug": "agent-session-create",
+      "name": "agent/session.create",
+      "kind": "Reverse RPC method · Agent",
+      "group": "Agent sessions",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Anna agent → Anna server /copilot/app/*",
+      "summary": "Open a stateful, tool-using agent session bound to the calling user. Validates `agent_submode` ∈ {auto, fixed}; `fixed_client_id` is required when `agent_submode='fixed'`. For one-shot completion use `agent/complete` instead. Identity (`user_id`, `executa_id`) is derived from the sampling_token claims — the plugin cannot override it.",
+      "wire": {
+        "json_rpc_method": "agent/session.create",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "ctx_required": [
+          "sampling_token"
+        ],
+        "buffered_streaming": false
+      },
+      "signature": "session_create(*, agent_submode: Literal['auto','fixed'] = 'auto', fixed_client_id: str | None = None, label: str | None = None, quota_caps: dict | None = None, ttl_seconds: int = 600) -> dict",
+      "params": [
+        {
+          "name": "agent_submode",
+          "type": "Literal['auto','fixed']",
+          "default": "'auto'",
+          "required": false,
+          "desc": "",
+          "summary": "Multi-turn agent mode. `auto` rotates `client_id` per turn; `fixed` pins one.",
+          "notes": [
+            "`auto` is the recommended default for most plugins.",
+            "`fixed` additionally requires `fixed_client_id` AND a matching entry in `llm_grant.agent.allowed_fixed_client_ids`, otherwise Anna server returns `AGENT_ERR_NOT_GRANTED` (-32041)."
+          ]
+        },
+        {
+          "name": "fixed_client_id",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Pin one `client_id` for the whole session.",
+          "notes": [
+            "Only meaningful when `agent_submode='fixed'`.",
+            "Under `submode='auto'` it is silently stored on the session row but has no runtime effect.",
+            "Must appear in `llm_grant.agent.allowed_fixed_client_ids` or the call is rejected."
+          ]
+        },
+        {
+          "name": "label",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Human-readable label shown in the user's session console.",
+          "notes": [
+            "Max 120 chars; longer values are rejected at the Anna server pydantic boundary (HTTP 422).",
+            "When omitted, Anna agent substitutes the plugin display name from `ctx.plugin_name`."
+          ]
+        },
+        {
+          "name": "quota_caps",
+          "type": "dict | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Per-session quota / tool-scope override.",
+          "notes": [
+            "**Default when omitted**: Anna server injects `inherit_host_tools=True`, so the agent session inherits the host Copilot's full tool kit (`granted_tools` returns `['*']`).",
+            "To restrict tools, pass an explicit dict, e.g. `{\"inherit_host_tools\": False, \"allowed_tools\": [\"tool_a\", \"tool_b\"]}`.",
+            "Anna server intersects the result with the user's grant and may clamp further; the effective value is reflected back in `granted_tools` on the response."
+          ]
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "int",
+          "default": "600",
+          "required": false,
+          "desc": "",
+          "summary": "Session-token lifetime in seconds; Anna agent caches the bearer for this duration.",
+          "notes": [
+            "Bounded by `0 < ttl_seconds ≤ MAX_APP_SESSION_TTL_SECONDS` (7200).",
+            "Anna server pydantic rejects out-of-range with HTTP 422; bridge has no local validation, so the failure surfaces as `AGENT_ERR_PROVIDER_ERROR` (-32046) (the generic `Exception` arm in `_session_create`), **not** `AGENT_ERR_INVALID_REQUEST`."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "`{app_session_uuid, expires_in, thread_id, agent_submode, fixed_client_id, granted_tools, executa_id}` — the bearer `token` is stripped by Anna agent before returning; the handler keeps it in-memory and reuses it for subsequent `session.run` / `session.cancel` / `session.history` calls on the same `app_session_uuid`."
+      },
+      "errors": [
+        {
+          "name": "AGENT_NOT_GRANTED",
+          "code": -32041,
+          "desc": "`sampling_token` missing from handler `ctx` — host did not authorize agent reverse-RPC for this plugin. SDK constant: `AGENT_ERR_NOT_GRANTED`. Wire `error.data.errorCode` keeps the `AGENT_` prefix (unique to -32041 in this namespace)."
+        },
+        {
+          "name": "INVALID_REQUEST",
+          "code": -32043,
+          "desc": "`_validate_create` rejected the params (e.g. `agent_submode='fixed'` without `fixed_client_id`, non-string `label`, etc.). SDK constant: `AGENT_ERR_INVALID_REQUEST`."
+        },
+        {
+          "name": "SUBMODE_MISMATCH",
+          "code": -32044,
+          "desc": "Propagated verbatim from Anna server `/copilot/app/sessions` when `agent_submode` or `fixed_client_id` diverges from the user grant (e.g. `fixed` requested but the grant only allows `auto`, or `fixed_client_id` not in `llm_grant.agent.allowed_fixed_client_ids`). Bridge does not re-shape; SDK constant: `AGENT_ERR_SUBMODE_MISMATCH`."
+        },
+        {
+          "name": "QUOTA_EXCEEDED",
+          "code": -32045,
+          "desc": "User plan-level LLM/agent quota exhausted at session mint time. Propagated verbatim from upstream `_ServerRpcError`. SDK constant: `AGENT_ERR_QUOTA_EXCEEDED`."
+        },
+        {
+          "name": "PROVIDER_ERROR",
+          "code": -32046,
+          "desc": "Catch-all for upstream session-mint failures: HTTP 422 (out-of-range `ttl_seconds`, malformed `label > 120`), HTTP 5xx, transport failures, or malformed response missing `app_session_uuid`/`token`. SDK constant: `AGENT_ERR_PROVIDER_ERROR`. **Does NOT preserve the upstream `errorCode`** — it is flattened into a string message (`upstream error: …`)."
+        }
+      ],
+      "limitations": [
+        "⚠ **Wire `error_name` ≠ Python SDK constant.** Plugin code that reads `error.data.errorCode` from the raw JSON-RPC frame sees the short form (`INVALID_REQUEST`, `SUBMODE_MISMATCH`, `QUOTA_EXCEEDED`, `PROVIDER_ERROR`) per `AGENT_ERROR_NAMES` in the Anna Agent runtime. Only `AGENT_NOT_GRANTED` (-32041) keeps the `AGENT_` prefix — the rest do not. **Match on the numeric code OR on the short name** — do not compare against the SDK constant string.",
+        "⚠ **`-32031 SAMPLING_ERR_NOT_GRANTED` can leak out of this method.** When the `sampling_token` JWT claims have no `user_id` (or it's not a string), `_owner_from_ctx` raises code `-32031` — a *sampling* namespace error — but `_err()` cannot find `-32031` in `AGENT_ERROR_NAMES`, so wire `error_name` degrades to the generic fallback `\"AGENT_ERROR\"`. Plugins switching on numeric code only will see an orphan `-32031` from `session.create`.",
+        "`ttl_seconds`, `label` length and other Anna-server-side bounds are **not** validated by the bridge — out-of-range values fail late with `PROVIDER_ERROR (-32046)`, not `INVALID_REQUEST (-32043)`.",
+        "Identity (`user_id`, `executa_id`) is derived from `sampling_token` claims by `_owner_from_ctx`; the plugin cannot override it. The bearer `token` returned by Anna server is **stripped before being handed back** to the plugin (`out.pop(\"token\", None)`) and kept only in the handler's in-memory `TokenCache`, keyed by `(uuid, owner)` with TTL = `expires_in` (default 600s) and a 30s safety margin. Cache is bounded at `_TOKEN_CACHE_MAX_ENTRIES = 4096` with GC at 8192."
+      ],
+      "example": ""
+    },
+    {
+      "slug": "agent-session-run",
+      "name": "agent/session.run",
+      "kind": "Reverse RPC method · Agent",
+      "group": "Agent sessions",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Anna agent → Anna server /copilot/app/*",
+      "summary": "Submit one turn on an existing agent session. The Anna agent consumes the upstream SSE stream from Anna server `/copilot/app/agent`, tags every frame with `seq` + `stream_id`, and returns the full ordered `frames` array in a single JSON-RPC response — i.e. **buffered streaming**, not true streaming. Hard-capped at `_MAX_FRAMES_PER_RUN = 4096` frames per run; exceeding the cap aborts with `AGENT_ERR_PROVIDER_ERROR` (-32046).",
+      "wire": {
+        "json_rpc_method": "agent/session.run",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "ctx_required": [
+          "sampling_token"
+        ],
+        "buffered_streaming": true,
+        "max_frames_per_run": 4096
+      },
+      "signature": "session_run(*, app_session_uuid: str, content: str, attachments: list[dict] | None = None, recursion_limit: int = 8, run_id: str | None = None, allowed_tools: list[str] | None = None, modelPreferences: dict | None = None, system: str | None = None) -> dict",
+      "params": [
+        {
+          "name": "app_session_uuid",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "The session handle returned by `agent/session.create`.",
+          "notes": [
+            "Must start with `aps_`.",
+            "The Anna agent looks up the cached `app_session_token` by `(uuid, owner)`; if missing or expired → `AGENT_ERR_SESSION_NOT_FOUND` (-32042)."
+          ]
+        },
+        {
+          "name": "content",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Turn content (user / plugin input).",
+          "notes": [
+            "Validated as a non-empty string; whitespace-only is rejected with `AGENT_ERR_INVALID_REQUEST` (-32043)."
+          ]
+        },
+        {
+          "name": "attachments",
+          "type": "list[dict] | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Optional attachments forwarded verbatim to Anna server.",
+          "notes": [
+            "The Anna agent does not parse or validate the payload — shape is whatever Anna server `/copilot/app/agent` currently accepts."
+          ]
+        },
+        {
+          "name": "recursion_limit",
+          "type": "int",
+          "default": "8",
+          "required": false,
+          "desc": "",
+          "summary": "Max agent tool-call depth for this turn.",
+          "notes": [
+            "The Anna agent does not range-check the value; it is forwarded as-is.",
+            "Anna server pydantic enforces `1 ≤ recursion_limit ≤ 32` (`Field(ge=1, le=32)`). Out-of-range values → HTTP 422, surfaced as `AGENT_ERR_PROVIDER_ERROR` (-32046), **not** `AGENT_ERR_INVALID_REQUEST`."
+          ]
+        },
+        {
+          "name": "run_id",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Idempotency / correlation id for `session.cancel`.",
+          "notes": [
+            "Auto-generated as `run_{16hex}` when omitted.",
+            "Echoed back in the response and required by `agent/session.cancel`."
+          ]
+        },
+        {
+          "name": "allowed_tools",
+          "type": "list[str] | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Per-turn tool whitelist; overrides the session-level `quota_caps.allowed_tools` for this run only.",
+          "notes": [
+            "Forwarded verbatim to Anna server as the `allowed_tools` field.",
+            "Anna server intersects this with the user's grant; tools outside the grant are silently dropped.",
+            "Pass `[]` to disable all tools for this turn (pure LLM reply)."
+          ]
+        },
+        {
+          "name": "modelPreferences",
+          "type": "dict | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "MCP-style model hint, e.g. `{\"hints\": [{\"name\": \"gpt-4o\"}], \"costPriority\": 0.2}`.",
+          "notes": [
+            "Camel-case to match the MCP wire spec and Anna server's `_AgentRunBody.modelPreferences` field.",
+            "Snake-case alias `model_preferences` is also accepted by the bridge and rewritten on the way out.",
+            "Anna server may ignore hints that fall outside the user's enabled model set."
+          ]
+        },
+        {
+          "name": "system",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Per-turn system prompt override; prepended to the turn on Anna server.",
+          "notes": [
+            "Forwarded verbatim as the `system` field on the REST body.",
+            "Does not mutate session state — next turn falls back to the session default unless re-supplied."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "Response shape: `{run_id, stream_id, frames, final, frame_count}`.\n\n**Frame envelope** — every entry in `frames` is `{event, seq, stream_id, ...}`. `seq` and `stream_id` are injected by the Anna agent so plugin SDKs can later upgrade to true streaming without protocol churn.\n\n**Event types** carried from upstream: `delta` (incremental text), `tool_call`, `tool_result`, `model_token`, `usage`, and `final`.\n\n**Synthesized final** — Anna server's OpenAI-style SSE does not emit a `final` event; when no upstream `final` arrived, the Anna agent appends a synthesized one: `{event: 'final', text: <joined deltas>, stream_id, seq, synthesized: True}`. This guarantees the plugin always has a single authoritative terminal frame.\n\nThere is **no top-level `text` field** — aggregated assistant text lives in `final.text`."
+      },
+      "errors": [
+        {
+          "name": "AGENT_NOT_GRANTED",
+          "code": -32041,
+          "desc": "`sampling_token` missing from handler `ctx`. SDK constant: `AGENT_ERR_NOT_GRANTED`."
+        },
+        {
+          "name": "SESSION_NOT_FOUND",
+          "code": -32042,
+          "desc": "`app_session_uuid` not in handler `TokenCache` for this owner — token expired (default TTL 600s, 30s safety margin), the session was deleted, or the uuid belongs to a different `(user_id, executa_id)`. SDK constant: `AGENT_ERR_SESSION_NOT_FOUND`."
+        },
+        {
+          "name": "INVALID_REQUEST",
+          "code": -32043,
+          "desc": "`_validate_run` rejected the params (e.g. empty/whitespace-only `content`, non-string `app_session_uuid`, missing `aps_` prefix). SDK constant: `AGENT_ERR_INVALID_REQUEST`."
+        },
+        {
+          "name": "QUOTA_EXCEEDED",
+          "code": -32045,
+          "desc": "User plan-level quota exhausted mid-run, propagated verbatim from upstream `_ServerRpcError`. SDK constant: `AGENT_ERR_QUOTA_EXCEEDED`."
+        },
+        {
+          "name": "PROVIDER_ERROR",
+          "code": -32046,
+          "desc": "Catch-all: upstream SSE failure, transport error, HTTP 422 (out-of-range `recursion_limit`), **OR the synthetic frame-cap abort** when the buffered stream exceeds `_MAX_FRAMES_PER_RUN = 4096`. SDK constant: `AGENT_ERR_PROVIDER_ERROR`. Original upstream `errorCode` is **flattened to a string message** and not preserved."
+        },
+        {
+          "name": "RATE_LIMITED",
+          "code": -32047,
+          "desc": "User or session rate-limited at the LLM provider. Propagated verbatim from upstream. SDK constant: `AGENT_ERR_RATE_LIMITED`."
+        },
+        {
+          "name": "TOOL_NOT_GRANTED",
+          "code": -32048,
+          "desc": "`allowed_tools` (per-turn) or session-level tool list includes a tool that is not in the user's grant. Propagated verbatim from upstream. SDK constant: `AGENT_ERR_TOOL_NOT_GRANTED`. Note: upstream may also silently drop ungranted tools instead of raising — depends on call site."
+        }
+      ],
+      "limitations": [
+        "⚠ **Wire `error_name` ≠ SDK constant** — see `session.create` Known limitations for the full mapping. `session.run` is the most exposed surface: 7 distinct codes, 4 of them propagated verbatim from Anna server.",
+        "⚠ **Original upstream `errorCode` is lost** when the bridge wraps an upstream failure in `AGENT_ERR_PROVIDER_ERROR` via the `except Exception` arm (e.g. HTTP 422 from Anna server pydantic for `recursion_limit > 32`). Plugins cannot distinguish 'quota' / 'rate limit' / 'recursion-limit' failures from each other by code alone — only the message string `upstream error: …` differs. To preserve upstream codes, Anna server must emit a proper `_ServerRpcError` (`-32044`/`-32045`/`-32047`/`-32048`), which the `except _ServerRpcError: raise` arm propagates verbatim.",
+        "**Buffered streaming, not true streaming.** Every upstream SSE frame is buffered in-memory and the full ordered array is returned in a single JSON-RPC response. Hard-capped at `_MAX_FRAMES_PER_RUN = 4096` per run (host keepalive frames are filtered out and do NOT count); exceeding the cap raises `AGENT_ERR_PROVIDER_ERROR`, drops everything buffered so far, and best-effort cancels the run upstream.",
+        "**Client-side abort cleans up upstream.** If the buffered consume fails (600 s reverse-RPC budget exhausted, frame cap, transport error), the bridge sends `agent/session.cancel` upstream before raising — the run no longer keeps executing server-side for up to 30 min after the plugin has given up. `error.data.cancelled_upstream: true` marks this path.",
+        "**Per-user concurrency.** The owning user is limited to 10 concurrent agent runs platform-wide (`APP_CONCURRENCY_LIMIT`, jsonrpc `-32020`, retryable) — counted together with iframe Host-API runs of the same user.",
+        "**Synthesized `final` frame** — Anna server's OpenAI-style SSE never emits a true `final` event, so when text was accumulated but no upstream `final` arrived, the bridge appends `{event: 'final', text: <joined deltas>, stream_id, seq, synthesized: True}`. Plugin SDKs should treat the last frame as authoritative regardless of `synthesized`."
+      ],
+      "example": ""
+    },
+    {
+      "slug": "agent-session-cancel",
+      "name": "agent/session.cancel",
+      "kind": "Reverse RPC method · Agent",
+      "group": "Agent sessions",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Anna agent → Anna server /copilot/app/*",
+      "summary": "Cancel an in-flight `session.run`. Best-effort; the upstream may still emit a final frame.",
+      "wire": {
+        "json_rpc_method": "agent/session.cancel",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "ctx_required": [
+          "sampling_token"
+        ],
+        "buffered_streaming": false
+      },
+      "signature": "session_cancel(*, app_session_uuid: str, run_id: str) -> dict",
+      "params": [
+        {
+          "name": "app_session_uuid",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "run_id",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "The `run_id` returned by (or passed into) `session.run`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "Response shape: `{cancelled: bool, run_id: str}` — the `run_id` is echoed back verbatim so plugins can correlate the ack with the originating `session.run` call.\n\n`cancelled: true` means the cancel signal was durably recorded server-side: a still-queued run is dropped before it starts, and a running run stops at the next poll checkpoint (an in-flight provider call still completes first). It is an acknowledgement, NOT a confirmation the run already stopped. `cancelled: false` means the signal could not be recorded (e.g. signalling backend unavailable) — safe to retry."
+      },
+      "errors": [
+        {
+          "name": "AGENT_NOT_GRANTED",
+          "code": -32041,
+          "desc": "`sampling_token` missing from handler `ctx`. SDK constant: `AGENT_ERR_NOT_GRANTED`."
+        },
+        {
+          "name": "SESSION_NOT_FOUND",
+          "code": -32042,
+          "desc": "`app_session_uuid` not in handler `TokenCache` for this owner. SDK constant: `AGENT_ERR_SESSION_NOT_FOUND`. Cancel is NOT idempotent — unlike `session.delete`, cancelling an unknown uuid hard-fails."
+        },
+        {
+          "name": "INVALID_REQUEST",
+          "code": -32043,
+          "desc": "`app_session_uuid` (must start with `aps_`) or `run_id` is missing/non-string. SDK constant: `AGENT_ERR_INVALID_REQUEST`."
+        },
+        {
+          "name": "PROVIDER_ERROR",
+          "code": -32046,
+          "desc": "Upstream cancel call failed (transport error or 5xx). SDK constant: `AGENT_ERR_PROVIDER_ERROR`. Note: `cancelled: False` in the success response is **not** an error — it means the signal could not be recorded; retry."
+        }
+      ],
+      "limitations": [
+        "⚠ **Wire `error_name` ≠ SDK constant** — see `session.create` Known limitations.",
+        "**Best-effort, not transactional.** A successful `session.cancel` does not guarantee the in-flight `session.run` will return early; the upstream may have already buffered enough frames to emit a complete `final`. Plugins should always handle a normal-looking `run` response arriving after a cancel ack.",
+        "If the run already finished, the signal is recorded but has no effect — still `cancelled: true`."
+      ],
+      "example": ""
+    },
+    {
+      "slug": "agent-session-history",
+      "name": "agent/session.history",
+      "kind": "Reverse RPC method · Agent",
+      "group": "Agent sessions",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Anna agent → Anna server /copilot/app/*",
+      "summary": "Read the persisted transcript of an agent session as MCP-shaped messages. Backed by the LangGraph checkpoint that `session.run` writes into; safe to poll, idempotent, and never mutates state. Use this to rehydrate UI after a plugin restart, sync across devices, or audit a completed conversation.",
+      "wire": {
+        "json_rpc_method": "agent/session.history",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "ctx_required": [
+          "sampling_token"
+        ],
+        "buffered_streaming": false
+      },
+      "signature": "session_history(*, app_session_uuid: str, limit: int = 50, cursor: str | None = None) -> dict",
+      "params": [
+        {
+          "name": "app_session_uuid",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "The session uuid to read; must match the cached token entry.",
+          "notes": []
+        },
+        {
+          "name": "limit",
+          "type": "int",
+          "default": "50",
+          "required": false,
+          "desc": "",
+          "summary": "Page size; out-of-range values are rejected.",
+          "notes": [
+            "Bridge-side range check (`agent.py:_session_history`): values outside `[1, 200]` raise `AGENT_ERR_INVALID_REQUEST` (-32043) — the bridge does **not** clamp silently. Anna server applies the same `[1, 200]` clamp on its side as defense in depth.",
+            "Counts raw checkpoint messages, not turn pairs — a single user turn that triggered N tool calls contributes `1 + 2N` entries."
+          ]
+        },
+        {
+          "name": "cursor",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Opaque pagination token returned by the previous page's `next_cursor`.",
+          "notes": [
+            "First call: pass `None` (or omit).",
+            "Round-trip the value verbatim; do not parse or mutate it — the format is intentionally opaque and may switch from offset-based to time-based without protocol churn.",
+            "Passing a malformed cursor raises `AGENT_ERR_INVALID_REQUEST`."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "Response shape: `{messages, next_cursor, _meta}`.\n\n**`messages`** is an array of MCP-shaped dicts:\n\n- `{role: 'user', content}` — human turn.\n- `{role: 'assistant', content, tool_calls?}` — model turn; `tool_calls` is `[{id, name, args}]` when the assistant invoked tools.\n- `{role: 'tool', content, tool_call_id, tool_name, is_error}` — tool execution result; `content` longer than 10 000 chars is truncated server-side and suffixed with `\\n...[truncated]`.\n- `{role: 'system', content}` — system prompt, when present in state.\n\n**`next_cursor`** is `None` when the page reached the tail; otherwise pass it back as `cursor` on the next call to continue.\n\n**`_meta`** carries debug + pagination context: `{thread_id, total, has_more, kind}`. Sessions of `kind == 'complete'` have no thread and always return `messages: []`, `_meta.thread_id: null`, `_meta.kind: 'complete'`. A freshly minted agent session before any `session.run` returns `messages: []` with `_meta.total: 0`."
+      },
+      "errors": [
+        {
+          "name": "AGENT_NOT_GRANTED",
+          "code": -32041,
+          "desc": "`sampling_token` missing from handler `ctx`. SDK constant: `AGENT_ERR_NOT_GRANTED`."
+        },
+        {
+          "name": "SESSION_NOT_FOUND",
+          "code": -32042,
+          "desc": "`app_session_uuid` not in handler `TokenCache` for this owner. SDK constant: `AGENT_ERR_SESSION_NOT_FOUND`."
+        },
+        {
+          "name": "INVALID_REQUEST",
+          "code": -32043,
+          "desc": "`app_session_uuid` malformed (must start with `aps_`), `limit` not an integer, `limit` outside `[1, 200]`, or `cursor` not a string/null. SDK constant: `AGENT_ERR_INVALID_REQUEST`. Note: `limit` is **rejected, not clamped** — see param notes."
+        },
+        {
+          "name": "PROVIDER_ERROR",
+          "code": -32046,
+          "desc": "Upstream history fetch failed (transport error or 5xx). SDK constant: `AGENT_ERR_PROVIDER_ERROR`."
+        }
+      ],
+      "limitations": [
+        "⚠ **Wire `error_name` ≠ SDK constant** — see `session.create` Known limitations.",
+        "**Idempotent and safe to poll** — never mutates session state.",
+        "Sessions of `kind == 'complete'` always return `messages: []` with `_meta.kind: 'complete'` and `_meta.thread_id: null` — they have no LangGraph checkpoint to read. This is the expected shape, not an error.",
+        "`cursor` format is intentionally opaque; round-trip verbatim. The server may switch from offset-based to time-based without protocol churn, so plugins MUST NOT parse or mutate it."
+      ],
+      "example": ""
+    },
+    {
+      "slug": "agent-session-delete",
+      "name": "agent/session.delete",
+      "kind": "Reverse RPC method · Agent",
+      "group": "Agent sessions",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Anna agent → Anna server /copilot/app/*",
+      "summary": "Drop the session and its history. **Idempotent** — calling on an unknown or already-deleted uuid still resolves successfully. The bridge always evicts the cached token before returning, so a follow-up `session.run` against the same uuid will fail with `AGENT_ERR_SESSION_NOT_FOUND`.",
+      "wire": {
+        "json_rpc_method": "agent/session.delete",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "ctx_required": [
+          "sampling_token"
+        ],
+        "buffered_streaming": false
+      },
+      "signature": "session_delete(*, app_session_uuid: str) -> dict",
+      "params": [
+        {
+          "name": "app_session_uuid",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "The session uuid to drop; must start with `aps_`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "Response shape: `{deleted: True, app_session_uuid, already_gone?}`.\n\n`deleted` is always `True` on success — the call is idempotent and never reports a 'nothing to do' failure.\n\n`app_session_uuid` echoes the input so plugins can correlate batched deletes without re-threading the request id.\n\n`already_gone: True` is set **only** when the bridge had no cached token for the uuid (e.g. another worker deleted it, the cache TTL expired, or the uuid was never created in this process). When the upstream `/copilot/app/sessions/{uuid}` DELETE succeeds normally, this field is **absent** and only `{deleted: True}` is returned verbatim from Anna server."
+      },
+      "errors": [
+        {
+          "name": "AGENT_NOT_GRANTED",
+          "code": -32041,
+          "desc": "`sampling_token` missing from handler `ctx`. SDK constant: `AGENT_ERR_NOT_GRANTED`."
+        },
+        {
+          "name": "INVALID_REQUEST",
+          "code": -32043,
+          "desc": "`app_session_uuid` malformed (must start with `aps_`). SDK constant: `AGENT_ERR_INVALID_REQUEST`."
+        },
+        {
+          "name": "PROVIDER_ERROR",
+          "code": -32046,
+          "desc": "Upstream DELETE call failed (transport error or 5xx). SDK constant: `AGENT_ERR_PROVIDER_ERROR`. The cached token is **always** evicted in the `finally` block before this error surfaces."
+        }
+      ],
+      "limitations": [
+        "⚠ **Wire `error_name` ≠ SDK constant** — see `session.create` Known limitations.",
+        "**Idempotent — does NOT raise `SESSION_NOT_FOUND`.** Calling on an unknown or already-deleted uuid returns `{deleted: True, app_session_uuid, already_gone: True}` and never hits the upstream. Distinct from `session.cancel` / `session.run` / `session.history`, which all hard-fail on cache miss.",
+        "**Cache eviction is unconditional.** Even when the upstream DELETE raises `PROVIDER_ERROR`, the bridge has already evicted the cached token in the `finally` clause. A retry will therefore see `already_gone: True` (idempotent path), masking the underlying upstream failure."
+      ],
+      "example": ""
+    },
+    {
+      "slug": "agent-complete",
+      "name": "agent/complete",
+      "kind": "Reverse RPC method · Agent",
+      "group": "Agent sessions",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Anna agent → Anna server /copilot/app/*",
+      "summary": "L1 one-shot completion via Anna server's `POST /copilot/app/complete`. The bridge transparently mints a throw-away app session under the `sampling_token` (ttl 120s), issues the request, then deletes the session in a `finally` block — plugins never see the underlying token. **Not** sugar over `sampling/createMessage` (that path runs through the host's own model); this hits the user's Anna server. **Note:** the backing session is minted with `kind='agent'` (not `kind='complete'`) and used purely as transport — Anna server's `/copilot/app/complete` endpoint accepts any agent-kind app-session token, and the same MCP completion shape is returned. Behaviour matches the `anna-app` SDK's `llm.complete`; callers wanting a strict `kind='complete'` session row must issue `session.create({kind: 'complete'})` + the HTTP `/copilot/app/complete` path manually. Use this when you only need a single model reply with no tools and no multi-turn history; for stateful tool-using runs use `session.create` + `session.run`.",
+      "wire": {
+        "json_rpc_method": "agent/complete",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "ctx_required": [
+          "sampling_token"
+        ],
+        "buffered_streaming": false
+      },
+      "signature": "complete(*, messages: list[dict], maxTokens: int | None = None, modelPreferences: dict | None = None, systemPrompt: str | None = None, temperature: float | None = None, stopSequences: list[str] | None = None, metadata: dict | None = None) -> dict",
+      "params": [
+        {
+          "name": "messages",
+          "type": "list[dict]",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Non-empty array of MCP-shaped messages (`{role, content}`).",
+          "notes": [
+            "Validated bridge-side: must be a list with at least one entry.",
+            "Anna server applies the same schema constraints as the `anna-app` SDK; multimodal content blocks are accepted verbatim."
+          ]
+        },
+        {
+          "name": "maxTokens",
+          "type": "int | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Hard cap on response tokens; must be `> 0` when supplied.",
+          "notes": []
+        },
+        {
+          "name": "modelPreferences",
+          "type": "dict | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "MCP-style model hint, e.g. `{\"hints\": [{\"name\": \"gpt-4o\"}], \"costPriority\": 0.2}`.",
+          "notes": [
+            "Camel-case to match the MCP wire spec and Anna server's `_CompleteBody.modelPreferences` field.",
+            "Anna server may ignore hints that fall outside the user's enabled model set."
+          ]
+        },
+        {
+          "name": "systemPrompt",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "System prompt prepended on Anna server for this single call.",
+          "notes": []
+        },
+        {
+          "name": "temperature",
+          "type": "float | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Sampling temperature; passes through unchanged.",
+          "notes": []
+        },
+        {
+          "name": "stopSequences",
+          "type": "list[str] | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Stop strings forwarded to the upstream model.",
+          "notes": []
+        },
+        {
+          "name": "metadata",
+          "type": "dict | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Opaque metadata echoed in audit logs; not interpreted by the model.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "MCP-style completion: `{content, model, usage}`.\n\n- **`content`** — list of content blocks (typically `[{type: 'text', text: ...}]`); matches `sampling/createMessage` output shape.\n- **`model`** — the model id actually used by Anna server (may differ from a `modelPreferences` hint).\n- **`usage`** — token accounting `{input_tokens, output_tokens, total_tokens}` when the provider reports it.\n\nReturned verbatim from `/copilot/app/complete`; the bridge does not reshape or filter the response."
+      },
+      "errors": [
+        {
+          "name": "AGENT_NOT_GRANTED",
+          "code": -32041,
+          "desc": "`sampling_token` missing from handler `ctx`. SDK constant: `AGENT_ERR_NOT_GRANTED`."
+        },
+        {
+          "name": "INVALID_REQUEST",
+          "code": -32043,
+          "desc": "`_validate_complete` rejected the body (e.g. empty `messages`, non-positive `maxTokens`). SDK constant: `AGENT_ERR_INVALID_REQUEST`."
+        },
+        {
+          "name": "QUOTA_EXCEEDED",
+          "code": -32045,
+          "desc": "User plan-level LLM quota exhausted (either at mint time or at complete time). Propagated verbatim from upstream. SDK constant: `AGENT_ERR_QUOTA_EXCEEDED`."
+        },
+        {
+          "name": "PROVIDER_ERROR",
+          "code": -32046,
+          "desc": "Catch-all: backing-session mint failed, `/copilot/app/complete` raised 5xx, or response was malformed. SDK constant: `AGENT_ERR_PROVIDER_ERROR`. The throw-away session is always torn down in `finally` — a `PROVIDER_ERROR` here does **not** leak quota."
+        },
+        {
+          "name": "RATE_LIMITED",
+          "code": -32047,
+          "desc": "Provider rate-limited the completion. Propagated verbatim from upstream. SDK constant: `AGENT_ERR_RATE_LIMITED`."
+        }
+      ],
+      "limitations": [
+        "⚠ **Wire `error_name` ≠ SDK constant** — see `session.create` Known limitations.",
+        "⚠ **Backing session is `kind='agent'`, not `kind='complete'`.** Per `agent.py:_complete` NOTE, Nexus mint always derives `kind='agent'` from this body shape; the L1 path uses an L2 agent session as transport. Same backing thread, but a strict `kind='complete'` session row requires the explicit `session.create({kind: 'complete'})` path. Behaviour-wise indistinguishable for the caller (same MCP completion shape returned), but the audit log will show an agent-kind app_session.",
+        "**No `SESSION_NOT_FOUND` possible** — the bridge manages the uuid internally and tears it down before returning. Plugins never see the backing `app_session_uuid`.",
+        "**Post-complete delete is best-effort.** If the teardown call in `finally` fails (e.g. network blip), it is logged at DEBUG and silently swallowed; the throw-away session may linger until Anna server's own TTL (120s) expires. The plugin still gets a successful completion response."
+      ],
+      "example": ""
+    }
+  ]
+}

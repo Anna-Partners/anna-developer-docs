@@ -1,0 +1,483 @@
+{
+  "section_id": "host-api-storage",
+  "items": [
+    {
+      "slug": "storage-get",
+      "name": "storage.get",
+      "kind": "Host API method · iframe surface",
+      "group": "Storage",
+      "since": "anna-app-runtime v0.1",
+      "direction": "Bundle (iframe) → Host RPC → APS (Postgres + R2)",
+      "summary": "Read a per-(user, App, key) JSON value from Anna Persistent Storage (APS). Returns the stored value plus an `etag` / `generation` for optimistic-concurrency writes, or `{value: null, exists: false}` if the key is absent. Soft-deleted and TTL-expired rows look the same as missing.",
+      "wire": {
+        "json_rpc_method": "storage.get",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.storage.get(args: {key: string, scope?: 'app'|'user'|'tool', owner?: string}, opts?: {timeoutMs?: number}) => Promise<{value: any, etag?: string, generation?: number, exists: boolean}>",
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Path-style key under the resolved `(scope, owner)` bucket. Must pass APS path validation (≤ 1024 chars total, ≤ 128 chars per `/`-separated segment, no leading `/`, no `.` / `..` segments, no control / bidi / zero-width chars).",
+          "notes": [
+            "`HostRpcError(\"invalid_arg\", \"key required\")` if missing / empty / non-string.",
+            "APS-backed handler additionally raises `invalid_path` from `validate_kv_key` when the key shape is illegal.",
+            "Keys are case-sensitive and not normalised — `foo/bar` and `Foo/bar` are different rows.",
+            "Use a stable prefix scheme (`notes/<id>`, `settings/preferences`) so `storage.list({prefix})` can page over related rows."
+          ]
+        },
+        {
+          "name": "scope",
+          "type": "'user' | 'app' | 'tool'",
+          "default": "'app'",
+          "required": false,
+          "desc": "",
+          "summary": "Visibility scope. `app` (default) reads the calling App's per-user bucket; `user` reads the user's cross-App bucket; `tool` is reserved (not yet exposed to iframes).",
+          "notes": [
+            "`invalid_arg` if not one of `user` / `app` / `tool`.",
+            "PRIMARY gate: calling `storage.*` at all requires the method to be listed in `manifest.ui.host_api.storage` (e.g. `[\"get\",\"set\",\"delete\",\"list\"]`) — this is what `host_api_allows` checks. `manifest.permissions[]` is display/audit only and is NEVER consulted by the dispatcher.",
+            "The default `(scope=app, owner=self)` bucket needs NO further grant once `ui.host_api.storage` allows the method. Only NON-default scopes/owners require an extra `aps.scope.<scope>.<read|write>` (or `aps.scope.admin`) entry in `manifest.host_capabilities`.",
+            "Any non-default scope (e.g. `scope=user`) requires the manifest to declare `aps.scope.user.read` (or `aps.scope.admin`); the gate is enforced by `_check_storage_scope` *before* the handler runs.",
+            "`scope=tool` raises `not_implemented` today."
+          ]
+        },
+        {
+          "name": "owner",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "When `scope=app`, target a *different* App's bucket by slug. Defaults to `self` (calling App).",
+          "notes": [
+            "Cross-owner reads (`scope=app` + `owner != self`) require `aps.scope.app.read` *with* cross-owner support; the host implementation currently raises `not_implemented` for cross-app reads.",
+            "Ignored for `scope=user` (the user bucket is owner-less by design)."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "{ value: any, etag?: string, generation?: number, exists: boolean }",
+        "desc": "Hit: `{value, etag, generation, exists: true}`. Miss / expired / soft-deleted: `{value: null, exists: false}` (no `etag` / `generation`).\n\n**The `exists` field is the source of truth.** A stored `null` value is indistinguishable from a missing key when you only inspect `value`. Always branch on `exists` for read-modify-write — see *executa-describe-result-shape.md*-style passthrough bugs where the SUCCESS path forgot to set `exists`, silently breaking append-to-list patterns.\n\n`etag` is the opaque optimistic-concurrency token; pass it back as `if_match` on `set` / `delete` to guarantee in-place update. `generation` is a monotonic int (bumped on every set) — useful for ordering events from `runtime_state_synced`."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`key` missing / empty / non-string, `scope` not in `user|app|tool`, or `limit` non-int (list)."
+        },
+        {
+          "name": "invalid_path",
+          "code": "invalid_path",
+          "desc": "APS path validation rejected the key (too long, illegal segment, control chars, leading `/`)."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "Non-default `(scope, owner)` requested but manifest does not declare the matching `aps.scope.<scope>.<read>` (or `aps.scope.admin`) capability."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Cross-owner `scope=app` reads or `scope=tool` — APS bridge has not yet wired this path."
+        },
+        {
+          "name": "internal_error",
+          "code": "internal_error",
+          "desc": "DB / serialisation failure inside `StorageService.kv_get`."
+        }
+      ],
+      "example": "// Read-modify-write a JSON list with optimistic concurrency.\nconst cur = await anna.storage.get({ key: \"notes/log\" });\nconst log = cur.exists ? cur.value : [];   // ← branch on `exists`, NOT `value`\nlog.push({ ts: Date.now(), text: \"hi\" });\n\ntry {\n  await anna.storage.set({\n    key: \"notes/log\",\n    value: log,\n    if_match: cur.etag,                    // 412 if someone else wrote first\n  });\n} catch (e) {\n  if (e.code === \"precondition_failed\") {\n    // Someone raced us — refetch and retry.\n  }\n}\n",
+      "limitations": [
+        "Hot-path read: no per-call rate limit, but every miss still hits Postgres. Cache locally in the bundle if you poll on a timer.",
+        "TTL-expired rows are treated as missing on read but the underlying row may still consume bytes until the next GC sweep. `size_bytes` quota is released eagerly on `delete`.",
+        "`metadata` and `tags` are not returned by `get` (use `list` to project them).",
+        "Cross-owner reads (`scope=app`, `owner=<other-app>`) are still gated on a future implementation; today they raise `not_implemented` even when the manifest grants `aps.scope.app.read`."
+      ]
+    },
+    {
+      "slug": "storage-set",
+      "name": "storage.set",
+      "kind": "Host API method · iframe surface",
+      "group": "Storage",
+      "since": "anna-app-runtime v0.1 · `if_match` / `metadata` / `tags` / `ttl_seconds` since APS Phase 4",
+      "direction": "Bundle (iframe) → Host RPC → APS (Postgres) → quota reserve",
+      "summary": "Write a JSON value under the resolved `(scope, owner, key)`. Idempotent in shape — upserts an existing row or creates a new one — but charges per-user `bytes_used` and `entry_count` quota on every call. Supports If-Match optimistic concurrency, metadata / tag annotations, and TTL-based auto-expiry.",
+      "wire": {
+        "json_rpc_method": "storage.set",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.storage.set(args: {key: string, value: any, scope?: 'app'|'user'|'tool', owner?: string, if_match?: string, metadata?: object, tags?: string[], ttl_seconds?: number}, opts?: {timeoutMs?: number}) => Promise<{etag: string, generation: number, size_bytes: number}>",
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Same shape as `storage.get` — see the validation rules there.",
+          "notes": [
+            "`invalid_arg` if missing / empty.",
+            "`invalid_path` from APS validator if illegal."
+          ]
+        },
+        {
+          "name": "value",
+          "type": "any (JSON-serialisable)",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Arbitrary JSON. Serialised via `json.dumps(default=str)` server-side so `datetime` / `Decimal` stringify automatically.",
+          "notes": [
+            "There is no bundle-side size validator: the SDK does NOT pre-check `value`. Oversize payloads surface as `value_too_large` (APS per-row cap) or `state_too_large` (legacy backend 256 KiB) on the return path.",
+            "Functions, BigInts, and cyclic references are rejected at `postMessage` (V8 structured clone) — you never see them server-side.",
+            "Storing `null` is legal and round-trips correctly; consumers must branch on `cur.exists` to distinguish stored-null from absent."
+          ]
+        },
+        {
+          "name": "if_match",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Optimistic-concurrency token from a prior `get` / `set` / `list` row. Pass to guarantee the row hasn't been touched by someone else since you observed it.",
+          "notes": [
+            "`precondition_failed` if the token does not match the live row's `etag`, *including* when the row no longer exists (mirrors GCS / S3 If-Match semantics).",
+            "Concurrent first-insert races are also surfaced as `precondition_failed` — retry the read-modify-write loop and the second pass will hit the update branch.",
+            "Opaque; treat it as a black-box string. Format is `W/\"<gen>-<digest>\"` for the legacy backend and a payload hash for APS."
+          ]
+        },
+        {
+          "name": "metadata",
+          "type": "object | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Free-form annotation map. Not used for indexing; round-trips on `list`.",
+          "notes": [
+            "Stored as JSON in `aps_entries.entry_metadata`.",
+            "Ignored by the legacy runtime_state backend."
+          ]
+        },
+        {
+          "name": "tags",
+          "type": "string[] | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Up to 32 free-form labels. Round-trips on `list` for client-side filtering; APS does not index by tag.",
+          "notes": [
+            "Validated server-side by `KVSetRequest` (Pydantic) when used over the HTTP APS API; the iframe path forwards them verbatim.",
+            "Ignored by the legacy runtime_state backend."
+          ]
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "int | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Auto-expire the row after N seconds (range 1..365 days). Expired rows look like 404 to `get` but bytes are reclaimed lazily by the GC sweep.",
+          "notes": [
+            "Use for short-lived caches (session id, oauth state) rather than re-implementing TTL with timestamps in `value`.",
+            "Bound is server-side: `KVSetRequest.ttl_seconds` is `ge=1, le=60*60*24*365`.",
+            "Ignored by the legacy runtime_state backend."
+          ]
+        },
+        {
+          "name": "scope",
+          "type": "'user' | 'app' | 'tool'",
+          "default": "'app'",
+          "required": false,
+          "desc": "",
+          "summary": "Same as `storage.get`. Non-default scopes need `aps.scope.<scope>.write` in the manifest.",
+          "notes": [
+            "Write action gate; `_check_storage_scope(manifest, 'set', args)` maps to `aps.scope.<scope>.write`.",
+            "Cross-owner writes (`scope=app`, `owner != self`) raise `not_implemented` today."
+          ]
+        },
+        {
+          "name": "owner",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "App slug to target (cross-app writes only). Defaults to the calling App."
+        }
+      ],
+      "returns": {
+        "type": "{ etag: string, generation: number, size_bytes: number }",
+        "desc": "Refreshed metadata for the just-written row.\n\n• `etag` — feed into the next `if_match`. Bumps on every successful write even if `value` was identical.\n• `generation` — monotonic int that survives `delete + recreate`? **No** — soft-delete then re-set creates a new row at `generation=1`. Treat it as a write-order indicator within a single live row, not a global change counter.\n• `size_bytes` — serialised JSON length of the new value (used by the quota service).\n\n**Side effect (legacy backend only):** an `anna.event.runtime_state_synced` is broadcast to the user's other windows with `{patch: {<key>: <value>}}`. The APS-backed handler does **not** emit this event today — apps that depend on live cross-tab sync should fall back to polling `storage.get` on focus."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`key` missing / empty / non-string, or `scope` not in `user|app|tool`."
+        },
+        {
+          "name": "invalid_path",
+          "code": "invalid_path",
+          "desc": "APS path validation rejected the key shape."
+        },
+        {
+          "name": "precondition_failed",
+          "code": "precondition_failed",
+          "desc": "`if_match` mismatch (including row missing or concurrent insert race)."
+        },
+        {
+          "name": "value_too_large",
+          "code": "value_too_large",
+          "desc": "APS-backed handler: serialised `value` exceeds the per-row cap configured in `StorageService`."
+        },
+        {
+          "name": "too_large",
+          "code": "too_large",
+          "desc": "Legacy backend only: cumulative `window.runtime_state` would exceed **256 KiB** (`MAX_RUNTIME_STATE_BYTES`). Treat as the same class of failure as `value_too_large` from the app's perspective."
+        },
+        {
+          "name": "quota_exceeded",
+          "code": "quota_exceeded",
+          "desc": "Per-user APS byte / entry quota exhausted. Quota is reserved atomically (Redis Lua) before the row is written; failure rolls back."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "Non-default `(scope, owner)` without the matching `aps.scope.<scope>.write` (or `aps.scope.admin`) capability."
+        },
+        {
+          "name": "forbidden_scope",
+          "code": "forbidden_scope",
+          "desc": "APS service refused the scope (e.g. tool-level write without the corresponding entitlement)."
+        },
+        {
+          "name": "not_granted",
+          "code": "not_granted",
+          "desc": "User has not granted the App APS access at all (admin-level revoke)."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Cross-owner `scope=app` writes or `scope=tool`."
+        },
+        {
+          "name": "rate_limited",
+          "code": "rate_limited",
+          "desc": "Per-(user, App) write rate cap exceeded."
+        },
+        {
+          "name": "internal_error",
+          "code": "internal_error",
+          "desc": "DB failure inside `StorageService.kv_set`."
+        }
+      ],
+      "example": "// Write a short-lived OAuth nonce. Bytes are reclaimed automatically.\nawait anna.storage.set({\n  key: \"oauth/state/discord\",\n  value: { nonce: crypto.randomUUID(), created_at: Date.now() },\n  ttl_seconds: 600,                  // 10 minutes\n  metadata: { provider: \"discord\" }, // round-trips on `list`\n  tags: [\"oauth\", \"ephemeral\"],\n});\n\n// Optimistic update: read → patch → write with if_match.\nasync function appendNote(text) {\n  for (let attempt = 0; attempt < 3; attempt++) {\n    const cur = await anna.storage.get({ key: \"notes/log\" });\n    const next = cur.exists ? [...cur.value, text] : [text];\n    try {\n      return await anna.storage.set({\n        key: \"notes/log\",\n        value: next,\n        if_match: cur.etag,           // omit on first insert\n      });\n    } catch (e) {\n      if (e.code !== \"precondition_failed\") throw e;\n      // retry — someone else wrote between get & set\n    }\n  }\n  throw new Error(\"contended write — gave up after 3 attempts\");\n}\n",
+      "limitations": [
+        "**Quota is charged on every successful set**, not only on growth. Storing the same row repeatedly to refresh a timestamp will not blow the byte budget (delta is `new - old`) but it *does* contribute to write rate limits.",
+        "Legacy backend has a 256 KiB cumulative cap over **all** keys in `runtime_state`; APS has a per-row cap and a per-user total byte quota. Test both bounds if your bundle ships to both backends.",
+        "`runtime_state_synced` event is only emitted by the **legacy** backend. Apps that broadcast cross-window changes through this event will silently regress on the APS-backed prod path.",
+        "Soft-deleted rows are not visible to `get` but still hold `aps_entries` row IDs. Recreating with the same key allocates a fresh `generation=1` row.",
+        "`metadata` / `tags` are stored verbatim — no PII scrubbing. Do not stuff secrets into them; they leak via `list` to anything with read access."
+      ]
+    },
+    {
+      "slug": "storage-delete",
+      "name": "storage.delete",
+      "kind": "Host API method · iframe surface",
+      "group": "Storage",
+      "since": "anna-app-runtime v0.1 · `if_match` since APS Phase 4",
+      "direction": "Bundle (iframe) → Host RPC → APS (soft-delete + quota release)",
+      "summary": "Remove a key from the resolved `(scope, owner)` bucket. The row is soft-deleted (kept for forensic / restore tooling) but immediately disappears from `get` / `list` and its bytes are returned to the per-user quota.",
+      "wire": {
+        "json_rpc_method": "storage.delete",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.storage.delete(args: {key: string, scope?: 'app'|'user'|'tool', owner?: string, if_match?: string}, opts?: {timeoutMs?: number}) => Promise<{deleted: true}>",
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Same validation as `storage.get`."
+        },
+        {
+          "name": "if_match",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Optimistic-concurrency token. Pass to guarantee you delete the exact row you observed (e.g. avoid clobbering a re-created entry under the same key).",
+          "notes": [
+            "`precondition_failed` if the etag does not match the live row.",
+            "Ignored by the legacy backend (which has no per-row etag)."
+          ]
+        },
+        {
+          "name": "scope",
+          "type": "'user' | 'app' | 'tool'",
+          "default": "'app'",
+          "required": false,
+          "desc": "",
+          "summary": "Same gating as `storage.set` (`action='write'` → needs `aps.scope.<scope>.write`)."
+        },
+        {
+          "name": "owner",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Cross-app delete target slug. Defaults to self."
+        }
+      ],
+      "returns": {
+        "type": "{ deleted: true }",
+        "desc": "Always `{deleted: true}` on success. The legacy backend returns `{ok: true}` instead; treat both shapes as equivalent.\n\n**Quota is released eagerly**: `kv_delete` calls `_reserve_quota(..., -size)` to give the bytes back before the transaction commits. Subsequent `set` calls see the reclaimed headroom immediately.\n\n**Side effect (legacy backend only):** broadcasts `runtime_state_synced` with `{patch: {<key>: null}}` — apps relying on this for cross-tab sync will not receive it on the APS-backed prod path."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`key` missing / empty / non-string."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "Key does not exist (APS backend only — the legacy backend silently no-ops a missing key)."
+        },
+        {
+          "name": "precondition_failed",
+          "code": "precondition_failed",
+          "desc": "`if_match` etag mismatch."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "Non-default scope without `aps.scope.<scope>.write`."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Cross-owner `scope=app` or `scope=tool`."
+        }
+      ],
+      "example": "// Remove a transient OAuth nonce once the callback completes.\ntry {\n  await anna.storage.delete({ key: \"oauth/state/discord\" });\n} catch (e) {\n  if (e.code !== \"not_found\") throw e;   // already gone — fine\n}\n",
+      "limitations": [
+        "Soft-delete only: the row is hidden from `get` / `list` but persisted in `aps_entries`. There is no public `restore` API today.",
+        "Legacy backend silently succeeds when the key is missing (returns `{ok: true}`); APS backend raises `not_found`. Treat the call as best-effort and swallow `not_found` if you do not need it.",
+        "`if_match` is ignored on the legacy backend — concurrent deletes from another tab will not be surfaced.",
+        "Bulk delete is not exposed. Iterate `storage.list({prefix})` + `storage.delete({key})` per row."
+      ]
+    },
+    {
+      "slug": "storage-list",
+      "name": "storage.list",
+      "kind": "Host API method · iframe surface",
+      "group": "Storage",
+      "since": "anna-app-runtime v0.1 · `metadata` / `tags` returned since APS Phase 4",
+      "direction": "Bundle (iframe) → Host RPC → APS (prefix scan)",
+      "summary": "Enumerate keys in the resolved `(scope, owner)` bucket whose path starts with `prefix`. Returns metadata-only rows (no `value` — call `storage.get(key)` per item if you need the payload). Paginated by an opaque `cursor`.",
+      "wire": {
+        "json_rpc_method": "storage.list",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.storage.list(args?: {prefix?: string, cursor?: string, limit?: number, scope?: 'app'|'user'|'tool', owner?: string}, opts?: {timeoutMs?: number}) => Promise<{items: Array<{key: string, etag: string, size_bytes: number, metadata: object|null, tags: string[]|null, updated_at: string|null}>, next_cursor: string|null}>",
+      "params": [
+        {
+          "name": "prefix",
+          "type": "string",
+          "default": "\"\"",
+          "required": false,
+          "desc": "",
+          "summary": "Path-prefix filter. Empty string lists the whole bucket.",
+          "notes": [
+            "May end with `/` (matches a directory-style prefix) and may include empty trailing segments (`a/` is legal).",
+            "Otherwise follows the same validation as `key` — `..` segments, control chars, and absolute paths are rejected with `invalid_path`.",
+            "Match is plain `startswith` — there is no glob, no regex, no SQL `LIKE` wildcard escaping required from the caller (the service does it internally)."
+          ]
+        },
+        {
+          "name": "cursor",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Opaque pagination cursor returned by a prior `list` call as `next_cursor`.",
+          "notes": [
+            "Encodes the last seen key (base64-ish); not stable across schema changes. Always re-paginate from the start when retrying.",
+            "Passing a stale cursor returns rows that sort after it — may legitimately yield zero items if the bucket was drained.",
+            "Legacy backend uses the raw key as the cursor (no encoding); APS encodes it."
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "int",
+          "default": "100",
+          "required": false,
+          "desc": "",
+          "summary": "Page size, 1..1000. Default 100.",
+          "notes": [
+            "`invalid_arg` if non-int.",
+            "Values ≤ 0 or > 1000 raise `invalid_arg` on the legacy backend; the APS backend clamps silently via `max(1, min(limit, LIST_MAX_LIMIT))`."
+          ]
+        },
+        {
+          "name": "scope",
+          "type": "'user' | 'app' | 'tool'",
+          "default": "'app'",
+          "required": false,
+          "desc": "",
+          "summary": "Non-default scopes need `aps.scope.<scope>.read`."
+        },
+        {
+          "name": "owner",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Cross-app listing target. Defaults to self."
+        }
+      ],
+      "returns": {
+        "type": "{ items: Array<{key, etag, size_bytes, metadata, tags, updated_at}>, next_cursor: string | null }",
+        "desc": "Pageful of row heads, sorted ascending by `key`.\n\n• `items[].metadata` / `items[].tags` are populated from `aps_entries` (APS backend) and are `null` on the legacy backend (which has no metadata column).\n• `items[].updated_at` is an ISO-8601 string on the APS backend; `null` on the legacy backend.\n• `next_cursor: null` means \"no more pages\"; otherwise feed it back as `cursor` on the next call.\n\n**Soft-deleted and TTL-expired rows are excluded.** Listing is consistent with `get` — if a key shows up here, a subsequent `get` will return `exists: true` (modulo races)."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`limit` is non-int, or `limit ≤ 0` / `limit > 1000` on the legacy backend."
+        },
+        {
+          "name": "invalid_path",
+          "code": "invalid_path",
+          "desc": "`prefix` longer than 1024 chars, absolute, or contains forbidden segments."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "Non-default scope without `aps.scope.<scope>.read`."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Cross-owner `scope=app` listings or `scope=tool`."
+        }
+      ],
+      "example": "// Page through every note in this App's bucket.\nasync function* iterateNotes() {\n  let cursor = undefined;\n  do {\n    const { items, next_cursor } = await anna.storage.list({\n      prefix: \"notes/\",\n      limit: 200,\n      cursor,\n    });\n    for (const it of items) yield it;\n    cursor = next_cursor ?? undefined;\n  } while (cursor);\n}\n\nfor await (const head of iterateNotes()) {\n  console.log(head.key, head.size_bytes, head.tags);\n  // call anna.storage.get({ key: head.key }) only if you need the value.\n}\n",
+      "limitations": [
+        "Metadata-only — does NOT return `value`. Apps that need bulk reads must `list` then `get` per key (no batch endpoint exists today).",
+        "No filtering by `metadata` / `tags` — they are returned for client-side projection only. APS has no tag index.",
+        "Cursor is opaque and **not stable** across deploys: do not persist it across sessions. Re-paginate from start on cold load.",
+        "Legacy backend can be slow on large buckets (it sorts the entire dict in memory); the APS backend uses an indexed `LIKE 'prefix%'` scan.",
+        "Order is byte-wise ascending on the raw `key` string — Unicode is collated by codepoint, not locale."
+      ]
+    }
+  ]
+}

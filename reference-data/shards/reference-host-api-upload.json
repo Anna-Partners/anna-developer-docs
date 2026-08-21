@@ -1,0 +1,237 @@
+{
+  "section_id": "host-api-upload",
+  "items": [
+    {
+      "slug": "upload-inline",
+      "name": "upload.inline",
+      "kind": "Host API method · iframe surface",
+      "group": "Upload",
+      "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade → host_upload_service → R2",
+      "summary": "Single-shot upload — bundle base64-encodes the file and posts it inline in the RPC body. Best for payloads ≤ 8 MiB already in memory: one round-trip vs three for the negotiate/confirm flow. The host validates MIME + purpose against `upload_grant`, decodes, writes to R2 under a per-(user, App) prefix, and returns a short-lived download URL.",
+      "wire": {
+        "json_rpc_method": "upload.inline",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.upload.inline(args: {filename: string, mime_type: string, content_b64: string, purpose?: string}, opts?: {timeoutMs?: number}) => Promise<{r2_key, mime_type, bytes_size, download_url, expires_in}>",
+      "params": [
+        {
+          "name": "filename",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Human-readable filename. Used in the R2 object path and exposed in the download `Content-Disposition` for the bytes when fetched."
+        },
+        {
+          "name": "mime_type",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Wire MIME type of the payload. Must pass the host denylist (SVG is forced to attachment, executables are rejected). The per-user MIME allowlist was removed — any non-blocked type is accepted, Office formats included.",
+          "notes": [
+            "Allowlist failure → `APP_PROVIDER_ERROR` (HTTP 400 underneath) with the `host_upload_service` reason verbatim — typically `MIME_REJECTED`.",
+            "Glob wildcards (`image/*`) in the grant are honoured."
+          ]
+        },
+        {
+          "name": "content_b64",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Base64-encoded bytes of the file. Inline payload after decode must be ≤ `upload_grant.maxFileBytes` (default **20 MiB**).",
+          "notes": [
+            "Wire size ≈ 1.33× raw bytes. A 15 MiB file becomes ~20 MiB on the wire — if you regularly approach the cap, use `upload.negotiate`+`confirm` instead to skip the encode overhead.",
+            "Too-large → `APP_PROVIDER_ERROR` with reason `TOO_LARGE` (HTTP 400 underneath).",
+            "Browsers: never use `btoa(String.fromCharCode(...))` on multi-MiB buffers — it allocates a UTF-16 intermediate. Prefer `FileReader.readAsDataURL` + slice off the prefix."
+          ]
+        },
+        {
+          "name": "purpose",
+          "type": "string",
+          "default": "\"user_artifact\"",
+          "required": false,
+          "desc": "",
+          "summary": "Why the file is being uploaded — used for billing categorisation and to scope `upload_grant.allowedPurposes`. Allowed values: `image_input`, `image_reference`, `user_artifact`.",
+          "notes": [
+            "Outside the host's set → `APP_PROVIDER_ERROR` with reason `PURPOSE_REJECTED` (HTTP 403 underneath).",
+            "If `upload_grant.allowedPurposes` is configured, the value must additionally appear in that allowlist.",
+            "Choose `image_input` when you plan to feed the result to `image.edit`/`image.generate` so billing rows correlate."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "{ r2_key: string, mime_type: string, bytes_size: int, download_url: string, expires_in: int }",
+        "desc": "• `r2_key` — opaque storage handle (`exec-uploads/<env>/<user_uuid>/<tool_id>/<invoke_id>/<purpose>/<file>`). **Persist this, not `download_url`.**\n• `mime_type` — server-canonicalised MIME (may differ from the requested value if SVG was forced to attachment, etc.).\n• `bytes_size` — actual decoded size.\n• `download_url` — presigned R2 GET, TTL = `expires_in` seconds (~30 min). Re-mint by calling `upload.confirm` with the saved `r2_key`."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": "APP_NOT_GRANTED",
+          "desc": "`upload_grant.enabled == false`. Mapped from `APP_ERR_NOT_GRANTED` (-32001). HTTP 403."
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "Missing `filename` / `mime_type` / `content_b64`. Mapped from `APP_ERR_INVALID_REQUEST` (-32004)."
+        },
+        {
+          "name": "APP_PROVIDER_ERROR",
+          "code": "APP_PROVIDER_ERROR",
+          "desc": "MIME or purpose rejected, too-large after decode, R2 PUT failure, or any other `host_upload_service.HostUploadError`. Mapped from `APP_ERR_PROVIDER_ERROR` (-32003) with the underlying reason preserved in `message` (and HTTP status hinted by it: 400 for `MIME_REJECTED`/`TOO_LARGE`/`INVALID_REQUEST`, 403 for `PURPOSE_REJECTED`, 502 otherwise)."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Store does not support `upload_inline`."
+        }
+      ],
+      "example": "// Upload a small image already in a Blob.\nasync function blobToB64(blob) {\n  const dataUrl = await new Promise((res, rej) => {\n    const r = new FileReader();\n    r.onload = () => res(r.result);\n    r.onerror = rej;\n    r.readAsDataURL(blob);\n  });\n  return dataUrl.slice(dataUrl.indexOf(\",\") + 1);  // strip 'data:...;base64,'\n}\n\ntry {\n  const out = await anna.upload.inline({\n    filename:  \"poster.png\",\n    mime_type: \"image/png\",\n    content_b64: await blobToB64(file),\n    purpose: \"user_artifact\",\n  });\n  // Save r2_key in storage; refresh download_url via upload.confirm({r2_key}) later.\n  await anna.storage.set({ key: `poster:${id}`, value: { r2_key: out.r2_key } });\n} catch (e) {\n  if (e.code === \"APP_PROVIDER_ERROR\" && /TOO_LARGE/.test(e.message)) {\n    // Fall back to large-file path\n    await uploadViaNegotiate(file);\n  } else throw e;\n}\n",
+      "limitations": [
+        "Decoded payload cap is `upload_grant.maxFileBytes` (default 20 MiB). Hard ceiling for `inline` in practice is ~8 MiB raw / ~10 MiB wire because larger postMessages stutter the iframe → host channel.",
+        "Synchronous. No progress events, no resume on partial failure — for multi-MB payloads on slow networks use `upload.negotiate`+`confirm` so the bytes flow directly to R2 with native PUT progress.",
+        "`download_url` expires (~30 min). Always persist `r2_key`; re-mint URLs through `upload.confirm`.",
+        "MIME canonicalisation: requesting `image/svg+xml` may return `application/octet-stream` (SVG forced to attachment to prevent active content). Plan your renderer accordingly.",
+        "No de-duplication. Uploading the same bytes twice produces two distinct `r2_key`s and counts against quota twice."
+      ]
+    },
+    {
+      "slug": "upload-negotiate",
+      "name": "upload.negotiate",
+      "kind": "Host API method · iframe surface",
+      "group": "Upload",
+      "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade → host_upload_service (sign-only)",
+      "summary": "Step 1/2 of the large-file flow. Validates MIME + purpose against `upload_grant`, mints a presigned R2 PUT URL (5-minute TTL), and returns the `r2_key` the bundle should remember. Does **not** count against the file quota — that's charged on `upload.confirm`.",
+      "wire": {
+        "json_rpc_method": "upload.negotiate",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.upload.negotiate(args: {filename: string, mime_type: string, purpose?: string}, opts?: {timeoutMs?: number}) => Promise<{r2_key, put_url, expires_in, headers}>",
+      "params": [
+        {
+          "name": "filename",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Human-readable filename. Used in the R2 object path."
+        },
+        {
+          "name": "mime_type",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Final MIME of the PUT body. Validated against the host denylist only (MIME allowlist removed).",
+          "notes": [
+            "**The browser MUST send the exact same `Content-Type` header on the PUT** — R2 rejects mismatches with HTTP 403 SignatureDoesNotMatch.",
+            "Failure → `APP_PROVIDER_ERROR` with `MIME_REJECTED`."
+          ]
+        },
+        {
+          "name": "purpose",
+          "type": "string",
+          "default": "\"user_artifact\"",
+          "required": false,
+          "desc": "",
+          "summary": "One of `image_input`, `image_reference`, `user_artifact` — additionally constrained by `upload_grant.allowedPurposes` if set. Outside the set → `APP_PROVIDER_ERROR` `PURPOSE_REJECTED`."
+        }
+      ],
+      "returns": {
+        "type": "{ r2_key: string, put_url: string, expires_in: int, headers: Record<string,string> }",
+        "desc": "• `r2_key` — durable storage handle. **Save this immediately** — without it the post-PUT object is unreachable.\n• `put_url` — presigned PUT URL, TTL = `expires_in` (default ~300 s). PUT bytes here directly from the browser; no auth header needed (it's signed in).\n• `headers` — additional headers the browser MUST send on the PUT (e.g. `Content-Type`, sometimes `x-amz-meta-*`). Some are required for the signature to validate; copy verbatim."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": "APP_NOT_GRANTED",
+          "desc": "`upload_grant.enabled == false`. HTTP 403."
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "Missing `filename` or `mime_type`."
+        },
+        {
+          "name": "APP_PROVIDER_ERROR",
+          "code": "APP_PROVIDER_ERROR",
+          "desc": "MIME or purpose rejected, or R2 signing failure (rare; surfaces as HTTP 502 underneath)."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Store does not support `upload_negotiate`."
+        }
+      ],
+      "example": "// 1) negotiate\nconst neg = await anna.upload.negotiate({\n  filename:  \"screencast.mp4\",\n  mime_type: \"video/mp4\",\n  purpose:   \"user_artifact\",\n});\nawait anna.storage.set({ key: `clip:${id}:r2_key`, value: neg.r2_key });   // save NOW\n\n// 2) PUT direct to R2 — no auth header, but copy negotiate-supplied headers verbatim.\nconst putRes = await fetch(neg.put_url, {\n  method:  \"PUT\",\n  headers: { ...neg.headers, \"content-type\": \"video/mp4\" },\n  body:    file,\n});\nif (!putRes.ok) throw new Error(`R2 PUT failed: ${putRes.status}`);\n\n// 3) confirm — see upload.confirm.\nconst out = await anna.upload.confirm({ r2_key: neg.r2_key });\n",
+      "limitations": [
+        "PUT URL TTL is ~5 min. Slow uploads on flaky networks can race the expiry; renegotiate rather than retrying the same `put_url`.",
+        "Browser CORS: R2 must allow PUT from the iframe origin. Anna Apps' R2 bucket is preconfigured for this; if you self-host, mirror the CORS rules in `docs/design/`.",
+        "Negotiate is free — but if you negotiate-without-confirm repeatedly, the orphan R2 objects can still appear in the bucket (lifecycle policy reaps them). Don't rely on that for cleanup.",
+        "No `size_bytes` validation at negotiate time. A file larger than `upload_grant.maxFileBytes` will succeed at PUT but fail at `upload.confirm` with `TOO_LARGE` after HEAD. Pre-check `file.size` in the bundle to fail fast."
+      ]
+    },
+    {
+      "slug": "upload-confirm",
+      "name": "upload.confirm",
+      "kind": "Host API method · iframe surface",
+      "group": "Upload",
+      "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade → host_upload_service (HEAD R2)",
+      "summary": "Step 2/2 of the large-file flow. The host HEADs the R2 object to verify the PUT actually landed, validates size against `upload_grant.maxFileBytes`, records the upload (charging the file quota), and returns the canonical `download_url`. Idempotent on success — repeated calls re-mint the URL without double-charging.",
+      "wire": {
+        "json_rpc_method": "upload.confirm",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.upload.confirm(args: {r2_key: string}, opts?: {timeoutMs?: number}) => Promise<{r2_key, mime_type, bytes_size, download_url, expires_in}>",
+      "params": [
+        {
+          "name": "r2_key",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Storage handle returned by `upload.negotiate` (or a prior `upload.inline`/`upload.confirm`).",
+          "notes": [
+            "Used both to locate the R2 object and to derive `expected_invoke_id` for cross-check: the host parses position 4 of the slash-split path and rejects mismatches with `APP_PROVIDER_ERROR` `NOT_FOUND`.",
+            "Missing/empty → `APP_INVALID_REQUEST` `r2_key required`."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "{ r2_key: string, mime_type: string, bytes_size: int, download_url: string, expires_in: int }",
+        "desc": "Same shape as `upload.inline` return. Use this method to mint a **fresh** `download_url` whenever the old one expires — pass the persisted `r2_key` and get a new presigned GET (~30 min TTL)."
+      },
+      "errors": [
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "`r2_key` missing or empty."
+        },
+        {
+          "name": "APP_PROVIDER_ERROR",
+          "code": "APP_PROVIDER_ERROR",
+          "desc": "Either `NOT_FOUND` (HTTP 404 underneath — the PUT never happened, expired, or the key was tampered with), `TOO_LARGE` (PUT'd bytes exceed `maxFileBytes`), or any `host_upload_service.HostUploadError` (HTTP 502 underneath)."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Store does not support `upload_confirm`."
+        }
+      ],
+      "example": "// Refresh a stale download URL using only the stored r2_key.\nasync function freshUrl(r2_key) {\n  try {\n    const out = await anna.upload.confirm({ r2_key });\n    return out.download_url;\n  } catch (e) {\n    if (e.code === \"APP_PROVIDER_ERROR\" && /NOT_FOUND/.test(e.message)) {\n      return null;   // user re-upload required\n    }\n    throw e;\n  }\n}\n",
+      "limitations": [
+        "Confirm charges the per-day file quota on first call for a given `r2_key`. Subsequent confirms on the same key are idempotent and free, but a fresh negotiate→confirm cycle does count.",
+        "No automatic background re-confirm. Your app must call `upload.confirm` again any time the cached `download_url` is older than `expires_in`.",
+        "The HEAD-then-record sequence is not transactional. If the host crashes between HEAD and record, you may need to call `upload.confirm` again — it's safe.",
+        "`r2_key` is opaque but **not** secret to other Apps owned by the same user; do not embed credentials in the filename portion of the negotiate request."
+      ]
+    }
+  ]
+}

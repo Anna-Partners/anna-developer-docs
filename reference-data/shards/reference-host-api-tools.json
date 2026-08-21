@@ -1,0 +1,497 @@
+{
+  "section_id": "host-api-tools",
+  "items": [
+    {
+      "slug": "tools-list",
+      "name": "tools.list",
+      "kind": "Host API method · iframe surface",
+      "group": "Tools",
+      "since": "Introduced anna-app-runtime v0.1 · current v0.15.0 / dispatcher 0.19.0",
+      "direction": "Bundle (iframe) → Host RPC → manifest ACL",
+      "summary": "Return every Executa `tool_id` this window is *currently allowed* to invoke. Pure ACL projection — no Agent round-trip, no NATS call. Useful at bundle boot to decide which UI buttons to render before the user clicks.",
+      "wire": {
+        "json_rpc_method": "tools.list",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.tools.list(args?: {}, opts?: {timeoutMs?: number}) => Promise<{tools: Array<{tool_id: string, status?: 'available'|'deploying'|'unavailable'}>}>",
+      "params": [],
+      "returns": {
+        "type": "{ tools: Array<{ tool_id: string, status?: string }> }",
+        "desc": "Flat array of `{tool_id}` objects. Order is `required_executas` first, then `optional_executas`, both filtered through `_is_tool_allowed`.\n\n**Inclusion rule.** A tool appears iff *both* hold:\n• It is declared in `manifest.required_executas[].tool_id` *or* `manifest.optional_executas[].tool_id`.\n• It is matched by an entry in `manifest.ui.host_api.tools` — either `\"required:*\"` (all required), `\"optional:*\"` (all optional), the bare `tool_id`, or any prefixed form whose suffix after the final `:` equals `<tool_id>` (the runtime gate `_is_tool_allowed` does a `:<tool_id>` suffix match). NOTE: the runtime accepts any such prefix, but the CLI `anna-app validate` (`@anna-ai/app-schema`) only permits the canonical authoring forms — `required:*`, `optional:*`, `required:<id>`, `optional:<id>`, a bare `<id>`, or `bundled:<handle>` — so write your manifest using those.\n\nThis call ignores user-grant state and runtime availability: a `tool_id` may be listed even if the Executa Agent for the user is offline. To know whether a tool will *actually run*, you must call `tools.invoke` and handle `agent_unavailable`.\n\n**`status` (optional; dispatcher ≥ 0.14.0).** When the host implements the `get_tool_availability` store hook, each entry carries `status: 'available' | 'deploying' | 'unavailable'` computed from the deploy-reconciliation facts table — use it to disable buttons before a click fails with `executa_not_deployed`. Hosts/harnesses without the hook return the legacy shape (no `status`); treat a missing field as unknown, not available."
+      },
+      "errors": [
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "Window token does not authorise this namespace. Usually means the bundle was loaded into a window whose manifest revision no longer matches."
+        },
+        {
+          "name": "invalid_token",
+          "code": "invalid_token",
+          "desc": "`X-Anna-App-Token` is missing, expired, or signed for a different `window_uuid`."
+        }
+      ],
+      "example": "// At bundle boot — show only buttons the manifest actually grants.\nconst { tools } = await anna.tools.list();\nconst allowed = new Set(tools.map(t => t.tool_id));\n\nfor (const btn of document.querySelectorAll('[data-tool]')) {\n  if (!allowed.has(btn.dataset.tool)) btn.hidden = true;\n}\n",
+      "limitations": [
+        "Result is a snapshot — subscribe with `anna.tools.onChanged(cb)` (SDK ≥ 0.12.0; fires on the `tools.changed` window event after deploy reconciliation lands tools on the agent) and re-run `tools.list()` instead of polling. Manifest-revision changes still require a window reload.",
+        "Does not call into the Executa Agent. A `tool_id` in the list can still fail at invoke time with `agent_unavailable` if no Agent is online for the user.",
+        "No paging: a manifest with 1000+ tools returns them all in one response. Manifest schema currently caps `required + optional` at 64 entries, so this is not a practical issue."
+      ]
+    },
+    {
+      "slug": "tools-invoke",
+      "name": "tools.invoke",
+      "kind": "Host API method · iframe surface",
+      "group": "Tools",
+      "since": "Introduced anna-app-runtime v0.1 · timeoutMs since v0.3 · current v0.15.0 / dispatcher 0.19.0",
+      "direction": "Bundle (iframe) → Host RPC → Executa Agent (NATS) → plugin",
+      "summary": "Invoke a single Executa tool *directly from the bundle*, bypassing the LLM. The host enforces the `host_api.tools` whitelist, mints credentials, negotiates a deadline, calls the user's online Executa Agent over NATS, and returns the plugin's payload — two envelope layers stripped — to the iframe.",
+      "wire": {
+        "json_rpc_method": "tools.invoke",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "upstream_nats": "executa.invoke_tool — params={plugin_name, tool_name, arguments, timeout?, deadline_ms?, credentials?} (relevant when debugging the Agent leg)",
+        "streaming": false
+      },
+      "signature": "anna.tools.invoke(args: {tool_id: string, method?: string, args?: object, timeoutMs?: number}, opts?: {timeoutMs?: number}) => Promise<object>",
+      "params": [
+        {
+          "name": "tool_id",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Server-minted Executa tool id; must be present in the `tools.list` projection.",
+          "notes": [
+            "Format is opaque. Mint-only ids look like `tool-{handle}-{slug}-{uniq}` (no separator); legacy ids use `plugin.tool` or `plugin__tool` — both still routed by `_split_tool_id`.",
+            "Must match an entry in `manifest.ui.host_api.tools`. The runtime gate `_is_tool_allowed` accepts `required:*`, `optional:*`, the bare id, or any ref ending in `:<tool_id>`; otherwise `permission_denied`. For authoring, the CLI `anna-app validate` only permits the canonical forms `required:*` / `optional:*` / `required:<id>` / `optional:<id>` / bare `<id>` / `bundled:<handle>`.",
+            "Reject reasons (HostRpcError `invalid_arg`): missing, empty, or non-string."
+          ]
+        },
+        {
+          "name": "method",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Plugin-side method name. **Required** for mint-only `tool_id`s that contain no `.` or `__` separator.",
+          "notes": [
+            "When omitted, the host falls back to splitting `tool_id` on the first `__` or `.` separator — failing with `invalid_arg` if neither is present.",
+            "When provided, `tool_id` is used verbatim as `plugin_name` and `method` becomes `tool_name` on the NATS call.",
+            "Must be a string when set; non-string types raise `invalid_arg`."
+          ]
+        },
+        {
+          "name": "args",
+          "type": "object",
+          "default": "{}",
+          "required": false,
+          "desc": "",
+          "summary": "Structured tool arguments forwarded verbatim to the plugin as `arguments`.",
+          "notes": [
+            "JSON-serialised by the SDK; functions, BigInts, and cyclic refs are rejected at `postMessage` time.",
+            "Schema is plugin-defined — see the Executa's manifest `tools[].parameters`. The host does not validate field-level shape; an unknown field is silently passed through (or rejected by the plugin)."
+          ]
+        },
+        {
+          "name": "timeoutMs",
+          "type": "int | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Caller-requested plugin-facing deadline in **milliseconds**. Clamped server-side to `[ANNA_APP_TOOLS_INVOKE_TIMEOUT_MIN_MS, _MAX_MS]` (defaults 1 000 / **90 000** — the public edge's held-request ceiling, forum #199). Calls that need more must use `tools.invokeAsync`.",
+          "notes": [
+            "Booleans are rejected explicitly (`invalid_arg`) — `True`/`False` would otherwise clamp via the `bool ⊂ int` quirk.",
+            "When omitted, the Agent falls back to the per-tool `timeout` declared in the Executa manifest, or `ANNA_APP_TOOLS_INVOKE_TIMEOUT_DEFAULT_MS` (65 000) if neither side declares one.",
+            "Host wall-clock wait = clamped value + `ANNA_APP_TOOLS_INVOKE_TIMEOUT_GRACE_MS` (2 000) so an in-flight ack/cancel has room to land before `tool_timeout` fires.",
+            "SDK default per-call timeout is 70 000 ms (`DEFAULT_TIMEOUTS_BY_NS.tools`); pass a larger value here *and* in `opts.timeoutMs` if the plugin needs longer.",
+            "Clamp-down is observable: when a clamped call later times out, `error.details` carries `requested_timeout_ms` / `max_timeout_ms` alongside the effective `timeout_ms`."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "object",
+        "desc": "The plugin's `invoke` payload, with both envelope layers stripped.\n\nThe raw NATS reply is `{success: bool, data: {success: bool, tool, data: <payload>, error?}}` (see *executa-invoke-result-shape*). The host:\n1. On a failed **outer** envelope, first classifies plugin JSON-RPC errors (structured `data.jsonrpc_error.code` from Agent ≥ 1.1.0-beta.33, else the `\"invoke error: {'code': ...\"` string): `-32602` → `invalid_arg`, `-32601`/`-32603`/`-32000..-32099` → `tool_failed` (both carry `details.jsonrpc_code` + `source: \"plugin\"`); anything else → `executa_unavailable`.\n2. Rejects with `tool_failed` if the **inner** envelope is missing or `success != true`.\n3. Returns `invoke.data` if it's an object, else `{}`.\n\nMost plugins return a domain payload (e.g. `{state, etag}`); callers should treat unknown keys as additive."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`tool_id` missing/empty/non-string, `method` non-string, `timeoutMs` non-int (or bool), or `tool_id` carries no separator AND no `method` was supplied. ALSO: the plugin itself rejected the arguments (raised → JSON-RPC `-32602`); then `details` carries `{jsonrpc_code: -32602, source: \"plugin\"}` — do not retry, fix the args."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "`tool_id` is not whitelisted by `manifest.ui.host_api.tools` for this window."
+        },
+        {
+          "name": "agent_unavailable",
+          "code": "agent_unavailable",
+          "desc": "No Executa Agent is currently online for the calling user (checked via `agent_presence_service`)."
+        },
+        {
+          "name": "tool_timeout",
+          "code": "tool_timeout",
+          "desc": "Host wall-clock wait (`timeoutMs + grace_ms`) elapsed before the Agent acked. `details` carries `{tool_id, timeout_ms}` and any deadline metadata the Agent attached."
+        },
+        {
+          "name": "executa_unavailable",
+          "code": "executa_unavailable",
+          "desc": "Outer NATS envelope reported `success != true` for transport-level reasons (Agent crashed, NATS rejection, stdio protocol breakage `-32700`/`-32600`). Plugin application errors (`-32602`, `-32601`, `-32603`, `-32000..-32099`) no longer land here — they classify to `invalid_arg` / `tool_failed`."
+        },
+        {
+          "name": "tool_failed",
+          "code": "tool_failed",
+          "desc": "Plugin executed but reported failure — via `success: false` envelope (or a non-dict), OR via raise → JSON-RPC `-32601`/`-32603`/`-32000..-32099` (then `details` carries `{jsonrpc_code, source: \"plugin\"}`). The plugin's error string is surfaced verbatim in `message`."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Store does not support `invoke_executa_tool` (local-dev harness without a NATS bridge)."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "Resolved `user_id` no longer exists (token validated but row deleted between auth and dispatch)."
+        }
+      ],
+      "example": "// bundle/app.js — call a server-minted focus-session tool.\nconst TOOL_ID = \"tool-test-focus-session-12345678\";\nconst TOOL_METHOD = \"session_action\";\n\ntry {\n  const result = await anna.tools.invoke({\n    tool_id: TOOL_ID,\n    method:  TOOL_METHOD,\n    args:    { action: \"start\", duration_min: 25 },\n    timeoutMs: 60_000,            // within the 1 s–90 s clamp, so passed through as-is\n  });\n  applyState(result);             // plugin payload, envelopes stripped\n} catch (e) {\n  switch (e.code) {\n    case \"tool_timeout\":          setStatus(\"plugin took too long\");  break;\n    case \"agent_unavailable\":     setStatus(\"agent is offline\");      break;\n    case \"permission_denied\":     setStatus(\"tool not whitelisted\");  break;\n    case \"tool_failed\":           setStatus(`plugin: ${e.message}`);  break;\n    default:                       throw e;\n  }\n}\n",
+      "limitations": [
+        "Synchronous ceiling is **90 s** (edge-bound). Work that may exceed it must go through the async job channel — `tools.invokeAsync` / `getJob` / `cancelJob` / `listJobs` (dispatcher ≥ 0.19.0).",
+        "Per-call `timeoutMs` is **silently clamped** to policy bounds — out-of-range values do not raise. Read back the host's `details.timeout_ms` on `tool_timeout` to see what was actually used.",
+        "Manifest-side per-tool overrides are not yet threaded through the host store; today only the caller value and the policy default apply. The Agent honours its own manifest `tool_def.timeout` when the caller omits `timeoutMs`.",
+        "Routing picks the user's `default_agent_client_id` when online, otherwise the first online Agent — there is no client_id pinning from the bundle side.",
+        "Credentials (`PlatformCredentialService.resolve_all_plugin_credentials`) are best-effort: a failure resolves to `None` and the plugin runs without credentials. Plugins must handle missing-credential cases.",
+        "The plugin payload (`invoke.data`) is forced to an object — non-dict returns surface as `{}`. Plugins that need to return scalars or arrays must wrap them (e.g. `{value: ...}`)."
+      ]
+    },
+    {
+      "slug": "tools-invoke-async",
+      "name": "tools.invokeAsync",
+      "kind": "Host API method · iframe surface",
+      "group": "Tools",
+      "since": "Introduced dispatcher 0.19.0 / @anna-ai/app-runtime 0.15.0 (2026-07)",
+      "direction": "Bundle (iframe) → Host RPC (instant) → job row + NATS long command → Executa Agent → plugin",
+      "summary": "Start a long-running tool call as a host-owned **job** and return immediately with a `jobId`. No held-open HTTP request anywhere in the chain — this is the only correct channel for tools that may exceed the 90 s synchronous ceiling. Execution state lives in the host DB; updates arrive via `tool_job` window events (push) and `tools.getJob` (authoritative pull).",
+      "wire": {
+        "json_rpc_method": "tools.invokeAsync",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "upstream_nats": "rpc.executa / invoke_tool as a long-running command (command_id == jobId == plugin invoke_id, `tjob_<hex32>`); progress rides matrix.progress.{client_id}.{jobId}",
+        "streaming": false
+      },
+      "signature": "anna.tools.invokeAsync(args: {tool_id: string, method?: string, args?: object, timeoutMs?: number, clientTag?: string}) => Promise<{jobId: string, state: \"queued\", deadlineMs: number}>",
+      "params": [
+        {
+          "name": "tool_id",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Server-minted Executa tool id; same whitelist gate (`host_api.tools`) as `tools.invoke`.",
+          "notes": [
+            "Mint-only ids (`tool-{handle}-{slug}-{uniq}`) carry no separator — pass the plugin method via `method`."
+          ]
+        },
+        {
+          "name": "method",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Plugin-side method name; **required** for mint-only `tool_id`s (same splitting rules as `tools.invoke`).",
+          "notes": []
+        },
+        {
+          "name": "args",
+          "type": "object",
+          "default": "{}",
+          "required": false,
+          "desc": "",
+          "summary": "Structured tool arguments, forwarded verbatim to the plugin. Size cap 64 KB (`invalid_arg` beyond).",
+          "notes": []
+        },
+        {
+          "name": "timeoutMs",
+          "type": "int | undefined",
+          "default": "1_800_000 (30 min)",
+          "required": false,
+          "desc": "",
+          "summary": "The **job deadline** — how long the plugin may run. Clamped to [60 000, 86 400 000] (60 s – 24 h). Unlike the sync channel this is not edge-bound: no HTTP request is held open.",
+          "notes": [
+            "Deadline elapsed without a terminal state → job flips to `expired` with error `tool_timeout`, and the host sends the agent a cancel.",
+            "Values below 60 s are raised to 60 s — calls that fit under 90 s should use plain `tools.invoke` instead."
+          ]
+        },
+        {
+          "name": "clientTag",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Caller-defined correlation tag (≤120 chars), stored on the job row and filterable in `tools.listJobs` — the key to re-adopting jobs after an iframe reload.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "object",
+        "desc": "`{jobId, state: \"queued\", deadlineMs}`. `jobId` matches `^tjob_[0-9a-f]{32}$` and equals the plugin-side `invoke_id` (one id across app, host, agent, audit). `deadlineMs` is an absolute epoch-milliseconds wall clock."
+      },
+      "errors": [
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "`tool_id` not whitelisted by `manifest.ui.host_api.tools`."
+        },
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "Bad `tool_id`/`method`/`timeoutMs`/`clientTag` types, `args` not an object or > 64 KB."
+        },
+        {
+          "name": "job_quota_exceeded",
+          "code": "job_quota_exceeded",
+          "desc": "The user already has 5 active (queued/running) jobs. `details` carries `{max_active, active}`."
+        },
+        {
+          "name": "agent_unavailable",
+          "code": "agent_unavailable",
+          "desc": "No online agent and wake failed; also returned (with an upgrade hint) when the agent predates the job-capable version."
+        },
+        {
+          "name": "agent_waking",
+          "code": "agent_waking",
+          "desc": "Cloud Agent is resuming — retry after `details.retry_after_ms` (the SDK's `invokeAsyncAwait` does not auto-retry creation; surface a spinner)."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Host predates dispatcher 0.19.0 or the async channel is disabled."
+        }
+      ],
+      "example": "// The high-level wrapper is what most apps want:\nconst ctl = new AbortController();\ncancelBtn.onclick = () => ctl.abort();\n\nconst result = await anna.tools.invokeAsyncAwait(\n  {\n    tool_id: TOOL_ID,\n    method: \"run_steps\",\n    args: { steps: 100 },\n    timeoutMs: 30 * 60_000,      // job deadline\n    clientTag: \"render-batch-7\", // reload-recovery key\n  },\n  {\n    onProgress: (ev) => bar.update(ev.data),  // {seq, type, data}\n    signal: ctl.signal,                        // abort → cancelJob\n  },\n);\n// rejects with err.code ∈ tool_failed | tool_timeout | cancelled |\n// wait_timeout (err.jobId lets you recover) | job_quota_exceeded | …",
+      "limitations": [
+        "Per-user active job quota: 5. Per-agent long-job concurrency: 3 — excess jobs fail fast with `long_job_capacity` (fold into the job's error; retryable).",
+        "Result cap 256 KB — larger payloads must be stored via `host/uploadFile` and returned as a reference (`result_too_large` otherwise).",
+        "The `tool_job` push events never carry the result; always `getJob` after a terminal event.",
+        "Terminal jobs are retained 30 days, then purged (progress cascades)."
+      ]
+    },
+    {
+      "slug": "tools-get-job",
+      "name": "tools.getJob",
+      "kind": "Host API method · iframe surface",
+      "group": "Tools",
+      "since": "Introduced dispatcher 0.19.0 / @anna-ai/app-runtime 0.15.0 (2026-07)",
+      "direction": "Bundle (iframe) → Host RPC → job row read (no Agent round-trip)",
+      "summary": "Authoritative snapshot of one job + an incremental progress slice. This is the single source of truth: `tool_job` push events are a latency optimisation and may be dropped — `getJob` never lies. Also the reload-recovery read and the polling fallback used by `invokeAsyncAwait`.",
+      "wire": {
+        "json_rpc_method": "tools.getJob",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "upstream_nats": "none — pure DB read",
+        "streaming": false
+      },
+      "signature": "anna.tools.getJob(args: {jobId: string, sinceSeq?: number, limit?: number}) => Promise<JobSnapshot>",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Job id from `invokeAsync` / `listJobs`; must match `^tjob_[0-9a-f]{32}$`.",
+          "notes": []
+        },
+        {
+          "name": "sinceSeq",
+          "type": "int",
+          "default": "0",
+          "required": false,
+          "desc": "",
+          "summary": "Return only progress events with `seq > sinceSeq`. Feed back the previous response's `lastSeq` for cheap incremental reads.",
+          "notes": []
+        },
+        {
+          "name": "limit",
+          "type": "int",
+          "default": "100",
+          "required": false,
+          "desc": "",
+          "summary": "Max progress events in the slice (1–500).",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "object",
+        "desc": "`JobSnapshot`: `{jobId, toolId, state, createdAt, updatedAt, deadlineMs (epoch ms), clientTag?, result? (succeeded only), error? ({code, message, details?}; failed/cancelled/expired only), progress: [{seq, ts, type, data}], lastSeq, lastHeartbeatAt}`. `state` ∈ queued | running | succeeded | failed | cancelled | expired."
+      },
+      "errors": [
+        {
+          "name": "job_not_found",
+          "code": "job_not_found",
+          "desc": "`jobId` does not exist **or belongs to another user** — ownership misses are indistinguishable from absence by design (no existence oracle)."
+        },
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`jobId` not matching `^tjob_[0-9a-f]{32}$`, out-of-range `sinceSeq`/`limit`, over-long `clientTag`/`reason`, or bad `state`/`since` values."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Host predates dispatcher 0.19.0, or the async channel is disabled (`ANNA_APP_TOOLS_ASYNC_ENABLED=false`)."
+        }
+      ],
+      "example": "// Incremental poll loop (what invokeAsyncAwait does internally):\nlet seq = 0;\nfor (;;) {\n  const snap = await anna.tools.getJob({ jobId, sinceSeq: seq });\n  snap.progress.forEach(renderProgress);      // [{seq, ts, type, data}]\n  if (snap.progress.length) seq = snap.lastSeq;\n  if ([\"succeeded\",\"failed\",\"cancelled\",\"expired\"].includes(snap.state)) {\n    if (snap.state === \"succeeded\") return snap.result;\n    throw Object.assign(new Error(snap.error.message), snap.error);\n  }\n  await sleep(2000);\n}",
+      "limitations": [
+        "Progress is a per-job ring of the **latest 500** events — a slow reader can miss early events (the terminal state + result are never in the ring, they're on the row).",
+        "Progress event `data` is truncated to 8 KB per event (`{_truncated: true}` placeholder beyond)."
+      ]
+    },
+    {
+      "slug": "tools-cancel-job",
+      "name": "tools.cancelJob",
+      "kind": "Host API method · iframe surface",
+      "group": "Tools",
+      "since": "Introduced dispatcher 0.19.0 / @anna-ai/app-runtime 0.15.0 (2026-07)",
+      "direction": "Bundle (iframe) → Host RPC → job transition + `_cancel_invoke` fast-path command → Agent",
+      "summary": "Cooperative, idempotent cancel. Active job: the row flips to `cancelled` immediately (user-visible), then the agent gracefully cancels the command task — the plugin process and its other concurrent invokes are untouched; a process-group kill is only the 500 ms fallback for a truly stuck task. Terminal job: `{cancelled: false}` no-op.",
+      "wire": {
+        "json_rpc_method": "tools.cancelJob",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "upstream_nats": "_cancel_invoke fast-path on matrix.command.{client_id} with {job_id, plugin_name, tool_name, reason}",
+        "streaming": false
+      },
+      "signature": "anna.tools.cancelJob(args: {jobId: string, reason?: string}) => Promise<{jobId: string, state: JobState, cancelled: boolean}>",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Job to cancel; `^tjob_[0-9a-f]{32}$`.",
+          "notes": []
+        },
+        {
+          "name": "reason",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Free-text audit note (≤200 chars); lands in the job's error message.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "object",
+        "desc": "`{jobId, state, cancelled}`. `cancelled: true` iff this call performed the transition; repeating the call (or cancelling a finished job) returns the terminal `state` with `cancelled: false`."
+      },
+      "errors": [
+        {
+          "name": "job_not_found",
+          "code": "job_not_found",
+          "desc": "`jobId` does not exist **or belongs to another user** — ownership misses are indistinguishable from absence by design (no existence oracle)."
+        },
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`jobId` not matching `^tjob_[0-9a-f]{32}$`, out-of-range `sinceSeq`/`limit`, over-long `clientTag`/`reason`, or bad `state`/`since` values."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Host predates dispatcher 0.19.0, or the async channel is disabled (`ANNA_APP_TOOLS_ASYNC_ENABLED=false`)."
+        }
+      ],
+      "example": "// AbortSignal wiring (invokeAsyncAwait does this for you):\nconst out = await anna.tools.cancelJob({ jobId, reason: \"user clicked stop\" });\nif (!out.cancelled) console.log(`already terminal: ${out.state}`);",
+      "limitations": [
+        "Cancel is cooperative — a plugin in a tight uninterruptible loop is only stopped by the 500 ms process-group-kill fallback, which reaps the WHOLE plugin process (other in-flight invokes of the same plugin included).",
+        "A `succeeded` result racing the cancel is absorbed idempotently: the row stays `cancelled`, the late result is kept for audit only."
+      ]
+    },
+    {
+      "slug": "tools-list-jobs",
+      "name": "tools.listJobs",
+      "kind": "Host API method · iframe surface",
+      "group": "Tools",
+      "since": "Introduced dispatcher 0.19.0 / @anna-ai/app-runtime 0.15.0 (2026-07)",
+      "direction": "Bundle (iframe) → Host RPC → job rows read (no Agent round-trip)",
+      "summary": "Enumerate the current user's recent jobs — the reload-recovery entry point. After an iframe reload (or in a second window) call `listJobs({clientTag, state: [\"queued\",\"running\"]})` to find in-flight work, then drive each job with `getJob({sinceSeq})`.",
+      "wire": {
+        "json_rpc_method": "tools.listJobs",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "upstream_nats": "none — pure DB read",
+        "streaming": false
+      },
+      "signature": "anna.tools.listJobs(args?: {tool_id?: string, state?: JobState | JobState[], clientTag?: string, since?: string, limit?: number}) => Promise<{jobs: JobSnapshot[], truncated: boolean}>",
+      "params": [
+        {
+          "name": "tool_id",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Filter to one tool id.",
+          "notes": []
+        },
+        {
+          "name": "state",
+          "type": "string | string[] | undefined",
+          "default": "undefined (all states)",
+          "required": false,
+          "desc": "",
+          "summary": "One or more of queued | running | succeeded | failed | cancelled | expired.",
+          "notes": []
+        },
+        {
+          "name": "clientTag",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Exact match on the tag passed at `invokeAsync` time — scope recovery to YOUR batch.",
+          "notes": []
+        },
+        {
+          "name": "since",
+          "type": "string | undefined",
+          "default": "24h ago",
+          "required": false,
+          "desc": "",
+          "summary": "RFC3339 lower bound on `createdAt`; lookback capped at 7 days.",
+          "notes": []
+        },
+        {
+          "name": "limit",
+          "type": "int",
+          "default": "20",
+          "required": false,
+          "desc": "",
+          "summary": "Max rows (1–100), newest-first.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "object",
+        "desc": "`{jobs: JobSnapshot[], truncated}` — snapshots carry an EMPTY `progress` slice (fetch per-job history via `getJob`); `truncated: true` means more rows matched than `limit`."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`jobId` not matching `^tjob_[0-9a-f]{32}$`, out-of-range `sinceSeq`/`limit`, over-long `clientTag`/`reason`, or bad `state`/`since` values."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Host predates dispatcher 0.19.0, or the async channel is disabled (`ANNA_APP_TOOLS_ASYNC_ENABLED=false`)."
+        }
+      ],
+      "example": "// Reload recovery (see the anna-app-long-task-demo example):\nconst { jobs } = await anna.tools.listJobs({\n  clientTag: \"render-batch-7\",\n  state: [\"queued\", \"running\"],\n});\nfor (const job of jobs) adoptJob(job.jobId, job.lastSeq);",
+      "limitations": [
+        "Terminal jobs age out after 30 days (retention purge).",
+        "Snapshots in the list carry no progress events — one `getJob` per adopted job."
+      ]
+    }
+  ]
+}

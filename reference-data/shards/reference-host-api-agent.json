@@ -1,0 +1,572 @@
+{
+  "section_id": "host-api-agent",
+  "items": [
+    {
+      "slug": "agent-session-create",
+      "name": "agent.session.create",
+      "kind": "Host API method · iframe surface",
+      "group": "Agent",
+      "since": "Introduced anna-app-runtime v0.2.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade.agent_session_create → AnnaAppSession (kind=agent) + cached app_session_token",
+      "summary": "Mint a server-side `AnnaAppSession` (kind=`agent`) bound to the current `(user, app, window)` triple. Returns an `app_session_uuid` the bundle threads through every subsequent `run` / `cancel` / `history` / `delete` call. The underlying capability token is cached in `_aps_token_cache[uuid]` for its TTL — the iframe never sees it.",
+      "wire": {
+        "json_rpc_method": "agent.session.create",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.agent.session.create(args: {submode: 'auto'|'fixed', fixed_client_id?: string, label?: string, systemPrompt?: string, quotaCaps?: {max_tokens_per_call?: number, max_runs_per_day?: number, max_concurrent_runs?: number}}, opts?: {timeoutMs?: number}) => Promise<{app_session_uuid: string, expires_in: number, submode: 'auto'|'fixed', fixed_client_id: string|null, system_prompt: string|null, granted_tools: string[], inherit_host_tools: boolean}>",
+      "params": [
+        {
+          "name": "submode",
+          "type": "'auto' | 'fixed'",
+          "default": null,
+          "required": true,
+          "summary": "Tool-resolution mode. `auto` lets the LangGraph runner pick any tool the user's Executa Agent exposes (constrained by `manifest.ui.host_api.agent.tools`). `fixed` pins the run to a single `client_id` (one specific Executa) and rejects any other tool.",
+          "notes": [
+            "`invalid_arg` if absent or not exactly `'auto'` / `'fixed'`.",
+            "`permission_denied` if the chosen submode is `false` in `manifest.ui.host_api.agent.session.{auto,fixed}` — the manifest must opt into each submode explicitly."
+          ]
+        },
+        {
+          "name": "fixed_client_id",
+          "type": "string",
+          "default": null,
+          "required": "when submode='fixed'",
+          "summary": "Executa `client_id` the run is pinned to. Required for `submode='fixed'`; ignored for `submode='auto'`. SDK also accepts the camelCase alias `fixedClientId`.",
+          "notes": [
+            "`invalid_arg` if missing when `submode='fixed'`.",
+            "`permission_denied` if not present in `manifest.ui.host_api.agent.session.fixed.client_ids` (when that list is non-empty — an empty list means \"any user-owned Executa\")."
+          ]
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": false,
+          "summary": "Human-readable label stored on the `AnnaAppSession` row. Visible in admin / debug UIs; not surfaced to the model."
+        },
+        {
+          "name": "systemPrompt",
+          "type": "string",
+          "required": false,
+          "summary": "Optional session-level system prompt persisted on the `AnnaAppSession` row and applied to every `run`. Validated against the platform safety floor (≤ 32000 chars; forbidden role / fence tokens rejected with `APP_INVALID_REQUEST`). A per-run `systemPrompt` on `agent.session.run` overrides it for that turn. Legacy alias: `system_prompt`."
+        },
+        {
+          "name": "quotaCaps",
+          "type": "{max_tokens_per_call?, max_runs_per_day?, max_concurrent_runs?}",
+          "required": false,
+          "summary": "Caller-requested ceiling. Intersected (`min`) with the user's `llm_grant.quota_caps` via `_intersect_quota_caps`; the result is stored on `session.quota_caps` and consulted by every subsequent `run`.",
+          "notes": [
+            "Defaults fall back to grant value; if neither side declares a field, `max_tokens_per_call` defaults to **4096**.",
+            "Requesting *more* than the grant has no effect — silently clamped down."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}",
+        "desc": "• `app_session_uuid`: `aps_`-prefixed uuid; thread through every subsequent agent call.\n• `expires_in`: TTL in seconds for the cached capability token (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early). For absolute deadlines (`expires_at` / `max_lifetime_at` / `session_expires_in`) call `agent.session.refresh`.\n• `submode` / `fixed_client_id`: echoed back so the SDK can stash them on the `AgentSession` wrapper.\n• `system_prompt`: the validated per-session system prompt persisted on the row (or `null`).\n• `granted_tools`: the tool surface resolved for this session at creation time via `effective_granted_tool_names(session)` — runtime-accurate, NOT a raw manifest echo. The facade re-resolves on each `run`, so a freshly-installed Executa appears without re-creating the session.\n• `inherit_host_tools`: when `true` the session inherits the host's full tool surface and `granted_tools` is reported as `[\"*\"]` at run time; when `false` and `granted_tools` is empty the agent is text-only (watch for the `run_meta` `NO_TOOLS_AVAILABLE` warning frame)."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`submode` missing/invalid, or `fixed_client_id` missing when `submode='fixed'`."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "Manifest has no `host_api.agent` grant, the chosen submode is `false`, or `fixed_client_id` is not in the manifest's fixed allow-list."
+        },
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": "APP_NOT_GRANTED",
+          "desc": "User has no `llm_grant.agent` block, no active subscription, or the user row vanished. `details.jsonrpc_code = -32001`."
+        },
+        {
+          "name": "APP_AGENT_SUBMODE_MISMATCH",
+          "code": "APP_AGENT_SUBMODE_MISMATCH",
+          "desc": "User's grant `submode` differs from the request. `details.jsonrpc_code = -32016`."
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "Facade-side validation failure (e.g. `fixed_client_id` does not exist on this user's Executa list). `details.jsonrpc_code = -32004`."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "Resolved `user_id` no longer exists."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Local-dev harness without an agent bridge."
+        }
+      ],
+      "example": "// Auto-submode: pick any user Executa.\nconst sess = await anna.agent.session.create({\n  submode: \"auto\",\n  label: \"daily-summary\",\n  quotaCaps: { max_tokens_per_call: 2000 },\n});\n// → { app_session_uuid: \"aps_…\", expires_in: 3600, submode: \"auto\",\n//     fixed_client_id: null, granted_tools: [\"executa-fetch:*\", …] }\n\n// Fixed-submode: pin to one Executa.\nconst pinned = await anna.agent.session.create({\n  submode: \"fixed\",\n  fixed_client_id: \"executa-write-notes-abc123\",\n});\n",
+      "limitations": [
+        "`AnnaAppSession` rows accumulate — call `agent.session.delete` (or rely on `expires_in`) to avoid leaking entries in admin views.",
+        "`granted_tools` is runtime-resolved at creation (`effective_granted_tool_names`), not a raw manifest snapshot; the facade re-resolves the user's actual tool surface on every `run` (so a freshly-installed Executa appears immediately, no need to re-create the session). Pair it with `inherit_host_tools` to know whether the session can use tools at all.",
+        "`quotaCaps` cannot raise the grant's ceiling — `_intersect_quota_caps` always takes `min(requested, grant)`.",
+        "The high-level SDK helper `await anna.agent.session({...})` (note: callable, no `.create`) returns a JS `AgentSession` instance with `.run()` / `.cancel()` / `.history()` / `.delete()` methods bound to the new uuid — prefer it over manual uuid threading."
+      ]
+    },
+    {
+      "slug": "agent-session-catalog",
+      "name": "agent.session.catalog",
+      "kind": "Host API method · iframe surface",
+      "group": "Agent",
+      "since": "Introduced anna-app-runtime v0.14.0 / dispatcher 0.18.0",
+      "direction": "Bundle (iframe) → Host RPC → SqlAlchemyWindowStore.agent_session_catalog → AppToolRegistry + UserAnnaApp.custom_config.llm_grant",
+      "summary": "Discover the platform-tool universe for agent sessions BEFORE creating one. Answers two questions that were previously unanswerable from an app: (1) what is the full set of legal `allowed_tools` names (the AppToolRegistry), and (2) which of them would actually resolve for THIS app — with a `blocked_by` diagnostic for each unavailable tool. Read-only: mints no session, consumes no quota, touches no LangGraph state.",
+      "wire": {
+        "json_rpc_method": "agent.session.catalog",
+        "auth": "Handled by the host page — same envelope as every agent.* method. Granted whenever ANY agent submode is enabled in `ui.host_api.agent.session`.",
+        "streaming": false,
+        "upstream": "Pure metadata read: AppToolRegistry (in-process) + the caller's `llm_grant` row. No facade / worker involvement."
+      },
+      "signature": "anna.agent.session.catalog() → Promise<CatalogResult>",
+      "params": [],
+      "returns": {
+        "type": "{platform_tools: {name, description, dev_safe, declared_in_manifest, user_granted, eligible, blocked_by?: 'manifest'|'user_grant'}[], inherit_host_tools_granted: boolean, manifest_declared: string[], user_granted: string[]}",
+        "desc": "`platform_tools` enumerates the ENTIRE sandbox registry (not just your eligible subset) so developers can see what exists and what to request. `eligible` = `declared_in_manifest && user_granted`; `blocked_by` names the first failing gate: `manifest` → add the tool to `ui.host_api.agent.tools` and republish; `user_grant` → the user must enable it in the Permissions modal. `inherit_host_tools_granted` tells you whether `quotaCaps.inherit_host_tools: true` would be honored at create time."
+      },
+      "errors": [
+        {
+          "code": "not_found",
+          "when": "Caller user row is missing (should not happen for a live window)."
+        },
+        {
+          "code": "APP_NOT_GRANTED",
+          "when": "The app is not installed / not enabled for this user (mirrors the create-time grant check)."
+        },
+        {
+          "code": "not_implemented",
+          "when": "Host runtime predates dispatcher 0.18.0 (or the local harness, which does not wire a catalog store)."
+        }
+      ],
+      "example": "const cat = await anna.agent.session.catalog();\nconst usable = cat.platform_tools.filter(t => t.eligible).map(t => t.name);\n// e.g. [\"fs_read_file\", \"web_search\"] — legal values for quotaCaps.allowed_tools\nconst sess = await anna.agent.session({\n  submode: \"auto\",\n  quotaCaps: { inherit_host_tools: false, allowed_tools: [\"fs_read_file\"] },\n});\n// lean read-only sandbox session — the agent can read files but has no\n// fs_write_file / exec_run, and hundreds of inherited host tools (≈100K\n// prompt tokens) are avoided",
+      "limitations": [
+        "Enumerates the SANDBOX registry only. The inherit-host-tools surface is user-specific and dynamic (built-ins + every installed Executa) — inspect it after the fact via the create response's `granted_tools` / the run's `run_meta` frame.",
+        "Eligibility reflects the grant at call time; the user can change Permissions between calls."
+      ]
+    },
+    {
+      "slug": "agent-session-run",
+      "name": "agent.session.run",
+      "kind": "Host API method · iframe surface · streaming",
+      "group": "Agent",
+      "since": "Introduced anna-app-runtime v0.2.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade.agent_session_dispatch → Redis task queue → agent_worker (LangGraph) → NATS per-stream subject → `rpc.stream` events",
+      "summary": "Submit a user turn to an existing agent session and stream the LangGraph response back to the iframe. The handler validates + enqueues and returns *immediately* with `{stream_id, run_id}`; the agent worker publishes each frame directly to a per-stream NATS subject, which the host page forwards as `('rpc.stream', {stream_id, seq, payload, done})` events into the iframe, where the SDK's `AgentRunStream` reassembles them into an `AsyncIterable`.",
+      "wire": {
+        "json_rpc_method": "agent.session.run",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": true,
+        "stream_topic": "`rpc.stream` — `{stream_id, window_uuid, seq, payload, done}`. `seq` starts at 1; the dispatcher orders by `seq` (out-of-order frames are buffered) so a missing seq pauses delivery. Last frame carries `done: true` with a terminal `{event: 'end', run_id}` payload.",
+        "upstream": "`app_llm_facade.agent_session_run` → `app_runner` (LangGraph) → `_copilot_unified` worker queue (origin=`app`)."
+      },
+      "signature": "anna.agent.session.run(args: {app_session_uuid: string, content: string, run_id?: string, recursion_limit?: number, systemPrompt?: string, allowed_tools?: string[], modelPreferences?: object}, opts?: {timeoutMs?: number}) => Promise<{stream_id: string, run_id: string}>",
+      "params": [
+        {
+          "name": "app_session_uuid",
+          "type": "string (aps_…)",
+          "required": true,
+          "summary": "Session id from `agent.session.create`. `invalid_arg` if missing / non-string / does not start with `aps_`."
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true,
+          "summary": "User turn text. `invalid_arg` if missing / non-string / whitespace-only."
+        },
+        {
+          "name": "attachments",
+          "type": "Attachment[] — {type, url | data, filename?, detail?}",
+          "required": false,
+          "summary": "Native multimodal image inputs (forum #171): the session's model sees the images DIRECTLY in the same inference as `content` — no upload_local_file → analyze_image round-trip. image/* MIME only, ≤ 6 per run, ≤ 20 MB each; `url` must be public HTTPS (SSRF-guarded), `data` accepts base64 / data-URI (host uploads to storage server-side). Requires a vision-capable model — otherwise the run fails fast with `APP_MODEL_NOT_VISION_CAPABLE` (pair with `modelPreferences` to pick one). Images are visible for THIS run only; re-attach for later turns. Best practice for local files: upload first via `anna.upload.inline`, then pass the returned `url`."
+        },
+        {
+          "name": "run_id",
+          "type": "string (uuid)",
+          "required": false,
+          "summary": "Caller-supplied run id (idempotency token). When omitted the store generates a fresh `uuid4`. Pass the same value to `agent.session.cancel` to abort."
+        },
+        {
+          "name": "recursion_limit",
+          "type": "number (int)",
+          "required": false,
+          "summary": "LangGraph max recursion depth. Default **8** — increase for long tool-chain workflows; the facade caps server-side via LangGraph config."
+        },
+        {
+          "name": "systemPrompt",
+          "type": "string",
+          "required": false,
+          "summary": "Optional per-run system-prompt override. Takes precedence over the session-level `systemPrompt` from `create` for THIS turn only (not persisted). Validated against the platform safety floor. The server reads `systemPrompt` first, falling back to the legacy `system` field for older callers."
+        },
+        {
+          "name": "allowed_tools",
+          "type": "string[]",
+          "required": false,
+          "summary": "Tighten the tool surface for this single run (subset of `granted_tools` returned by `create`). SDK accepts `allowedTools` alias. Useful for \"safe mode\" / read-only runs."
+        },
+        {
+          "name": "modelPreferences",
+          "type": "object",
+          "required": false,
+          "summary": "Same shape as `llm.complete` — `hints` / `costPriority` / `speedPriority` / `intelligencePriority`. Resolved at each LangGraph node, intersected with the user's grant."
+        }
+      ],
+      "returns": {
+        "type": "{stream_id: string, run_id: string}",
+        "desc": "Synchronous acknowledgement. **Bytes flow over the `rpc.stream` event topic, not as the resolved value.**\n\n• `stream_id`: dispatcher-allocated `strm_<hex16>`; the SDK uses this to route incoming `rpc.stream` frames into the right `AgentRunStream`. The store's `agent_session_run` returns only `run_id`; the dispatcher fills `stream_id` via `setdefault` on the way out — never override it from the store side or the SDK will lose frames.\n• `run_id`: echo of the caller-supplied id (or the auto-generated uuid). Carry forward to `cancel`.\n\n**Stream frame payload shapes** (what your `for await (const frame of stream)` loop actually sees):\n\n• Status frames (seq 0 from the API, then from the worker): `{event: 'queued', task_id}`, `{event: 'started'}`, `{event: 'keepalive'}` — the worker heartbeats every 10 s of frame silence, so a healthy-but-slow run is distinguishable from a dead stream.\n• `{event: 'run_meta', run_id, granted_tools, warnings?}` — the tool surface actually granted to THIS run. Check `warnings` for `NO_TOOLS_AVAILABLE`.\n• Model/tool activity: `{event: 'sse', choices: [{delta: {…}, index: 0}]}` — OpenAI-style deltas, NOT `model_token` frames. `delta` carries ONE of: `content` (assistant text), `thinking` (reasoning tokens), `tool_start: {id, name, input}`, `tool_end: {id, name, output}`, `task_complete: {task_id, status, token_usage}` (success terminal marker), `task_cancelled: {task_id, reason}`.\n• In-run errors: `{event: 'sse', error: <message>, error_type, task_id, is_retryable?}` — `error_type` ∈ `empty_completion` (run produced NO assistant text and NO tool calls; retryable), `quota_exhausted`, `recursion_limit`, `context_overflow`, provider classes.\n• Gate/infra errors: `{event: 'error', code, message}` — e.g. dispatch rejection (`APP_*`), `queue_timeout` (not claimed by a worker within 120 s), `timeout` (30 min execution cap), `session_revoked`, `internal`.\n• Terminal: `{event: 'end', run_id}` with `done: true` — ALWAYS emitted exactly once, on success, error, cancellation and crash alike.\n\nA run that ends WITHOUT any assistant `content` delta and WITHOUT any `tool_start` is never reported as a bare success: since forum #191 the worker converts it into an `error_type: 'empty_completion'` frame."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`app_session_uuid` missing / wrong shape, or `content` missing / blank."
+        },
+        {
+          "name": "session_expired",
+          "code": "session_expired",
+          "desc": "The cached `app_session_token` for this uuid was evicted (TTL elapsed) — call `agent.session.create` again."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "The cached session belongs to a different user (token / uuid mismatch). Should not happen in normal use."
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": "APP_QUOTA_EXCEEDED",
+          "desc": "Facade pre-flight quota check failed. `details.jsonrpc_code = -32015`."
+        },
+        {
+          "name": "APP_CONCURRENCY_LIMIT",
+          "code": "APP_CONCURRENCY_LIMIT",
+          "desc": "Per-user concurrent agent-run limit reached (default **10** active runs across ALL of the user's apps/sessions, `APP_AGENT_MAX_CONCURRENT_RUNS_PER_USER`). Rejected synchronously at dispatch — the run never queues. `details.jsonrpc_code = -32020`, HTTP surface 429; `data` carries `{active, limit, retryable: true}`. Transient by design: wait for any in-flight run to finish (or `agent.session.cancel` one) and retry. Distinct from `APP_QUOTA_EXCEEDED` (billing quota — retrying does not help)."
+        },
+        {
+          "name": "APP_TOOL_NOT_GRANTED",
+          "code": "APP_TOOL_NOT_GRANTED",
+          "desc": "Run tried to invoke a tool outside `manifest.ui.host_api.agent.tools` (or outside `allowed_tools` for this run). `details.jsonrpc_code = -32014`."
+        },
+        {
+          "name": "APP_PROVIDER_ERROR",
+          "code": "APP_PROVIDER_ERROR",
+          "desc": "LangGraph node raised (provider 5xx, content filter, etc.). Pre-stream: surfaced synchronously. Mid-stream: emitted as an in-band `{event: 'error', code, message}` frame followed by `done: true`. `details.jsonrpc_code = -32003`."
+        },
+        {
+          "name": "empty_completion",
+          "code": "empty_completion (in-band frame)",
+          "desc": "The run finished without producing ANY assistant text or tool call — typically an upstream model returning an empty completion (gateway degradation, throttling without a 429). Delivered mid-stream as `{event: 'sse', error, error_type: 'empty_completion', is_retryable: true}`; the run is recorded as FAILED, never as an empty success. Retry, or steer to a different model via `modelPreferences`."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Local-dev harness without an agent bridge."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "Resolved `user_id` no longer exists."
+        }
+      ],
+      "example": "// Higher-level (preferred): the SDK helper wraps the stream into an AsyncIterable.\nconst sess = await anna.agent.session({ submode: \"auto\" });\nconst stream = sess.run({ content: \"Summarise my open tabs.\", recursion_limit: 12 });\n\nfor await (const frame of stream) {\n  if (frame.event === \"error\") { renderError(frame.message); break; }\n  if (frame.event === \"end\") { finalise(frame.run_id); break; }\n  if (frame.event === \"run_meta\" && frame.warnings?.length) warn(frame.warnings);\n  const delta = frame.choices?.[0]?.delta;\n  if (!delta) continue;                       // queued/started/keepalive\n  if (delta.content) appendToken(delta.content);\n  if (delta.tool_start) log(`→ ${delta.tool_start.name}`);\n  if (delta.tool_end) log(`← ${delta.tool_end.name}`);\n  if (delta.task_complete) usage = delta.task_complete.token_usage;\n  if (frame.error) renderError(`${frame.error_type}: ${frame.error}`);\n}\n\n// Lower-level (manual stream routing):\nconst { stream_id, run_id } = await anna.agent.session.run({\n  app_session_uuid: \"aps_…\",\n  content: \"hi\",\n  run_id: crypto.randomUUID(),\n});\nanna.on(\"rpc.stream\", (frame) => {\n  if (frame.stream_id !== stream_id) return;\n  // …reassemble by frame.seq, watch for frame.done\n});\n",
+      "limitations": [
+        "Streaming is event-based, NOT a real HTTP stream. Frames are JSON-parsed (`_parse_sse_frame`) then re-encoded as `postMessage` events — large frames pay double serialisation cost.",
+        "Back-pressure is bounded only by the iframe's heap. The dispatcher does not pause the upstream SSE; a slow consumer can OOM the iframe on a multi-MB tool result.",
+        "Out-of-order frames are buffered by the SDK's `_buffer` map until the missing `seq` arrives; a dropped frame stalls the iterator forever. There is no retry / replay protocol today.",
+        "Cancellation is best-effort. `agent.session.cancel` maps the `(app_session_uuid, run_id)` signal onto the underlying worker task; the LangGraph runner polls it every ~30 stream events — an in-flight provider call still completes. Runs still queued are dropped before they start.",
+        "Per-user concurrency: at most `APP_AGENT_MAX_CONCURRENT_RUNS_PER_USER` (default 10) agent runs may be active per user, counted across all apps and sessions. Excess `run` calls fail fast with `APP_CONCURRENCY_LIMIT` (retryable) instead of silently queueing — apps orchestrating many parallel runs should throttle to ≤ 10 and back off on this error.",
+        "The pump always emits a terminal `{event: 'end', run_id}` + `done: true`, even on pump crash. Consumers MUST treat `end` as authoritative and stop reading.",
+        "`recursion_limit` only bounds LangGraph node count; per-tool wall-clock is enforced by `tools.invoke` (default 65 s).",
+        "Per-call deadline default is `DEFAULT_TIMEOUTS_BY_NS.agent = 300_000` ms — but that's the ack timeout, NOT the run timeout. A long-running stream keeps the iframe iterator alive indefinitely until the pump emits `done`."
+      ]
+    },
+    {
+      "slug": "agent-session-cancel",
+      "name": "agent.session.cancel",
+      "kind": "Host API method · iframe surface",
+      "group": "Agent",
+      "since": "Introduced anna-app-runtime v0.2.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → src.services.app_runner.signal_cancel (Redis cancel marker + worker-task cancel signal)",
+      "summary": "Best-effort cancellation of a queued or in-flight `agent.session.run`. Writes a Redis cancel marker keyed by `(app_session_uuid, run_id)` AND — via the active-run registry populated at enqueue time — sets the cancel signal on the underlying worker task. A still-queued run is dropped before it starts (`task_cancelled` + `end` frames); a running run stops at the next poll checkpoint (every ~30 stream events) — an in-flight provider call still completes first.",
+      "wire": {
+        "json_rpc_method": "agent.session.cancel",
+        "auth": "Handled by the host page — the bundle never sees the token. See section overview.",
+        "streaming": false
+      },
+      "signature": "anna.agent.session.cancel(args: {app_session_uuid: string, run_id: string}, opts?: {timeoutMs?: number}) => Promise<{cancelled: boolean}>",
+      "params": [
+        {
+          "name": "app_session_uuid",
+          "type": "string (aps_…)",
+          "required": true,
+          "summary": "Session id from `create`. Resolved through `_claims_for_aps` — `session_expired` if the cached token has been evicted."
+        },
+        {
+          "name": "run_id",
+          "type": "string",
+          "required": true,
+          "summary": "Exact `run_id` returned (or supplied) by `agent.session.run`. `invalid_arg` if missing."
+        }
+      ],
+      "returns": {
+        "type": "{cancelled: boolean}",
+        "desc": "`true` iff the cancel signal was recorded (Redis reachable). **NOT a confirmation the run actually stopped** — the runner may still be inside a long provider call. Subscribe to `rpc.stream` for the `task_cancelled` delta and the terminal `{event:'end'}` frame to confirm shutdown."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`app_session_uuid` or `run_id` missing."
+        },
+        {
+          "name": "session_expired",
+          "code": "session_expired",
+          "desc": "Cached session token evicted."
+        },
+        {
+          "name": "permission_denied",
+          "code": "permission_denied",
+          "desc": "Session belongs to a different user."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "User row vanished."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Local-dev harness."
+        }
+      ],
+      "example": "const stream = sess.run({ content: \"long task\" });\n// Cancel after 30 s if still running.\nsetTimeout(() => sess.cancel(stream.runId), 30_000);\nfor await (const frame of stream) {\n  if (frame.event === \"end\") break;\n}\n",
+      "limitations": [
+        "Best-effort. Returns `{cancelled: true}` as soon as the signal is recorded — actual stop happens whenever the runner next polls (every ~30 LangGraph stream events), or before start for runs still in the queue.",
+        "An in-flight provider call (LLM generation, tool invocation) is NOT interrupted; the runner cancels at the next poll checkpoint.",
+        "No way to cancel ALL runs of a session in one call from the app side — call per `run_id` (apps tracking concurrent runs should keep a `Set<run_id>`). `agent.session.delete` DOES fan out cancellation to every active run of the session.",
+        "If the run already finished, the signal is recorded but has no effect — still returns `{cancelled: true}`."
+      ]
+    },
+    {
+      "slug": "agent-session-history",
+      "name": "agent.session.history",
+      "kind": "Host API method · iframe surface",
+      "group": "Agent",
+      "since": "Introduced anna-app-runtime v0.2.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → LangGraph AsyncCheckpointSaver.aget",
+      "summary": "Read recent agent messages by replaying the most recent LangGraph checkpoint for this session's `thread_id`. Best-effort: returns `{messages: []}` (NOT an error) if the checkpoint store is unavailable, the row hasn't been written yet, or the read fails — treat absence as \"no history yet\".",
+      "wire": {
+        "json_rpc_method": "agent.session.history",
+        "auth": "Handled by the host page — see section overview.",
+        "streaming": false
+      },
+      "signature": "anna.agent.session.history(args: {app_session_uuid: string, limit?: number}, opts?: {timeoutMs?: number}) => Promise<{messages: Array<{role: 'user'|'assistant'|'system'|string, content: string | unknown[]}>}>",
+      "params": [
+        {
+          "name": "app_session_uuid",
+          "type": "string (aps_…)",
+          "required": true,
+          "summary": "Session id from `create`."
+        },
+        {
+          "name": "limit",
+          "type": "number (int)",
+          "required": false,
+          "default": "50",
+          "summary": "Max messages to return (clamped to `[1, 200]`). Always reads from the *tail* — the most recent `limit` messages."
+        }
+      ],
+      "returns": {
+        "type": "{messages: Array<{role, content}>}",
+        "desc": "Tail of the LangGraph `channel_values.messages` list, normalised to `{role, content}`.\n\n**Role mapping:**\n• LangGraph `ai`     → `assistant`\n• LangGraph `human`  → `user`\n• Anything else      → the raw `type` string (e.g. `system`, `tool`).\n\n`content` is whatever `getattr(m, 'content', '')` returns — usually a string but may be a structured list for multimodal turns. Apps wanting strict shape MUST validate."
+      },
+      "errors": [
+        {
+          "name": "session_expired",
+          "code": "session_expired",
+          "desc": "Cached session token evicted."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "`AnnaAppSession` row missing or owned by another user."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Local-dev harness."
+        }
+      ],
+      "example": "const { messages } = await anna.agent.session.history({\n  app_session_uuid: sess.app_session_uuid,\n  limit: 20,\n});\nfor (const m of messages) renderBubble(m.role, m.content);\n",
+      "limitations": [
+        "Best-effort — checkpoint read errors are swallowed and return `[]`. Cannot distinguish \"empty thread\" from \"checkpointer down\".",
+        "Reads only `channel_values.messages` — tool intermediate states, scratch-pads, and other LangGraph channels are NOT exposed.",
+        "Multimodal content blocks come through as opaque objects in `content`; apps must handle both string and list forms.",
+        "No pagination beyond the tail-`limit` slice — there's no way to read the *middle* of a long thread.",
+        "Read happens against the latest checkpoint snapshot — concurrent runs may see partial state."
+      ]
+    },
+    {
+      "slug": "agent-session-delete",
+      "name": "agent.session.delete",
+      "kind": "Host API method · iframe surface",
+      "group": "Agent",
+      "since": "Introduced anna-app-runtime v0.2.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade.revoke_session",
+      "summary": "Revoke an `AnnaAppSession`, cancel all of its active runs, and drop its cached capability token. Idempotent — repeated calls succeed silently. Use this to free admin-view entries and force the next `create` call to mint a fresh session.",
+      "wire": {
+        "json_rpc_method": "agent.session.delete",
+        "auth": "Handled by the host page — see section overview.",
+        "streaming": false
+      },
+      "signature": "anna.agent.session.delete(args: {app_session_uuid: string}, opts?: {timeoutMs?: number}) => Promise<{deleted: true}>",
+      "params": [
+        {
+          "name": "app_session_uuid",
+          "type": "string (aps_…)",
+          "required": true,
+          "summary": "Session id from `create`."
+        }
+      ],
+      "returns": {
+        "type": "{deleted: true}",
+        "desc": "Always `{deleted: true}` on success. Failures raise."
+      },
+      "errors": [
+        {
+          "name": "APP_SESSION_NOT_FOUND",
+          "code": "APP_SESSION_NOT_FOUND",
+          "desc": "Session row missing OR owned by another user. `details.jsonrpc_code = -32013`."
+        },
+        {
+          "name": "APP_SESSION_REVOKED",
+          "code": "APP_SESSION_REVOKED",
+          "desc": "Session was already revoked (by admin / earlier delete). `details.jsonrpc_code = -32011`."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "Resolved `user_id` no longer exists."
+        }
+      ],
+      "example": "// Tear down on unmount.\nwindow.addEventListener(\"pagehide\", () => {\n  sess.delete().catch(() => { /* best-effort */ });\n});\n\n// Or via the SDK helper:\nawait sess.delete();\n",
+      "limitations": [
+        "Cancels in-flight runs best-effort (forum #191): every run in the session's active-run registry gets a cancel signal; queued runs are dropped before start, running runs stop at the next poll checkpoint and emit `task_cancelled` + `end` frames. An in-flight provider call still completes first.",
+        "The cached capability token is dropped server-side AND any future `run` against this uuid raises `session_expired`.",
+        "Postgres row is soft-revoked (audit trail preserved). Hard cleanup is the admin's job."
+      ]
+    },
+    {
+      "slug": "agent-session-list",
+      "name": "agent.session.list",
+      "kind": "Host API method · iframe surface",
+      "group": "Agent",
+      "since": "Introduced anna-app-runtime v0.8.0 / dispatcher 0.10.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade.list_sessions",
+      "summary": "Enumerate the caller's own agent sessions, scoped to THIS app (`window.app_id`) — an app can never see another origin's sessions. Use it to re-attach to or clean up sessions after losing in-memory handles (iframe reload, multi-tab, crash). Returns identity + lifecycle metadata only (no token, no `thread_id`, no `quota_caps`).",
+      "wire": {
+        "json_rpc_method": "agent.session.list",
+        "auth": "Handled by the host page — see section overview.",
+        "streaming": false
+      },
+      "signature": "anna.agent.session.list(args?: {include_expired?: boolean, limit?: number}, opts?: {timeoutMs?: number}) => Promise<{sessions: Array<{app_session_uuid: string, kind: string, submode: 'auto'|'fixed'|null, fixed_client_id: string|null, label: string|null, created_at: string, last_active_at: string, expires_at: string, max_lifetime_at: string}>}>",
+      "params": [
+        {
+          "name": "include_expired",
+          "type": "boolean",
+          "required": false,
+          "default": "false",
+          "summary": "Include expired-but-not-revoked sessions. By default only active (non-revoked, non-expired) sessions are returned."
+        },
+        {
+          "name": "limit",
+          "type": "number (int)",
+          "required": false,
+          "default": "50",
+          "summary": "Max sessions to return, newest-first. Clamped to `[1, 100]`."
+        }
+      ],
+      "returns": {
+        "type": "{sessions: Array<{app_session_uuid, kind, submode, fixed_client_id, label, created_at, last_active_at, expires_at, max_lifetime_at}>}",
+        "desc": "Public-safe projection of each `AnnaAppSession` row (`_session_summary`). Deliberately omits `thread_id`, `quota_caps`, and `window_uuid`. Timestamps are ISO-8601 UTC (`…Z`). `expires_at` is the authoritative sliding idle deadline; `max_lifetime_at` is the absolute cap. To re-mint a usable token for one of these, call `agent.session.refresh`."
+      },
+      "errors": [
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "Internal scoping error (exactly one of app/executa owner required). `details.jsonrpc_code = -32004`."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Local-dev harness without an agent bridge."
+        }
+      ],
+      "example": "// Re-attach after an iframe reload instead of minting a duplicate session.\nconst { sessions } = await anna.agent.session.list({ limit: 10 });\nconst latest = sessions[0];\nif (latest) {\n  await anna.agent.session.refresh({ app_session_uuid: latest.app_session_uuid });\n  // …now safe to run() against latest.app_session_uuid\n} else {\n  await anna.agent.session.create({ submode: \"auto\" });\n}\n",
+      "limitations": [
+        "Scoped to the current app/executa owner — there is no cross-app enumeration.",
+        "Returns metadata only; it does NOT re-mint a capability token. Call `agent.session.refresh` before `run`/`history` on a listed uuid whose cached token may have lapsed.",
+        "`include_expired` surfaces expired rows for cleanup UIs, but those sessions cannot be refreshed once past `max_lifetime_at`."
+      ]
+    },
+    {
+      "slug": "agent-session-refresh",
+      "name": "agent.session.refresh",
+      "kind": "Host API method · iframe surface",
+      "group": "Agent",
+      "since": "Introduced anna-app-runtime v0.8.0 / dispatcher 0.10.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade.refresh_session_token (+ session_lifecycle_meta)",
+      "summary": "Re-mint a fresh short-lived capability token for an existing session and slide its idle window forward — WITHOUT re-creating the session (which would orphan the LangGraph `thread_id`). The iframe only ever persists `app_session_uuid`; on resume, or proactively near expiry, it calls `refresh` to obtain a new deadline. Returns absolute lifecycle timestamps so the client can schedule its next refresh.",
+      "wire": {
+        "json_rpc_method": "agent.session.refresh",
+        "auth": "Handled by the host page — see section overview.",
+        "streaming": false
+      },
+      "signature": "anna.agent.session.refresh(args: {app_session_uuid: string}, opts?: {timeoutMs?: number}) => Promise<{app_session_uuid: string, expires_in: number, submode: 'auto'|'fixed'|null, fixed_client_id: string|null, expires_at: string, max_lifetime_at: string, idle_ttl_seconds: number, session_expires_in: number}>",
+      "params": [
+        {
+          "name": "app_session_uuid",
+          "type": "string (aps_…)",
+          "required": true,
+          "summary": "Session id from `create` (or from `agent.session.list`). SDK also accepts the camelCase alias `appSessionUuid`. `invalid_arg` if missing or not `aps_`-prefixed."
+        }
+      ],
+      "returns": {
+        "type": "{app_session_uuid, expires_in, submode, fixed_client_id, expires_at, max_lifetime_at, idle_ttl_seconds, session_expires_in}",
+        "desc": "• `expires_in`: TTL (seconds) of the freshly-minted token.\n• `expires_at`: authoritative sliding idle deadline (ISO-8601 UTC) AFTER this refresh advanced it.\n• `max_lifetime_at`: absolute cap (`created_at + MAX_LIFETIME`) — refresh can never push past this.\n• `idle_ttl_seconds`: the idle window length for this session kind.\n• `session_expires_in`: seconds until `expires_at` from now (convenience)."
+      },
+      "errors": [
+        {
+          "name": "invalid_arg",
+          "code": "invalid_arg",
+          "desc": "`app_session_uuid` missing or not `aps_`-prefixed."
+        },
+        {
+          "name": "APP_SESSION_NOT_FOUND",
+          "code": "APP_SESSION_NOT_FOUND",
+          "desc": "Session row missing or owned by another user. `details.jsonrpc_code = -32013`."
+        },
+        {
+          "name": "APP_SESSION_REVOKED",
+          "code": "APP_SESSION_REVOKED",
+          "desc": "Session revoked or past its `max_lifetime_at` hard deadline — create a new one. `details.jsonrpc_code = -32011`."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Local-dev harness without an agent bridge."
+        }
+      ],
+      "example": "// Proactive refresh ~1 min before the idle deadline.\nconst meta = await anna.agent.session.refresh({ app_session_uuid: sess.app_session_uuid });\nconst msUntilExpiry = meta.session_expires_in * 1000;\nsetTimeout(() => anna.agent.session.refresh({ app_session_uuid: sess.app_session_uuid }), msUntilExpiry - 60_000);\n",
+      "limitations": [
+        "Refresh slides the idle window but can NEVER extend past `max_lifetime_at` — a session at its absolute cap returns `APP_SESSION_REVOKED`.",
+        "Does not resurrect a revoked session; `agent.session.delete` is terminal.",
+        "The new token is held server-side (re-primed in the host token cache); the iframe still only sees `app_session_uuid` + the lifecycle metadata."
+      ]
+    }
+  ]
+}

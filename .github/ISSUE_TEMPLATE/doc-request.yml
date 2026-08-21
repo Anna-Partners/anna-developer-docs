@@ -1,0 +1,23 @@
+name: "Documentation request"
+description: "Something is missing, unclear, or deserves a worked example."
+labels: ["doc-request"]
+body:
+  - type: input
+    id: area
+    attributes:
+      label: Area
+      description: "Which part of the platform? (Executa protocol, APS, Anna App manifest, CLI, …)"
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: What's missing or unclear
+      description: "What did you try to find, where did you look, and what did you have to figure out the hard way?"
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it cost you
+      description: "Optional — how much time did the gap cost? Helps us prioritize."

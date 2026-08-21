@@ -1,0 +1,122 @@
+{
+  "section_id": "executa-embed",
+  "items": [
+    {
+      "slug": "embeddings-create",
+      "name": "embeddings/create",
+      "kind": "Reverse RPC method · Embeddings",
+      "group": "Embeddings",
+      "since": "protocol v2.0 · 2026-05",
+      "direction": "Plugin → Matrix Agent → Nexus `POST /api/v1/copilot/embeddings` → embedding registry → provider",
+      "summary": "Compute one or more dense embedding vectors **on the user's behalf** from a stdio Executa plugin — no provider API key, no model name leaked to the plugin, no per-plugin billing. The host owns the registry; the plugin only sees a stable alias (`anna-managed-v1` → 1536-dim) and gets back an OpenAI-compatible envelope. Independent from `sampling/createMessage` and `agent/*`: shares the same `sampling_token` mint flow but bills against an **independent embed surface** (`LLMRequestType.EXECUTA_EMBED`) — exhausting your LLM quota does not block embeddings and vice-versa.\n\n**Pre-requisites** (all four required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.embed = {}` (or `client_capabilities.sampling = {}` — the same token is reused) on `initialize`. Without v2 the reverse-RPC returns `EMBED_NOT_NEGOTIATED` (-32507).\n2. **Manifest declaration.** `host_capabilities: [\"llm.embed\"]`. Missing this → `EMBED_NOT_GRANTED` (-32501) at first call.\n3. **User grant.** End user has the Executa enabled (`UserExecuta.is_enabled=true`). Optional explicit opt-out via `UserExecuta.custom_config.embed_grant = {enabled: false}` → `EMBED_USER_DENIED` (-32508). Default when omitted: enabled.\n4. **Platform switch.** `EMBED_API_ENABLED = true` (default). Setting to `false` shuts down **both** the iframe `llm.embed` path and the plugin `embeddings/create` path with `EMBED_NOT_NEGOTIATED`.\n\n**Auth chain.** Plugin only ever holds a `sampling_token` — the same token Matrix Agent injected for `sampling/createMessage`. The Agent forwards the reverse-RPC body to Nexus `POST /api/v1/copilot/embeddings` with `Authorization: Bearer <sampling_token>`; Nexus decodes the token claims (`user_id`, `executa_tool_id`, `tool_invoke_id`), enforces equality with the body fields, then dispatches into the embedding registry. The plugin never sees a bearer to a provider, never sees a real model name, and cannot impersonate another user.",
+      "wire": {
+        "json_rpc_method": "embeddings/create",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "ctx_required": [
+          "sampling_token",
+          "invoke_id"
+        ],
+        "buffered_streaming": false,
+        "upstream_http": "POST /api/v1/copilot/embeddings (Bearer = sampling_token)"
+      },
+      "signature": "EmbeddingsClient.create(*, input: str | Sequence[str], model: str | None = None, timeout: float = 30.0) -> dict",
+      "params": [
+        {
+          "name": "input",
+          "type": "str | list[str]",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Text(s) to embed. A bare string is auto-wrapped to a single-element list before sending. Empty / whitespace-only strings are rejected.",
+          "notes": [
+            "Bridge-side hard caps (defence-in-depth before the HTTP boundary): `_HARD_MAX_INPUTS = 128`, `_HARD_MAX_INPUT_CHARS = 64_000` per item. Either limit overrun → `EMBED_INVALID_REQUEST` (-32504) **at the Agent**, never reaches Nexus.",
+            "Server-side caps from Nexus settings (`EMBED_MAX_INPUTS_PER_REQUEST = 64`, `EMBED_MAX_CHARS_PER_INPUT = 32_000`) are stricter and authoritative; the bridge values are just a wire safety net.",
+            "Per-spec cap from the embedding registry (`spec.max_inputs_per_request`) is intersected with the global ceiling — `anna-managed-v1` matches the global default.",
+            "Reject-not-truncate: a single 33 KB input fails the whole batch — chunk client-side."
+          ]
+        },
+        {
+          "name": "model",
+          "type": "str | None",
+          "default": "None → host default (`EMBEDDING_DEFAULT_ALIAS = \"anna-managed-v1\"`)",
+          "required": false,
+          "desc": "",
+          "summary": "Host-stable **alias** — NOT a provider model name. Resolved server-side by `EmbeddingRegistry.resolve(alias)`. Unknown alias → `EMBED_INVALID_REQUEST` (-32504) with the available alias list in the error message.",
+          "notes": [
+            "Today's registered aliases (production): `anna-managed-v1` (= `openai/text-embedding-3-small`, 1536-dim). `anna-managed-v2` is **only registered when** `EMBEDDING_ENABLE_V2 = true` (rollout flag, default `false`).",
+            "**Dimensions are a contract.** Once an alias ships at N dims, it never changes — upgrades go to a new alias (e.g. `anna-managed-v2`). Persist `_meta.alias` + `_meta.dimensions` alongside any vector you store so cross-version reads can refuse-or-reindex gracefully.",
+            "Real provider model name is returned in `_meta.backendModel` for audit only — do not branch on it."
+          ]
+        },
+        {
+          "name": "timeout",
+          "type": "float (seconds)",
+          "default": "30.0",
+          "required": false,
+          "desc": "",
+          "summary": "Client-side wall-clock timeout. `asyncio.TimeoutError` raised locally as `EmbeddingsError(code=EMBED_TIMEOUT)` if no host response arrives in time.",
+          "notes": [
+            "Independent of `EMBED_REQUEST_TIMEOUT` (default 30 s) which gates the **upstream HTTP call** Nexus makes to the provider — leave headroom for that plus retries.",
+            "Local timeout drops the pending future; if the host eventually replies the response is discarded silently."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict (OpenAI `embeddings.create` compatible envelope)",
+        "desc": "`{object: 'list', model, data: [{object: 'embedding', index, embedding: number[]}], usage: {prompt_tokens, total_tokens}, _meta: {...}}`.\n\n**Fields**\n• `model` — the **alias** that was actually resolved (echoes input or the default). NEVER the backend provider model.\n• `data[i].embedding` — float array of length `_meta.dimensions`. Order matches input order.\n• `data[i].index` — int matching the input position. Use this instead of relying on array order to be defensive.\n• `usage.prompt_tokens` — tokens charged. When the provider returns its own count it is preferred; otherwise the host falls back to a char-based estimator (`estimate_input_tokens_from_chars`).\n• `usage.total_tokens` — equal to `prompt_tokens` (embeddings have no completion tokens).\n• `_meta.alias` — same value as top-level `model` (duplicate for symmetry with iframe-path response).\n• `_meta.dimensions` — int; matches `len(data[0].embedding)`. Persist alongside the vector.\n• `_meta.backendModel` — real provider model name (e.g. `text-embedding-3-small`). Audit only.\n• `_meta.provider` — provider slug (e.g. `openrouter`, `openai`).\n• `_meta.latencyMs` — end-to-end wall-clock the gate observed (Nexus → provider round-trip).\n• `_meta.quotaConsumed` — quota units debited (per-alias `quota_per_million_tokens` × tokens).\n• `_meta.costUsd` — provisional USD cost (provider price × tokens) for logging / dashboards."
+      },
+      "errors": [
+        {
+          "name": "EMBED_NOT_GRANTED",
+          "code": -32501,
+          "desc": "Sampling token missing from handler `ctx`, `UserExecuta` row not found / disabled for the calling user, or manifest does not declare `host_capabilities: [\"llm.embed\"]`. Same code is reused for all three to keep the failure surface terse — read `data` / `message` for the discriminator."
+        },
+        {
+          "name": "EMBED_QUOTA_EXCEEDED",
+          "code": -32502,
+          "desc": "**Reserved**. Currently unreachable on the wire because the 2026-05-28 simplification dropped the per-day token pool and per-invoke token cap (`record_usage` is pay-per-token only). Kept in the enum for forward-compat if a quota gate is reintroduced."
+        },
+        {
+          "name": "EMBED_PROVIDER_ERROR",
+          "code": -32503,
+          "desc": "Upstream provider call failed (HTTP 5xx, `EmbeddingProviderError`, `EmbeddingClientError`), or Nexus returned a non-object body. The original exception is flattened into the error message — Nexus does NOT propagate a structured upstream errorCode."
+        },
+        {
+          "name": "EMBED_INVALID_REQUEST",
+          "code": -32504,
+          "desc": "Local Agent-side validation (`_validate_request`): `input` missing / wrong type / empty list / batch > 128 items / any item > 64 000 chars / non-string item / empty-or-whitespace item / `model` not a string. **Also** raised by Nexus when alias is unknown, when batch exceeds the registry per-spec cap, or when `executa_tool_id` / `tool_invoke_id` in the body disagree with the JWT claims."
+        },
+        {
+          "name": "EMBED_TIMEOUT",
+          "code": -32505,
+          "desc": "SDK-side: `asyncio.wait_for` elapsed without a host response. Pending request is dropped from the client's `_pending` map; if the host eventually replies the response is silently discarded."
+        },
+        {
+          "name": "EMBED_MAX_TOKENS_EXCEEDED",
+          "code": -32506,
+          "desc": "**Reserved**. Same status as `EMBED_QUOTA_EXCEEDED` — kept in the enum but unreachable after the 2026-05-28 simplification."
+        },
+        {
+          "name": "EMBED_NOT_NEGOTIATED",
+          "code": -32507,
+          "desc": "Plugin called `EmbeddingsClient.create()` after `disable(reason)` was triggered (typically because `initialize` resolved v1 instead of v2). Also returned by Nexus when `EMBED_API_ENABLED = false`."
+        },
+        {
+          "name": "EMBED_USER_DENIED",
+          "code": -32508,
+          "desc": "`UserExecuta.custom_config.embed_grant = {enabled: false}` — user explicitly opted out for this Executa. Distinct from `NOT_GRANTED` (which is a missing grant) and from `NOT_NEGOTIATED` (which is a missing capability)."
+        }
+      ],
+      "limitations": [
+        "**The `error_name` short form on the wire keeps the `EMBED_` prefix for every code** (unlike `agent/*` where only `-32041` keeps `AGENT_`). Plugins switching on numeric code OR on the wire short name are both safe — but the SDK constant string (`EMBED_ERR_NOT_GRANTED`) is *not* the wire string (`EMBED_NOT_GRANTED`). Match on the number or the short name, never on the SDK constant.",
+        "**No streaming.** Embeddings are computed once and returned in a single JSON-RPC response. There is no `delta` / `chunk` channel — the entire batch must fit in one round-trip.",
+        "**Reject, not truncate.** A 33 KB input or a 65-item batch fails the *whole* request with `EMBED_INVALID_REQUEST` — there is no per-item soft-trim. Chunk client-side and keep an output index map.",
+        "**Provider error code is not preserved.** When upstream raises (`EmbeddingTimeoutError`, `EmbeddingRateLimitError`, `EmbeddingProviderError`, `EmbeddingClientError`), the gate flattens the original code into a string message and surfaces a single `EMBED_PROVIDER_ERROR (-32503)`. Plugins cannot distinguish 'timeout' from '5xx' from 'rate limit' by code alone — parse `error.message` if you must.",
+        "**Quota / max-tokens gates are inert today.** `-32502` and `-32506` exist in the enum and in the SDK constants but cannot be returned by the current code path (the 2026-05-28 simplification deleted the daily token pool + per-invoke token cap). Bill-impact backstop is the host-level provider rate-limit and the per-invoke `EMBED_REQUEST_TIMEOUT (30 s)`.",
+        "**Alias dimensions are immutable.** Once `anna-managed-v1` ships at 1536 dim it stays 1536 dim — upgrades go to a new alias. Persist `_meta.alias` + `_meta.dimensions` with every stored vector or you risk silent dimension drift after a registry change.",
+        "**Local-dev harness reverse-RPC mapping is one-line — easy to miss.** The python bridge (`anna-app-runtime-local` `SERVER_REQUEST_METHODS`) AND the Node `LlmBridge` (`anna-app-cli/src/harness/server.ts` `HOST_OUTBOUND_ROUTES`) must both list `embeddings/create` → `(llm, embed)`. Omitting either yields `-32601 Method not found: 'embeddings/create'`."
+      ],
+      "example": "# Plugin: stateless tool that returns the embedding of a list of strings.\nfrom executa_sdk.embeddings import EmbeddingsClient, EmbeddingsError\n\nembeddings = EmbeddingsClient(write_frame=_write_frame)\n\nasync def on_stdin_message(msg: dict):\n    # Same stdin reader handles invokes AND host responses to reverse RPCs.\n    if embeddings.is_response_envelope(msg):\n        embeddings.dispatch_response(msg)\n        return\n    # ... your regular invoke/describe/initialize handlers ...\n\nasync def _handle_invoke_embed(req_id, args):\n    try:\n        result = await embeddings.create(\n            input=args.get(\"texts\") or [],\n            model=args.get(\"model\") or \"anna-managed-v1\",\n            timeout=30.0,\n        )\n    except EmbeddingsError as e:\n        # Wire `error_name` keeps the EMBED_ prefix; switch on numeric code.\n        if e.code == -32508:           # EMBED_USER_DENIED\n            return _err(req_id, e.code, \"user disabled embeddings for this tool\")\n        if e.code == -32504:           # EMBED_INVALID_REQUEST\n            return _err(req_id, e.code, e.message)\n        # -32501 / -32503 / -32507 — caller cannot recover, bubble up.\n        return _err(req_id, e.code, e.message)\n\n    first = result[\"data\"][0][\"embedding\"]\n    return _ok(req_id, {\n        \"success\": True,\n        \"tool\": \"embed\",\n        \"data\": {\n            \"count\": len(result[\"data\"]),\n            \"dimensions\": result[\"_meta\"][\"dimensions\"],\n            \"first_vector_preview\": first[:8],\n            \"model\": result[\"model\"],   # ← stable alias, persist this\n            \"usage\": result[\"usage\"],\n            \"_meta\": result[\"_meta\"],\n        },\n    })\n\n# On initialize, gate the client behind v2 negotiation:\nasync def _handle_initialize(req_id, params):\n    server_proto = (params or {}).get(\"protocolVersion\")\n    if server_proto != \"2.0\":\n        embeddings.disable(f\"host negotiated v{server_proto!r}, embeddings need v2\")\n    return _ok(req_id, {\n        \"protocolVersion\": \"2.0\",\n        \"client_capabilities\": {\"embed\": {}, \"sampling\": {}},\n    })\n"
+    }
+  ]
+}

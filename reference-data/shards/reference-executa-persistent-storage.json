@@ -1,0 +1,1091 @@
+{
+  "section_id": "executa-persistent-storage",
+  "items": [
+    {
+      "slug": "storage-get",
+      "name": "storage/get",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · KV",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "Read one entry from the plugin's **APS** (Anna Persistent Storage) KV namespace — small JSON state keyed by `(scope, key)`. Missing keys resolve to `{value: None, exists: False}` instead of raising.",
+      "wire": {
+        "json_rpc_method": "storage/get",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "get(*, scope: str = 'tool', key: str) -> dict",
+      "params": [
+        {
+          "name": "scope",
+          "type": "str",
+          "default": "'tool'",
+          "required": false,
+          "desc": "",
+          "summary": "ACL scope. Defaults to `tool` (per-Executa namespace).",
+          "notes": [
+            "`tool` — visible only to invocations of this Executa for this user (recommended default).",
+            "`app` — shared across all Executas owned by the same anna-app for this user.",
+            "`user` — user-global; access requires the host to have minted a `storage_token` whose `allowed_scopes` claim contains `user`.",
+            "The Agent's minted `storage_token` is what actually gates access; this argument selects the row family."
+          ]
+        },
+        {
+          "name": "key",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Entry key within the active scope (≤ 1024 chars).",
+          "notes": [
+            "Namespaced by `(scope, owner, key)` in Postgres — no global collision with other plugins.",
+            "Choose stable, opaque keys (e.g. `prefs.v1`, `cursor.gmail.inbox`); the page caches by exact key."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "**On hit** — every field below is present:\n• `value: Any` — the stored JSON value\n• `exists: True` — injected client-side\n• `etag: str` — pass to `storage/set(if_match=...)` for CAS\n• `generation: int` — monotonic per-key write counter\n• `size_bytes: int` — serialised size of `value`\n• `metadata: dict`, `tags: list[str]` — as last written\n• `updated_at: str` — ISO-8601 timestamp\n\n**On miss** — Nexus 404 is normalised to `{value: None, exists: False, etag: None}`. `STORAGE_ERR_NOT_FOUND` is never raised.\n\nAlways branch on `exists`, not on `value`'s truthiness — a stored `None`, `0`, `[]`, or `\"\"` is a legitimate hit."
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Agent did not mint a storage_token for this invoke."
+        },
+        {
+          "name": "STORAGE_ERR_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Required field (key/path) missing or wrong type."
+        },
+        {
+          "name": "STORAGE_ERR_NOT_FOUND",
+          "code": -32108,
+          "desc": "Key/path does not exist (normalised on `get`)."
+        },
+        {
+          "name": "STORAGE_ERR_PRECONDITION_FAILED",
+          "code": -32112,
+          "desc": "if_match ETag did not match current generation."
+        },
+        {
+          "name": "STORAGE_ERR_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User APS quota exhausted."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32199,
+          "desc": "Nexus REST returned a non-success status."
+        }
+      ],
+      "example": "# Inside an Executa plugin (executa_sdk).\nfrom executa_sdk import ctx\n\nasync def append_recent(item_id: str) -> list[str]:\n    cur = await ctx.storage.get(key=\"recent.v1\")\n    recent = cur[\"value\"] if cur[\"exists\"] else []\n    recent = ([item_id] + [x for x in recent if x != item_id])[:20]\n    # Optimistic CAS using the etag we just read.\n    await ctx.storage.set(\n        key=\"recent.v1\",\n        value=recent,\n        if_match=cur[\"etag\"],  # None on first write is accepted\n    )\n    return recent\n",
+      "limitations": [
+        "Value must be JSON-serialisable and ≤ **256 KB** per entry (enforced by `KVSetRequest`). For larger or binary payloads use `files/upload.begin` + `files/upload.complete`.",
+        "Backed by Postgres JSONB — **not** a low-latency cache. Read-heavy hot keys (>~50 rps per key) should be memoised in plugin process memory between invokes.",
+        "No server-side sub-document selection: the full `value_json` blob is returned. Keep entries small or split into multiple keys keyed by sub-document.",
+        "Reads are linearisable per-key but **not** snapshot-consistent across keys — if you need a multi-key atomic view, store them under a single key as a nested object.",
+        "Requires the manifest permission `storage.read`. Per-scope access (`user` / `app` / `tool`) is gated by the `storage_token`'s `allowed_scopes` claim, set by the host at install-time grant; the Agent refuses to mint a token for unallowed scopes."
+      ]
+    },
+    {
+      "slug": "storage-set",
+      "name": "storage/set",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · KV",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "Write one entry to the plugin's **APS** KV namespace — full-document replace, ETag-versioned, optionally CAS-guarded by `if_match` and auto-expiring via `ttl_seconds`.",
+      "wire": {
+        "json_rpc_method": "storage/set",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "set(*, scope: str = 'tool', key: str, value: Any, if_match: str | None = None, metadata: dict | None = None, tags: list[str] | None = None, ttl_seconds: int | None = None) -> dict",
+      "params": [
+        {
+          "name": "scope",
+          "type": "str",
+          "default": "'tool'",
+          "required": false,
+          "desc": "",
+          "summary": "ACL scope. Defaults to `tool` (per-Executa namespace).",
+          "notes": [
+            "`tool` / `app` / `user` — same semantics as `storage/get`.",
+            "Requires manifest `storage.write`. Per-scope access is gated by the `storage_token`'s `allowed_scopes` claim (`user` / `app` / `tool`)."
+          ]
+        },
+        {
+          "name": "key",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Entry key within the active scope (1–1024 chars).",
+          "notes": [
+            "Namespaced by `(scope, owner, key)`; no global collision with other plugins.",
+            "Validated by `validate_kv_key` server-side; rejected as `STORAGE_ERR_INVALID_REQUEST` on empty/oversize."
+          ]
+        },
+        {
+          "name": "value",
+          "type": "Any",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "JSON-serialisable payload. **Replaces** the previous value verbatim.",
+          "notes": [
+            "Serialised by `_serialize_value` to canonical UTF-8 JSON; the byte length must be ≤ 256 KB.",
+            "There is no server-side merge / JSON-patch — to update a sub-field, do read → mutate → set with `if_match`.",
+            "ETag is `sha256(payload)[:32]`, so writing the same value twice yields the same ETag but still bumps `generation`."
+          ]
+        },
+        {
+          "name": "if_match",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Optimistic concurrency token. Pass the `etag` you previously read.",
+          "notes": [
+            "Mismatch → `STORAGE_ERR_PRECONDITION_FAILED` (HTTP 412); quota reservation is rolled back.",
+            "`None` (default) is unconditional write — last-writer-wins. Use only for keys you know are single-writer.",
+            "First-time create: pass `None`; there is no separate `if-none-match` mode."
+          ]
+        },
+        {
+          "name": "metadata",
+          "type": "dict | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Opaque per-entry metadata. **Overwrites** the stored dict; not a merge.",
+          "notes": [
+            "Stored on the row and echoed back by `storage/get` and `storage/list`; never used by the server for routing or filtering.",
+            "Passing `None` is treated as `{}` on write — i.e. it clears existing metadata."
+          ]
+        },
+        {
+          "name": "tags",
+          "type": "list[str] | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Up to 32 short labels for client-side filtering.",
+          "notes": [
+            "Surfaced in `storage/list` items so callers can sort/filter without re-reading values.",
+            "`None` keeps no tags; an empty list also clears."
+          ]
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "int | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Auto-expire after N seconds (1 .. 31_536_000, i.e. 1 second to 1 year).",
+          "notes": [
+            "Stored as an absolute `expires_at` timestamp; expired entries are filtered out of `get`/`list` (lazy delete).",
+            "Omit (`None`) for permanent state. Updating an existing entry **replaces** `expires_at` — pass it on every write if you want a sliding TTL."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "**`{etag, generation, size_bytes}`** — only these three fields:\n• `etag: str` — new sha256 prefix; feed back into the next `if_match`.\n• `generation: int` — incremented by 1 on every successful write (creation starts at 1).\n• `size_bytes: int` — serialised payload size as accounted against user quota.\n\nNote: `value` / `metadata` / `tags` / `updated_at` are **not** echoed — re-read with `storage/get` if you need them."
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Agent did not mint a storage_token for this invoke."
+        },
+        {
+          "name": "STORAGE_ERR_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Required field (key/path) missing or wrong type."
+        },
+        {
+          "name": "STORAGE_ERR_NOT_FOUND",
+          "code": -32108,
+          "desc": "Key/path does not exist (normalised on `get`)."
+        },
+        {
+          "name": "STORAGE_ERR_PRECONDITION_FAILED",
+          "code": -32112,
+          "desc": "if_match ETag did not match current generation."
+        },
+        {
+          "name": "STORAGE_ERR_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User APS quota exhausted."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32199,
+          "desc": "Nexus REST returned a non-success status."
+        }
+      ],
+      "example": "# Read–modify–write with optimistic CAS and a 1-hour TTL.\nfrom executa_sdk import ctx\n\nasync def remember_search(query: str) -> None:\n    cur = await ctx.storage.get(key=\"search.last\")\n    state = cur[\"value\"] if cur[\"exists\"] else {\"history\": []}\n    state[\"history\"] = ([query] + state[\"history\"])[:50]\n    try:\n        resp = await ctx.storage.set(\n            key=\"search.last\",\n            value=state,\n            if_match=cur[\"etag\"],   # None on first create is fine\n            tags=[\"recents\"],\n            ttl_seconds=3600,        # forget after 1 h of no writes\n        )\n    except RpcError as e:\n        if e.code == STORAGE_ERR_PRECONDITION_FAILED:\n            # Someone else wrote between our get and set — retry the whole RMW.\n            return await remember_search(query)\n        raise\n    # resp == {'etag': '…', 'generation': 7, 'size_bytes': 412}\n",
+      "limitations": [
+        "Payload must be JSON-serialisable and ≤ **256 KB** after canonical serialisation. For larger or binary blobs use `files/upload.begin` + `files/upload.complete`.",
+        "Full-document replace only — no server-side patch / merge / array-append. Concurrent writers to the same key must use `if_match` to avoid lost updates.",
+        "Write path takes a Postgres row lock (`SELECT … FOR UPDATE`) and deducts user quota (Redis Lua + DB fallback). Sustained > ~50 writes/s on a single key will contend; shard hot state across multiple keys.",
+        "`metadata` and `tags` are **replace-only** — there is no partial update. Re-send the full desired value each write.",
+        "TTL is enforced lazily on read; expired-but-not-yet-deleted entries still occupy quota briefly. A reaper job sweeps them; do not rely on TTL for security-critical wipes.",
+        "Requires manifest permission `storage.write`. Per-scope access (`user` / `app` / `tool`) is gated by the `storage_token`'s `allowed_scopes` claim, set by the host at install-time grant."
+      ]
+    },
+    {
+      "slug": "storage-delete",
+      "name": "storage/delete",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · KV",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "Soft-delete one entry from the plugin's **APS** KV namespace. The row stays in Postgres (recoverable), but quota is released immediately and subsequent `storage/get`/`storage/list` treat the key as gone.",
+      "wire": {
+        "json_rpc_method": "storage/delete",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "delete(*, scope: str = 'tool', key: str, if_match: str | None = None) -> dict",
+      "params": [
+        {
+          "name": "scope",
+          "type": "str",
+          "default": "'tool'",
+          "required": false,
+          "desc": "",
+          "summary": "ACL scope — same semantics as `storage/get` (`tool` / `app` / `user`).",
+          "notes": [
+            "Requires manifest `storage.write`. Per-scope access is gated by the `storage_token`'s `allowed_scopes` claim (`user` / `app` / `tool`)."
+          ]
+        },
+        {
+          "name": "key",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Exact key to delete within the active scope (1–1024 chars).",
+          "notes": [
+            "Exact match only — there is no glob / prefix delete. To bulk-remove, page through `storage/list(prefix=…)` and call `delete` per key.",
+            "Validated by `validate_kv_key`; empty or oversize → `STORAGE_ERR_INVALID_REQUEST`."
+          ]
+        },
+        {
+          "name": "if_match",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Optional CAS guard. Pass the `etag` from your last read to avoid deleting a key that was updated in between.",
+          "notes": [
+            "Mismatch → `STORAGE_ERR_PRECONDITION_FAILED` (HTTP 412); the row is **not** touched.",
+            "`None` is an unconditional delete — only safe for keys you know are single-writer."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "**`{deleted: True}`** — synthesised by the SDK from Nexus's `{ok: true}` envelope.\n\nAlways returns `deleted=True` on success; the response carries no etag/generation (the row is tombstoned, not rewritten)."
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Agent did not mint a storage_token for this invoke."
+        },
+        {
+          "name": "STORAGE_ERR_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Required field (key/path) missing or wrong type."
+        },
+        {
+          "name": "STORAGE_ERR_NOT_FOUND",
+          "code": -32108,
+          "desc": "Key/path does not exist (normalised on `get`)."
+        },
+        {
+          "name": "STORAGE_ERR_PRECONDITION_FAILED",
+          "code": -32112,
+          "desc": "if_match ETag did not match current generation."
+        },
+        {
+          "name": "STORAGE_ERR_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User APS quota exhausted."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32199,
+          "desc": "Nexus REST returned a non-success status."
+        }
+      ],
+      "example": "# Clear a per-conversation cursor, but only if it hasn't changed since we read it.\nfrom executa_sdk import ctx\n\nasync def forget_cursor(conversation_id: str) -> bool:\n    key = f\"cursor.{conversation_id}\"\n    cur = await ctx.storage.get(key=key)\n    if not cur[\"exists\"]:\n        return False                       # nothing to do\n    try:\n        await ctx.storage.delete(key=key, if_match=cur[\"etag\"])\n    except RpcError as e:\n        if e.code == STORAGE_ERR_PRECONDITION_FAILED:\n            return False                   # someone else wrote first\n        if e.code == STORAGE_ERR_NOT_FOUND:\n            return False                   # already gone\n        raise\n    return True\n",
+      "limitations": [
+        "Deleting a missing key raises `STORAGE_ERR_NOT_FOUND` — unlike `storage/get`, 404 is **not** normalised. Wrap in try/except if you are not sure the key exists, or check via `storage/get` first.",
+        "Soft delete only — the row is flagged `is_deleted=True`, kept for audit/recovery. Quota is released right away, but the data is not physically purged until a reaper job runs. Do not rely on `delete` as a security-grade wipe.",
+        "No bulk / glob delete. Iterate `storage/list(prefix=…)` + `storage/delete` to clear a namespace; expect O(n) round-trips.",
+        "Takes a Postgres row lock (`SELECT … FOR UPDATE`). Concurrent deletes on the same key serialise — the second one will see `STORAGE_ERR_NOT_FOUND`.",
+        "Requires manifest `storage.write`. Per-scope access is gated by the `storage_token`'s `allowed_scopes` claim (`user` / `app` / `tool`)."
+      ]
+    },
+    {
+      "slug": "storage-list",
+      "name": "storage/list",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · KV",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "Enumerate the plugin's **APS** KV keys (alphabetical, cursor-paginated). Returns metadata heads only — `value` is **not** included; re-read with `storage/get` for any key you actually need.",
+      "wire": {
+        "json_rpc_method": "storage/list",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "list(*, scope: str = 'tool', prefix: str = '', cursor: str | None = None, limit: int = 100) -> dict",
+      "params": [
+        {
+          "name": "scope",
+          "type": "str",
+          "default": "'tool'",
+          "required": false,
+          "desc": "",
+          "summary": "ACL scope — same semantics as `storage/get` (`tool` / `app` / `user`).",
+          "notes": [
+            "Listing is per-scope; the same key in `tool` and `app` is reported separately if you list each scope.",
+            "Requires manifest `storage.read`. Per-scope access is gated by the `storage_token`'s `allowed_scopes` claim (`user` / `app` / `tool`)."
+          ]
+        },
+        {
+          "name": "prefix",
+          "type": "str",
+          "default": "''",
+          "required": false,
+          "desc": "",
+          "summary": "Filter keys that start with this string. Empty = list everything in the scope.",
+          "notes": [
+            "Forward-match only — no glob or regex. Matching is byte-wise on the raw key.",
+            "Validated like a key path: ≤ 1024 chars, no leading `/`, no `.` / `..` segments, no forbidden characters.",
+            "Trailing `/` is allowed (e.g. `prefix='cursor/'`); empty trailing segments are tolerated."
+          ]
+        },
+        {
+          "name": "cursor",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Opaque continuation token returned by a previous call as `next_cursor`.",
+          "notes": [
+            "Encodes the last-seen key; pages walk strict ascending order (`path > cursor`).",
+            "Treat as opaque — do not parse, persist long-term, or share across scopes/prefixes.",
+            "Pass `None` (or omit) for the first page."
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "int",
+          "default": "100",
+          "required": false,
+          "desc": "",
+          "summary": "Page size, 1 .. 1000 (default 100).",
+          "notes": [
+            "Out-of-range values are silently clamped by the server (`max(1, min(limit, 1000))`).",
+            "The server fetches `limit + 1` rows to decide whether `next_cursor` is set; cost is O(limit)."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "**`{items: [...], next_cursor: str | None}`**\n\nEach item is a **head only**:\n• `key: str` — the entry key\n• `etag: str` — current ETag; reuse for `if_match` writes/deletes\n• `size_bytes: int` — serialised value size\n• `metadata: dict`, `tags: list[str] | None` — as last written\n• `updated_at: str` — ISO-8601 timestamp\n\n`next_cursor` is `None` on the final page. There is **no** total count and **no** `value` field — call `storage/get` for entries you actually want to read."
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Agent did not mint a storage_token for this invoke."
+        },
+        {
+          "name": "STORAGE_ERR_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Required field (key/path) missing or wrong type."
+        },
+        {
+          "name": "STORAGE_ERR_NOT_FOUND",
+          "code": -32108,
+          "desc": "Key/path does not exist (normalised on `get`)."
+        },
+        {
+          "name": "STORAGE_ERR_PRECONDITION_FAILED",
+          "code": -32112,
+          "desc": "if_match ETag did not match current generation."
+        },
+        {
+          "name": "STORAGE_ERR_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User APS quota exhausted."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32199,
+          "desc": "Nexus REST returned a non-success status."
+        }
+      ],
+      "example": "# Page through every key under a prefix and drop the stale ones.\nfrom executa_sdk import ctx\n\nasync def gc_drafts(stale_before: str) -> int:\n    removed, cursor = 0, None\n    while True:\n        page = await ctx.storage.list(\n            prefix=\"draft/\",\n            cursor=cursor,\n            limit=200,\n        )\n        for item in page[\"items\"]:\n            if item[\"updated_at\"] < stale_before:\n                try:\n                    await ctx.storage.delete(\n                        key=item[\"key\"],\n                        if_match=item[\"etag\"],\n                    )\n                    removed += 1\n                except RpcError as e:\n                    if e.code not in (\n                        STORAGE_ERR_PRECONDITION_FAILED,\n                        STORAGE_ERR_NOT_FOUND,\n                    ):\n                        raise\n        cursor = page[\"next_cursor\"]\n        if not cursor:\n            break\n    return removed\n",
+      "limitations": [
+        "Heads only — `value` is never returned. Listing then reading N entries is N+1 round-trips. Keep frequently-co-read state in a single key when possible.",
+        "Ordering is strict ascending `key`. No reverse iteration, no order-by-updated_at, no random sample.",
+        "No server-side filtering by `tags`, `metadata`, or `size_bytes` — fetch and filter client-side.",
+        "Hard page size cap of 1000. Full enumeration of a large namespace requires looping on `next_cursor`; expect O(n / page_size) round-trips.",
+        "Soft-deleted entries are excluded; expired (TTL-past) entries are excluded lazily.",
+        "Result is a point-in-time view per page — concurrent writes/deletes between pages can cause an entry to appear twice or be skipped. For exact snapshots, write a single key containing an index.",
+        "Requires manifest `storage.read`. Per-scope access is gated by the `storage_token`'s `allowed_scopes` claim (`user` / `app` / `tool`)."
+      ]
+    },
+    {
+      "slug": "files-upload_begin",
+      "name": "files/upload_begin",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · Files",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "Phase 1 of the two-phase Files (object) upload — reserves an APS object entry (marked `__pending=true`), soft-deducts the declared `size_bytes` from the user's APS quota, and returns a short-lived presigned PUT URL into APS object storage. The plugin then `PUT`s the bytes directly to that URL and calls `files/upload_complete` to flip the entry from pending to durable.",
+      "wire": {
+        "json_rpc_method": "files/upload_begin",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "uploadbegin(*, scope: Literal['user','app','tool'] = 'app', path: str, size_bytes: int, content_type: str | None = None, metadata: dict[str, str] | None = None, timeout: float = 60.0) -> dict",
+      "params": [
+        {
+          "name": "scope",
+          "type": "Literal['user','app','tool']",
+          "default": "'app'",
+          "required": false,
+          "desc": "",
+          "summary": "ACL scope. Files namespace defaults to `app` (shared across the anna-app's tools).",
+          "notes": [
+            "`tool` — visible only to invocations of this Executa for this user.",
+            "`app` — shared across all Executas owned by the same anna-app for this user (recommended for files the user-visible app surfaces, e.g. attachments).",
+            "`user` — user-global; intended for files the user uploaded via the Anna chat UI. Reading these requires the storage_token's `allowed_scopes` claim to contain `user`.",
+            "The Agent's minted `storage_token` is what actually gates access; this argument selects the row family. Unauthorised scope → `STORAGE_ERR_NOT_GRANTED` (`-32021`)."
+          ]
+        },
+        {
+          "name": "path",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Logical file path within the chosen scope (e.g. `reports/2026/q1.pdf`).",
+          "notes": [
+            "Validated server-side by `validate_path`: 1..1024 chars, relative (no leading `/`), segments are non-empty and not `.` / `..`, no ASCII control chars / backslashes / zero-width / BiDi control characters; segments may not start/end with whitespace.",
+            "Invalid → `STORAGE_ERR_INVALID_PATH` (`-32027`). The returned path is canonicalised (redundant `/` collapsed) and used verbatim as the APS object key.",
+            "Namespaced by `(scope, owner, path)`; collisions with other plugins/users are impossible.",
+            "Re-using an existing path is allowed — the row is row-locked (`SELECT … FOR UPDATE`) and rewritten in place; pass `if_match` (server-side only — not exposed by the SDK) to guard against concurrent writers."
+          ]
+        },
+        {
+          "name": "size_bytes",
+          "type": "int",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Declared byte length of the upload (0 .. 256 MB).",
+          "notes": [
+            "Hard cap is `OBJECT_MAX_BYTES = 256 * 1024 * 1024`. Exceed → `STORAGE_ERR_VALUE_TOO_LARGE` (`-32025`, HTTP 413). Zero-byte uploads are accepted.",
+            "Used to **soft-reserve** quota (`storage_quota_service.reserve(soft=True, ttl_seconds=600)`). Only the *delta* over an existing entry's `size_bytes` is reserved; pure overwrites of the same size cost nothing.",
+            "The reservation is auto-released by Redis after 10 min if `files/upload_complete` never lands; the row's `__pending` flag stays until a reaper cleans it.",
+            "Reservation failure → `STORAGE_ERR_QUOTA_EXCEEDED` (`-32024`); the call rolls back before any presign happens.",
+            "Honour the value you declare — APS object storage accepts any size and `files/upload_complete` writes the **actual** size, but quota accounting is based on this number until finalize reconciles."
+          ]
+        },
+        {
+          "name": "content_type",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "MIME type of the upload. **Effectively required** despite the optional Python type.",
+          "notes": [
+            "The Nexus body schema (`_FilesInitBody`) declares `content_type: str` as required (max 120 chars). Omitting it from the SDK call ⇒ FastAPI 422 surfaced as `STORAGE_ERR_INVALID_REQUEST` (`-32028`); empty/oversize ⇒ `STORAGE_ERR_INVALID_PATH` (`-32027`).",
+            "Echoed into the presigned URL's signed `Content-Type` query parameter — your subsequent `PUT` **must** send the same `Content-Type` header (the response's `headers` dict supplies it) or APS rejects the upload with 403 SignatureDoesNotMatch.",
+            "Stored on the row and surfaced by `files/list` / `files/download_url`. Pick something the consumer will use to choose a viewer (e.g. `application/pdf`, `image/png`); browsers also honour it on signed GETs unless `disposition` overrides."
+          ]
+        },
+        {
+          "name": "metadata",
+          "type": "dict[str, str] | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Opaque per-entry metadata. **Replaces** the stored dict (no merge).",
+          "notes": [
+            "Server adds `__pending=True` and, when a soft reservation is taken, `__reservation_token=<…>` to the dict before persisting; both are stripped by `files/upload_complete`. Do not use keys starting with `__`.",
+            "Echoed back by `files/list` and `storage/get` (for objects). Never used by the server for routing or filtering.",
+            "Passing `None` is treated as `{}` on write — it clears any metadata the previous version of the entry carried."
+          ]
+        },
+        {
+          "name": "timeout",
+          "type": "float",
+          "default": "60.0",
+          "required": false,
+          "desc": "",
+          "summary": "SDK-side per-call deadline in seconds (default 60s).",
+          "notes": [
+            "Client-side only — the Agent → Nexus hop has its own 15s `request_timeout_s` (`DEFAULT_REQUEST_TIMEOUT_S` in the Anna Agent runtime). Bumping the SDK timeout does not lift the upstream HTTP timeout.",
+            "On expiry the call raises the SDK's RPC timeout error, not a storage error."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "Verbatim `PresignedPut` body from Nexus — every field is always present:\n• `upload_id: str` — the `aps_entries.uuid` of the (newly created or reused) pending row. **Treat as opaque**; not currently required by `files/upload_complete` (which keys off `path` + `etag`) but handy as a correlation id for logs.\n• `put_url: str` — presigned `PUT` URL into APS object storage. Lives for `ttl_seconds` (default **300 s**, Nexus-controlled — the SDK does not expose `ttl_seconds`). Single-use semantically; issuing a second `files/upload_begin` for the same path rewrites the row and invalidates any earlier URL.\n• `headers: dict[str, str]` — currently `{\"Content-Type\": <content_type>}`. **Send these exact headers** with your `PUT` or APS rejects the signature. Future versions may add additional signed transport headers; treat as an opaque set, do not append your own.\n• `expires_at: str` — ISO-8601 wall-clock expiry of the URL (= server `utcnow()` + `ttl_seconds`). After this point the `PUT` returns 403 and you must call `files/upload_begin` again.\n• `r2_key: str` — APS-internal storage key for this entry (opaque, server-assigned, namespaced by user / scope / entry). Diagnostic only — you do not need it for the `PUT` (it's already baked into `put_url`) and the value is not stable API."
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Agent did not mint a storage_token for this invoke."
+        },
+        {
+          "name": "STORAGE_ERR_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Required field (key/path) missing or wrong type."
+        },
+        {
+          "name": "STORAGE_ERR_NOT_FOUND",
+          "code": -32108,
+          "desc": "Key/path does not exist (normalised on `get`)."
+        },
+        {
+          "name": "STORAGE_ERR_PRECONDITION_FAILED",
+          "code": -32112,
+          "desc": "if_match ETag did not match current generation."
+        },
+        {
+          "name": "STORAGE_ERR_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User APS quota exhausted."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32199,
+          "desc": "Nexus REST returned a non-success status."
+        }
+      ],
+      "example": "# Two-phase Files upload: begin → PUT to presigned URL → complete.\nimport httpx\nfrom executa_sdk import ctx\n\nasync def upload_report(local_path: str, dest: str = \"reports/q1.pdf\") -> str:\n    blob = open(local_path, \"rb\").read()\n\n    # 1. Reserve quota + get a presigned PUT URL.\n    info = await ctx.storage.files.upload_begin(\n        path=dest,\n        size_bytes=len(blob),\n        content_type=\"application/pdf\",\n        scope=\"app\",          # default; explicit for clarity\n    )\n\n    # 2. PUT the bytes straight to the presigned URL — bypasses the agent host.\n    async with httpx.AsyncClient(timeout=60.0) as http:\n        r = await http.put(info[\"put_url\"], content=blob, headers=info[\"headers\"])\n        r.raise_for_status()                       # 200/204 on success\n        obj_etag = r.headers[\"etag\"].strip('\"')  # APS object ETag\n\n    # 3. Tell APS the upload landed — flips __pending=False, finalises quota.\n    entry = await ctx.storage.files.upload_complete(\n        path=dest,\n        etag=obj_etag,\n        size_bytes=len(blob),\n    )\n    return entry[\"path\"]   # durable, listable, downloadable\n",
+      "limitations": [
+        "**Two-phase, plugin-driven**: nothing is durably stored until `files/upload_complete` succeeds. If your process crashes between begin and complete, the row remains `__pending=true` and the soft quota reservation expires after 10 minutes — a reaper eventually deletes the orphan. Do not skip `upload_complete`.",
+        "**`put_url` TTL is capped at 1 h** (`OBJECT_PRESIGN_TTL_MAX = 3600`); the default is **5 min** and the SDK does not let you change it. For large uploads stream the bytes immediately after begin and finalize on the same call site.",
+        "**`content_type` is effectively mandatory** even though typed as `Optional[str]` on the SDK. Omitting it surfaces as `STORAGE_ERR_INVALID_REQUEST` from the FastAPI body validator. Always pass a real MIME type.",
+        "**`ttl_seconds`, `tags`, `if_match` are not exposed by the Python SDK** (`FilesClient.upload_begin`). The underlying Nexus endpoint accepts them; if you need them, call the REST endpoint directly with the minted `storage_token`.",
+        "**Object size cap is 256 MB** (`OBJECT_MAX_BYTES`). For larger payloads you must chunk them across multiple paths yourself — there is no server-side multipart upload.",
+        "**Quota is soft-reserved up front** based on the *declared* `size_bytes`. Declaring a much larger value than you actually upload temporarily inflates `used_bytes` until finalize reconciles or the 10-min reservation expires.",
+        "**Rewriting an existing path is a full replace** — the previous APS object is overwritten (the entry is re-used; `generation` bumps; etag is replaced). No version history is kept. Use distinct paths if you need historical revisions.",
+        "Requires manifest permission `storage.write` and an install-time grant that allows the selected `scope`. The Agent will refuse to mint a `storage_token` with disallowed scopes; calls then fail with `STORAGE_ERR_NOT_GRANTED` (`-32021`)."
+      ]
+    },
+    {
+      "slug": "files-upload_complete",
+      "name": "files/upload_complete",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · Files",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "Phase 2 of the two-phase Files (object) upload — APS verifies that the bytes landed against the entry reserved by `files/upload_begin`, replaces the placeholder ETag with the canonical APS-computed object ETag, reconciles `size_bytes` against the actual uploaded size (positive delta is hard-deducted from quota, negative delta is refunded), strips the `__pending` flag, and returns the durable `ObjectEntry`.",
+      "wire": {
+        "json_rpc_method": "files/upload_complete",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "uploadcomplete(*, scope: Literal['user','app','tool'] = 'app', path: str, etag: str | None = None, size_bytes: int | None = None, content_type: str | None = None, timeout: float = 60.0) -> dict",
+      "params": [
+        {
+          "name": "scope",
+          "type": "Literal['user','app','tool']",
+          "default": "'app'",
+          "required": false,
+          "desc": "",
+          "summary": "ACL scope. **Must match** the scope you used at `upload_begin` (rows are scoped).",
+          "notes": [
+            "Mismatched scope → `STORAGE_ERR_NOT_FOUND` (row lookup fails); the pending row in the original scope still expires after 10 min and is reaped.",
+            "Per-scope authorisation is enforced by the `storage_token`'s `allowed_scopes` claim."
+          ]
+        },
+        {
+          "name": "path",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Same logical path you passed to `files/upload_begin` (re-validated server-side).",
+          "notes": [
+            "Looked up via `(scope, owner, path)` with a row lock (`SELECT … FOR UPDATE`).",
+            "If the row is missing or not in `mode='object'` → `STORAGE_ERR_NOT_FOUND` (`-32022`).",
+            "If the row exists but the `__pending` flag was already cleared (re-finalize after success, or a `path` that was never started via `upload_begin`) → `STORAGE_ERR_NOT_FOUND` (\"object not pending finalize\"). Finalize is **not** idempotent — call it exactly once per begin."
+          ]
+        },
+        {
+          "name": "etag",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "ETag you read from the presigned `PUT` response. **Stored but not verified** by APS.",
+          "notes": [
+            "Despite the field name, APS does **not** compare your `etag` to the stored object's ETag — it queries the object directly and uses the canonical APS-computed ETag (truncated to 64 chars). Pass it anyway for parity with the SDK signature and forward-compat.",
+            "If APS cannot verify the uploaded object (it never landed, wrong key, transient object-store outage) the call raises `pending_upload`, surfaced by the host as `STORAGE_ERR_UPSTREAM` (`-32029`).",
+            "ETag length is capped at 64 chars — APS truncates rather than rejecting."
+          ]
+        },
+        {
+          "name": "size_bytes",
+          "type": "int | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Actual uploaded size — **advisory**. APS uses its own measured size, not yours.",
+          "notes": [
+            "Quota reconciliation compares the APS-measured object size to the entry's stored `size_bytes` (the value you declared at `upload_begin`). Positive diff → hard-reserve from quota (may raise `STORAGE_ERR_QUOTA_EXCEEDED`); negative diff → refund.",
+            "Your `size_bytes` argument here is **not used** for reconciliation; only kept on the signature for SDK convenience. Tracking your local byte count is still useful for logs."
+          ]
+        },
+        {
+          "name": "content_type",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Forwarded to Nexus but **silently dropped** by the current REST schema.",
+          "notes": [
+            "`_FilesFinalizeBody` only declares `path` / `etag` / `size_bytes` / `metadata`; FastAPI ignores extra fields. To change `content_type` after finalize there is no supported call — re-upload from scratch."
+          ]
+        },
+        {
+          "name": "timeout",
+          "type": "float",
+          "default": "60.0",
+          "required": false,
+          "desc": "",
+          "summary": "SDK-side per-call deadline in seconds (default 60s).",
+          "notes": [
+            "Independent of the Agent → APS HTTP timeout (15s) and APS's own verification budget. Bumping this does not lift the upstream limits."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "Verbatim `ObjectEntry` body from Nexus — the durable, post-finalize row:\n• `path: str` — canonicalised logical path.\n• `etag: str` — **canonical APS-computed object ETag** (truncated to 64 chars); use as `if_match` for subsequent `files/delete`.\n• `generation: int` — bumped on every successful finalize (begin → 1, finalize → 2 for a fresh upload).\n• `size_bytes: int` — **actual** APS-measured object size, may differ from your declared value.\n• `content_type: str | None` — as set at `upload_begin`.\n• `metadata: dict` — with `__pending` removed and any `metadata=` you passed here merged in (server-side `md.update(metadata)`).\n• `tags: list[str] | None` — as set at `upload_begin`.\n• `updated_at: str` — ISO-8601 timestamp."
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Agent did not mint a storage_token for this invoke."
+        },
+        {
+          "name": "STORAGE_ERR_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Required field (key/path) missing or wrong type."
+        },
+        {
+          "name": "STORAGE_ERR_NOT_FOUND",
+          "code": -32108,
+          "desc": "Key/path does not exist (normalised on `get`)."
+        },
+        {
+          "name": "STORAGE_ERR_PRECONDITION_FAILED",
+          "code": -32112,
+          "desc": "if_match ETag did not match current generation."
+        },
+        {
+          "name": "STORAGE_ERR_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User APS quota exhausted."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32199,
+          "desc": "Nexus REST returned a non-success status."
+        }
+      ],
+      "example": "# Idiomatic finalize after a successful presigned PUT (full flow lives on `files/upload_begin`).\nfrom executa_sdk import ctx\n\nasync def finalize_after_put(path: str, put_response) -> dict:\n    obj_etag = put_response.headers[\"etag\"].strip('\"')\n    entry = await ctx.storage.files.upload_complete(\n        path=path,\n        etag=obj_etag,                          # stored verbatim; advisory only\n        size_bytes=len(put_response.request.content),  # advisory; APS is source of truth\n    )\n    # entry == {'path': ..., 'etag': '<canonical-aps-etag>', 'generation': 2,\n    #           'size_bytes': 1234, 'content_type': 'application/pdf', ...}\n    return entry\n",
+      "limitations": [
+        "**Not idempotent**: calling `files/upload_complete` twice on the same path raises `STORAGE_ERR_NOT_FOUND` because the second call finds no `__pending` row. Build retry logic around the begin → PUT → complete trio, not the complete call in isolation.",
+        "**Must run after the presigned `PUT` lands**: if APS attempts verification before the object is visible (transient propagation, retried upload) you get a `pending_upload` error mapped to `STORAGE_ERR_UPSTREAM` (`-32029`). Retry the `complete` call after a short backoff; the entry stays pending and the URL stays valid until its TTL.",
+        "**Your `etag` is logged but not verified** — supplying a wrong/empty value still succeeds. Real integrity is APS's measured object size at verification time; treat the returned `etag` as authoritative.",
+        "**Quota can fail late**: if your actual upload is larger than the declared `size_bytes`, the hard-reserve at finalize may raise `STORAGE_ERR_QUOTA_EXCEEDED` *after* the bytes are already uploaded. The orphan object is retained by APS infrastructure (not counted toward your APS quota) and is not auto-cleaned. Always honour `size_bytes` honestly at `upload_begin`.",
+        "**Cannot mutate `content_type` after the fact** — the finalize schema ignores it. Choose the right MIME type at `upload_begin`.",
+        "**`metadata=` is merged, not replaced** (server does `md.update(metadata)`), in contrast to `storage/set` semantics. To clear a metadata key you must re-upload.",
+        "Requires manifest permission `storage.write` and a `storage_token` whose `allowed_scopes` includes the chosen `scope`. Failure → `STORAGE_ERR_NOT_GRANTED` (`-32021`)."
+      ]
+    },
+    {
+      "slug": "files-download_url",
+      "name": "files/download_url",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · Files",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "Mint a short-lived presigned `GET` URL for a previously finalised object. The plugin (or the end user, if you hand the URL back) fetches the bytes **directly from APS object storage** — the agent host never proxies the body.",
+      "wire": {
+        "json_rpc_method": "files/download_url",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "downloadurl(*, scope: Literal['user','app','tool'] = 'app', path: str, ttl_seconds: int = 300, expires_in: int | None = None, timeout: float = 60.0) -> dict",
+      "params": [
+        {
+          "name": "scope",
+          "type": "Literal['user','app','tool']",
+          "default": "'app'",
+          "required": false,
+          "desc": "",
+          "summary": "ACL scope — must match the scope under which the object was uploaded.",
+          "notes": [
+            "Per-scope access is gated by the `storage_token`'s `allowed_scopes` claim.",
+            "Cross-scope lookups are impossible: rows are namespaced by `(scope, owner, path)`."
+          ]
+        },
+        {
+          "name": "path",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Logical file path (re-validated server-side by `validate_path`).",
+          "notes": [
+            "Looked up via `(scope, owner, path)`; missing row → `STORAGE_ERR_NOT_FOUND` (`-32022`).",
+            "Row must be finalised — if it is still `__pending=true` (begin happened, complete didn't) the call raises `pending_upload` mapped to `STORAGE_ERR_UPSTREAM` (`-32029`).",
+            "Invalid path syntax → `STORAGE_ERR_INVALID_PATH` (`-32027`)."
+          ]
+        },
+        {
+          "name": "ttl_seconds",
+          "type": "int",
+          "default": "300",
+          "required": false,
+          "desc": "",
+          "summary": "",
+          "notes": []
+        },
+        {
+          "name": "expires_in",
+          "type": "int | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "**Currently a no-op via the SDK** — the REST endpoint reads `ttl`, not `expires_in`.",
+          "notes": [
+            "Nexus query parameter is `ttl: int = Query(300, ge=1, le=3600)`. The SDK forwards your value as `?expires_in=...`, which FastAPI silently ignores; the URL always lives **300 s** (5 min) until the SDK is updated.",
+            "Hard cap on the server is **3600 s** (1 h). Calling the REST endpoint directly with `?ttl=N` is the only way to override today.",
+            "If you need long-lived sharing, mint a fresh URL on demand rather than caching one."
+          ]
+        },
+        {
+          "name": "timeout",
+          "type": "float",
+          "default": "60.0",
+          "required": false,
+          "desc": "",
+          "summary": "SDK-side per-call deadline in seconds (default 60s).",
+          "notes": [
+            "Independent of the 15s Agent→Nexus HTTP timeout; this only bounds the SDK wait."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "Verbatim `PresignedGet` body from Nexus — every field present:\n• `get_url: str` — presigned APS `GET` URL. Plain HTTP GET, no auth headers needed; browser-friendly.\n• `expires_at: str` — ISO-8601 wall-clock expiry (= server `utcnow()` + `ttl_seconds`). After this, APS rejects the request with 403.\n• `etag: str` — canonical APS-computed object ETag (truncated to 64 chars). Use as a client-side cache key.\n• `size_bytes: int` — durable size of the object as recorded at finalize.\n• `content_type: str | None` — as set at `upload_begin`; pass to your HTTP layer for MIME hints.\n\nNote: the SDK docstring advertises `{\"url\", \"expires_at\"}` — the real shape is the richer `PresignedGet` above. Use the documented key `get_url`, not `url`."
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Agent did not mint a storage_token for this invoke."
+        },
+        {
+          "name": "STORAGE_ERR_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Required field (key/path) missing or wrong type."
+        },
+        {
+          "name": "STORAGE_ERR_NOT_FOUND",
+          "code": -32108,
+          "desc": "Key/path does not exist (normalised on `get`)."
+        },
+        {
+          "name": "STORAGE_ERR_PRECONDITION_FAILED",
+          "code": -32112,
+          "desc": "if_match ETag did not match current generation."
+        },
+        {
+          "name": "STORAGE_ERR_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User APS quota exhausted."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32199,
+          "desc": "Nexus REST returned a non-success status."
+        }
+      ],
+      "example": "# Hand a short-lived download link to the user via a sampling reply.\nfrom executa_sdk import ctx\n\nasync def share_report(path: str = \"reports/q1.pdf\") -> str:\n    info = await ctx.storage.files.download_url(path=path, scope=\"app\")\n    # info == {'get_url': 'https://…/aps-object-download/…?<signature>',\n    #          'expires_at': '2026-05-24T12:05:00', 'etag': '…',\n    #          'size_bytes': 12345, 'content_type': 'application/pdf'}\n    return (\n        f\"Your report is ready ({info['size_bytes']} bytes, \"\n        f\"expires {info['expires_at']}):\\n{info['get_url']}\"\n    )\n",
+      "limitations": [
+        "**TTL is locked at 300 s via the SDK** (see `expires_in` notes). For longer URLs hit `GET /api/v1/storage/files/url?ttl=...` directly with the `storage_token`.",
+        "**Pending objects return an error**: if `files/upload_complete` has not landed, `download_url` raises `pending_upload` (surfaces as `STORAGE_ERR_UPSTREAM`). Don't expose the URL until finalize succeeds.",
+        "**No range / partial download knobs** at this layer — the presigned URL itself supports standard HTTP `Range` requests.",
+        "**`disposition` (Content-Disposition) is supported by the REST endpoint** but not exposed by the SDK. Call the REST endpoint directly if you need `attachment; filename=...`.",
+        "**Soft-deleted entries are invisible** — once `files/delete` runs, `download_url` returns `STORAGE_ERR_NOT_FOUND` even if the underlying APS object is still retained.",
+        "**URL is a bearer credential**: anyone who sees `get_url` until `expires_at` can read the bytes. Treat it like a short-lived password — don't log it, don't embed it in long-lived client state.",
+        "Requires manifest permission `storage.read` and a `storage_token` whose `allowed_scopes` covers the requested `scope`."
+      ]
+    },
+    {
+      "slug": "files-list",
+      "name": "files/list",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · Files",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "Enumerate finalised objects under a path prefix in the plugin's APS Files namespace (alphabetical by `path`, cursor-paginated). Returns metadata heads only — to download the bytes call `files/download_url` per entry.",
+      "wire": {
+        "json_rpc_method": "files/list",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "list(*, scope: Literal['user','app','tool'] = 'app', prefix: str | None = None, cursor: str | None = None, limit: int | None = None, timeout: float = 60.0) -> dict",
+      "params": [
+        {
+          "name": "scope",
+          "type": "Literal['user','app','tool']",
+          "default": "'app'",
+          "required": false,
+          "desc": "",
+          "summary": "ACL scope — same semantics as `files/upload_begin`. Files default to `app`.",
+          "notes": [
+            "Listing is per-scope; the same path under `tool` and `app` is reported separately if you list each scope.",
+            "Per-scope access is gated by the `storage_token`'s `allowed_scopes` claim (`user` / `app` / `tool`)."
+          ]
+        },
+        {
+          "name": "prefix",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Forward-match filter on `path`. Empty (or `None`) lists everything in the scope.",
+          "notes": [
+            "Validated loosely (length ≤ 1024, must not start with `/`); unlike `validate_path` the segments **may** be empty, so trailing `/` like `prefix='reports/'` works.",
+            "Forward-match only — no glob/regex/suffix search. Matching is byte-wise on the raw path.",
+            "SQL `LIKE` with backslash-escaped wildcards — caller-supplied `%` / `_` characters are matched literally, not as wildcards."
+          ]
+        },
+        {
+          "name": "cursor",
+          "type": "str | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Opaque continuation token returned by a previous call as `next_cursor`.",
+          "notes": [
+            "Encodes the last-seen path; pages walk strict ascending order (`path > cursor`).",
+            "Treat as opaque — do not parse, persist long-term, or share across scopes/prefixes.",
+            "Pass `None` (or omit) for the first page."
+          ]
+        },
+        {
+          "name": "limit",
+          "type": "int | None",
+          "default": "None",
+          "required": false,
+          "desc": "",
+          "summary": "Page size, **1 .. 1000** (default 100).",
+          "notes": [
+            "Out-of-range values raise `STORAGE_ERR_INVALID_PATH` (`-32027`) at the service layer; the REST endpoint also rejects with HTTP 422 via `Query(100, ge=1, le=1000)`.",
+            "The server fetches `limit + 1` rows to decide whether `next_cursor` is set; cost is O(limit).",
+            "When the SDK omits this, Nexus picks the server default of 100."
+          ]
+        },
+        {
+          "name": "timeout",
+          "type": "float",
+          "default": "60.0",
+          "required": false,
+          "desc": "",
+          "summary": "SDK-side per-call deadline in seconds (default 60s).",
+          "notes": [
+            "Independent of the 15s Agent→Nexus HTTP timeout."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "**`{items: [...], next_cursor: str | None}`**\n\nEach item is an `ObjectListItem` **head only** (no bytes, no download URL):\n• `path: str` — logical path of the object.\n• `etag: str` — canonical APS-computed object ETag (≤ 64 chars).\n• `size_bytes: int` — actual stored size.\n• `content_type: str | None` — as set at `upload_begin`.\n• `metadata: dict` — with internal flags (`__pending`, `__reservation_token`) already stripped by `upload_complete`.\n• `tags: list[str] | None`.\n• `updated_at: str` — ISO-8601 timestamp of the last finalize.\n\n`next_cursor` is `None` on the final page. Call `files/download_url` for any path you actually want to read."
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Agent did not mint a storage_token for this invoke."
+        },
+        {
+          "name": "STORAGE_ERR_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Required field (key/path) missing or wrong type."
+        },
+        {
+          "name": "STORAGE_ERR_NOT_FOUND",
+          "code": -32108,
+          "desc": "Key/path does not exist (normalised on `get`)."
+        },
+        {
+          "name": "STORAGE_ERR_PRECONDITION_FAILED",
+          "code": -32112,
+          "desc": "if_match ETag did not match current generation."
+        },
+        {
+          "name": "STORAGE_ERR_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User APS quota exhausted."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32199,
+          "desc": "Nexus REST returned a non-success status."
+        }
+      ],
+      "example": "# Build a JSON index of every PDF in this anna-app's storage, regardless of size.\nfrom executa_sdk import ctx\n\nasync def index_pdfs() -> list[dict]:\n    out, cursor = [], None\n    while True:\n        page = await ctx.storage.files.list(\n            prefix=\"reports/\",\n            cursor=cursor,\n            limit=200,\n            scope=\"app\",\n        )\n        for item in page[\"items\"]:\n            # Filter pending uploads client-side (see Limitations).\n            if (item.get(\"metadata\") or {}).get(\"__pending\"):\n                continue\n            if item[\"content_type\"] == \"application/pdf\":\n                out.append({\n                    \"path\": item[\"path\"],\n                    \"size_bytes\": item[\"size_bytes\"],\n                    \"updated_at\": item[\"updated_at\"],\n                })\n        cursor = page[\"next_cursor\"]\n        if not cursor:\n            break\n    return out\n",
+      "limitations": [
+        "**Heads only** — no `get_url` is included. Listing + downloading N objects is N+1 round-trips. For bulk export, fan-out `download_url` after the list completes.",
+        "**Pending uploads are included** in the listing — the row is created at `upload_begin` with `__pending=true`, and the list query does not filter on that flag (only the `mode` and `is_deleted` columns are checked). If you need a clean view, filter client-side on `metadata['__pending']` being absent. (This differs from `download_url`, which rejects pending rows.)",
+        "**Ordering is strict ascending `path`** — no reverse, no order-by-`updated_at`, no size/tag filtering server-side. Sort/filter client-side after the page returns.",
+        "**Hard page-size cap of 1000**. Full enumeration of a large namespace requires looping on `next_cursor`; expect O(n / page_size) round-trips.",
+        "**Soft-deleted entries are excluded** (`is_deleted=True` rows are filtered out at the SQL level).",
+        "**Point-in-time per page** — concurrent uploads/deletes between pages can cause an entry to appear twice or be skipped. For an exact snapshot, write a manifest object under a stable path and update it transactionally.",
+        "Requires manifest permission `storage.read` and a `storage_token` whose `allowed_scopes` covers the requested `scope`."
+      ]
+    },
+    {
+      "slug": "files-delete",
+      "name": "files/delete",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · Files",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "Soft-delete one finalised object from the plugin's APS Files namespace. The entry is tombstoned (`is_deleted=True`), the byte quota is **immediately** released, and the entry vanishes from `files/list` / `files/download_url`. The underlying APS object is kept for retention until a reaper job purges it.",
+      "wire": {
+        "json_rpc_method": "files/delete",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "delete(*, scope: Literal['user','app','tool'] = 'app', path: str, timeout: float = 60.0) -> dict",
+      "params": [
+        {
+          "name": "scope",
+          "type": "Literal['user','app','tool']",
+          "default": "'app'",
+          "required": false,
+          "desc": "",
+          "summary": "ACL scope — must match the scope under which the object was uploaded.",
+          "notes": [
+            "Cross-scope deletes are impossible: rows are namespaced by `(scope, owner, path)`.",
+            "Requires manifest `storage.write`. Per-scope access is gated by the `storage_token`'s `allowed_scopes` claim."
+          ]
+        },
+        {
+          "name": "path",
+          "type": "str",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Exact logical path to delete (re-validated server-side).",
+          "notes": [
+            "Exact match only — no glob / prefix delete. To bulk-remove, page through `files/list(prefix=…)` and call `files/delete` per path.",
+            "Missing or wrong-mode row → `STORAGE_ERR_NOT_FOUND` (`-32022`). Unlike `files/download_url`, **pending uploads can be deleted** — the row is dropped and the soft reservation is released by Redis after its TTL."
+          ]
+        },
+        {
+          "name": "timeout",
+          "type": "float",
+          "default": "60.0",
+          "required": false,
+          "desc": "",
+          "summary": "SDK-side per-call deadline in seconds (default 60s).",
+          "notes": [
+            "Independent of the 15s Agent→Nexus HTTP timeout."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "dict",
+        "desc": "**`{deleted: True}`** — synthesised by the Matrix storage handler from Nexus's `{ok: true, path: ...}` envelope (`_postprocess` collapses success bodies to a uniform shape across KV and Files deletes).\n\nAlways returns `deleted=True` on success; no etag/generation/path is echoed back (the row is tombstoned, not rewritten). Re-read with `files/list` to confirm absence."
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32101,
+          "desc": "Agent did not mint a storage_token for this invoke."
+        },
+        {
+          "name": "STORAGE_ERR_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Required field (key/path) missing or wrong type."
+        },
+        {
+          "name": "STORAGE_ERR_NOT_FOUND",
+          "code": -32108,
+          "desc": "Key/path does not exist (normalised on `get`)."
+        },
+        {
+          "name": "STORAGE_ERR_PRECONDITION_FAILED",
+          "code": -32112,
+          "desc": "if_match ETag did not match current generation."
+        },
+        {
+          "name": "STORAGE_ERR_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "User APS quota exhausted."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32199,
+          "desc": "Nexus REST returned a non-success status."
+        }
+      ],
+      "example": "# Drop every object under a stale prefix.\nfrom executa_sdk import ctx\n\nasync def purge_drafts(prefix: str = \"drafts/\") -> int:\n    removed, cursor = 0, None\n    while True:\n        page = await ctx.storage.files.list(\n            prefix=prefix, cursor=cursor, limit=200, scope=\"app\",\n        )\n        for item in page[\"items\"]:\n            try:\n                await ctx.storage.files.delete(path=item[\"path\"], scope=\"app\")\n                removed += 1\n            except RpcError as e:\n                if e.code != STORAGE_ERR_NOT_FOUND:\n                    raise   # someone else already tombstoned this path — fine\n        cursor = page[\"next_cursor\"]\n        if not cursor:\n            break\n    return removed\n",
+      "limitations": [
+        "**Soft delete only** — the entry is flagged `is_deleted=True` and `deleted_at` is stamped; the underlying APS object is retained until the platform-side retention reaper runs. Do not rely on this call for security-grade or compliance-grade wipes — contact platform support if you need hard deletion before retention elapses.",
+        "**Quota is released immediately** (the byte count is subtracted from `used_bytes` and `entries_count` is decremented). Re-uploading the same path right after a delete will not double-count.",
+        "**Deleting a missing path raises `STORAGE_ERR_NOT_FOUND`** — unlike the SDK's KV `delete` wording, 404 is not normalised here. Wrap in try/except if you cannot pre-check.",
+        "**No CAS via the SDK** — even though the REST endpoint accepts `if_match`, `FilesClient.delete` does not forward it. Concurrent overwrite + delete races can tombstone a row that another caller just finalised; if that matters, fall through to the REST endpoint directly.",
+        "**No bulk / glob delete**. Iterate `files/list(prefix=…)` + `files/delete` to clear a namespace; expect O(n) round-trips.",
+        "**Takes a Postgres row lock** (`SELECT … FOR UPDATE`). Concurrent deletes on the same path serialise — the loser sees `STORAGE_ERR_NOT_FOUND`.",
+        "Requires manifest `storage.write` and a `storage_token` whose `allowed_scopes` covers the requested `scope`."
+      ]
+    }
+  ]
+}

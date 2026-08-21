@@ -1,0 +1,310 @@
+{
+  "section_id": "host-api-web",
+  "items": [
+    {
+      "slug": "web-search",
+      "name": "web.search",
+      "kind": "Host API method · iframe surface (+ executa reverse-RPC twin `web/search`)",
+      "group": "Web",
+      "since": "Introduced anna-app-runtime v0.13.0 / dispatcher 0.16.0",
+      "direction": "Bundle (iframe) → Host RPC → app_web_facade.web_search → web_service → provider chain (tavily → ddgs)",
+      "summary": "Search the web (or news) **on the user's behalf** — your bundle never holds a search-provider API key. The host owns provider routing, quota, billing and audit; the response schema is provider-agnostic. `search_depth: \"advanced\"` expresses a *quality intent* (paid tier, ≈28 CU) — the host may degrade to basic (≈0.5–14 CU) and reports the actually-executed tier in `provider_tier`, billing the cheaper rate. Requires manifest `ui.host_api.web` to include `search` (or `*`) AND the user-enabled per-app `web_grant` — the first call returns `APP_NOT_GRANTED`, which your app should treat as the trigger for the host consent card, then retry.",
+      "params_schema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 5,
+            "description": "Capped by min(20, web_grant.maxResultsPerCall). Values above the cap are REJECTED (APP_INVALID_REQUEST), never silently truncated."
+          },
+          "search_depth": {
+            "type": "string",
+            "enum": [
+              "basic",
+              "advanced"
+            ],
+            "default": "basic",
+            "description": "advanced requires web_grant.allowAdvanced (explicit user opt-in — real upstream cost)."
+          },
+          "topic": {
+            "type": "string",
+            "enum": [
+              "general",
+              "news"
+            ],
+            "default": "general"
+          },
+          "time_range": {
+            "type": "string",
+            "enum": [
+              "day",
+              "week",
+              "month",
+              "year"
+            ]
+          },
+          "region": {
+            "type": "string",
+            "description": "Best-effort provider mapping, e.g. \"us-en\" / \"cn-zh\"."
+          },
+          "include_domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10
+          },
+          "exclude_domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10
+          }
+        },
+        "additionalProperties": false
+      },
+      "result_shape": "{ results: [{title, url, snippet, site, published_at?, score?}], provider_tier: \"basic\"|\"advanced\", quota_consumed: number }",
+      "errors": [
+        {
+          "code": "APP_NOT_GRANTED",
+          "when": "manifest missing ui.host_api.web `search`, or web_grant disabled / allowSearch=false / advanced without allowAdvanced",
+          "http": 403
+        },
+        {
+          "code": "APP_QUOTA_EXCEEDED",
+          "when": "CU pool exhausted",
+          "http": 429
+        },
+        {
+          "code": "APP_INVALID_REQUEST",
+          "when": "parameter validation failure (rejected, not truncated)",
+          "http": 400
+        },
+        {
+          "code": "APP_PROVIDER_ERROR",
+          "when": "the whole provider chain failed (call is NOT billed)",
+          "http": 502
+        }
+      ],
+      "billing": "Main CU pool, per-call: quota = max(provider_cost_usd × QUOTA_COST_RATIO, floor_cu). ddgs basic = 0.5 CU floor; tavily basic ≈ 13.8 CU; tavily advanced ≈ 27.6 CU (at 80% margin — admin margin changes propagate automatically). Billed by the ACTUALLY-executed provider: an advanced request degraded to ddgs bills 0.5 CU. Ledger: LLMRequestType.APP_WEB_SEARCH, model_name=\"web:{provider}:{op}\".",
+      "notes": "`score`/`published_at` are optional — never assume they exist. Results are provider-agnostic; you cannot select a provider. SDK default timeout for the `web` namespace is 60s (override per-call via `{ timeoutMs }`)."
+    },
+    {
+      "slug": "web-fetch",
+      "name": "web.fetch",
+      "kind": "Host API method · iframe surface (+ executa reverse-RPC twin `web/fetch`)",
+      "group": "Web",
+      "since": "Introduced anna-app-runtime v0.13.0 / dispatcher 0.16.0",
+      "direction": "Bundle (iframe) → Host RPC → app_web_facade.web_fetch → web_service → native SSRF-guarded fetcher (httpx + trafilatura)",
+      "summary": "Fetch 1–10 URLs and get back extracted main content (Markdown or plain text, navigation/ads stripped) with **per-item failure isolation** — one blocked or broken page never fails the batch; check `pages[i].ok`. The host fetcher enforces a hard SSRF policy that CANNOT be disabled: http/https only, port allow-list (80/443/8080/8443), DNS-resolve-then-check against private/reserved/metadata ranges, and full re-validation on every redirect hop (≤5).",
+      "params_schema": {
+        "type": "object",
+        "required": [
+          "urls"
+        ],
+        "properties": {
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 10
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "markdown",
+              "text"
+            ],
+            "default": "markdown"
+          },
+          "max_chars": {
+            "type": "integer",
+            "default": 20000,
+            "maximum": 100000,
+            "description": "Per-page truncation. Executa (stdio) twin is capped at 8,000/page."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "default": 15000,
+            "maximum": 30000,
+            "description": "Per-page budget."
+          }
+        },
+        "additionalProperties": false
+      },
+      "result_shape": "{ pages: [{url, final_url?, ok, title?, content?, published_at?, truncated?, error?}], quota_consumed: number } — pages[] is same length & order as input urls[]. error values: SSRF_BLOCKED | TIMEOUT | HTTP_<status> | PARSE_FAILED | TOO_LARGE | UNSUPPORTED_CONTENT_TYPE:<ct> | TOO_MANY_REDIRECTS | RESPONSE_BUDGET_EXCEEDED",
+      "errors": [
+        {
+          "code": "APP_NOT_GRANTED",
+          "when": "manifest missing ui.host_api.web `fetch`, or web_grant disabled / allowFetch=false",
+          "http": 403
+        },
+        {
+          "code": "APP_QUOTA_EXCEEDED",
+          "when": "CU pool exhausted",
+          "http": 429
+        },
+        {
+          "code": "APP_INVALID_REQUEST",
+          "when": "bad urls / out-of-range max_chars / timeout_ms",
+          "http": 400
+        }
+      ],
+      "billing": "1.0 CU floor per URL (native fetcher; ≈zero upstream cost — the floor covers bandwidth/abuse surface). With web_grant.allowAdvanced, failed pages are retried through tavily extract (≈2.76 CU/URL at 80% margin) and billed per actually-used provider. Ledger: LLMRequestType.APP_WEB_FETCH.",
+      "notes": "Whole-response budget is 512 KB (iframe) / 256 KB (executa stdio); overflow pages are kept in-order and marked RESPONSE_BUDGET_EXCEEDED. Only text/html, text/plain and application/xhtml+xml are parsed. No JS rendering, no login-wall bypass — best-effort robots respect. Recommend passing `{ timeoutMs: 90000 }` for large batches."
+    },
+    {
+      "slug": "web-image-search",
+      "name": "web.image_search",
+      "kind": "Host API method · iframe surface (+ executa reverse-RPC twin `web/image_search`)",
+      "group": "Web",
+      "since": "Phase 2 (2026-07-14) · anna-app-runtime v0.13.0 / dispatcher 0.16.0",
+      "direction": "Bundle (iframe) → Host RPC → app_web_facade.web_image_search → web_service → provider chain (serper Google Images → ddgs.images → tavily include_images)",
+      "summary": "Search the web for images through the host's managed providers. **Safe-search is force-enabled platform-side and cannot be disabled** (passing `safe_search: false` is rejected). Results are provider-agnostic; `width`/`height`/`thumbnail_url`/`license_hint` are optional — never assume they exist. `license_hint` is a best-effort passthrough: the platform makes NO copyright warranty; usage-rights judgement stays with your app. Requires manifest `ui.host_api.web` to include `image_search` (or `*`) AND the user's `web_grant.allowImageSearch` — which defaults OFF even when web is enabled (drive the consent card on `APP_NOT_GRANTED`). SDK also accepts the camelCase alias `anna.web.imageSearch`.",
+      "params_schema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 8,
+            "description": "Capped by min(50, web_grant.maxResultsPerCall). Values above the cap are REJECTED (APP_INVALID_REQUEST)."
+          },
+          "min_width": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Best-effort: results without known dimensions are dropped when a hard constraint is set."
+          },
+          "min_height": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "aspect": {
+            "type": "string",
+            "enum": [
+              "any",
+              "wide",
+              "tall",
+              "square"
+            ],
+            "default": "any"
+          }
+        },
+        "additionalProperties": false
+      },
+      "result_shape": "{ results: [{image_url, thumbnail_url?, source_url, title?, width?, height?, mime_type?, license_hint?}], quota_consumed: number, cached?: boolean }",
+      "errors": [
+        {
+          "code": "APP_NOT_GRANTED",
+          "when": "manifest missing ui.host_api.web `image_search`, or web_grant disabled / allowImageSearch=false (defaults OFF)",
+          "http": 403
+        },
+        {
+          "code": "APP_QUOTA_EXCEEDED",
+          "when": "CU pool exhausted",
+          "http": 429
+        },
+        {
+          "code": "APP_INVALID_REQUEST",
+          "when": "parameter validation failure, incl. safe_search:false",
+          "http": 400
+        },
+        {
+          "code": "APP_PROVIDER_ERROR",
+          "when": "the whole provider chain failed (call is NOT billed)",
+          "http": 502
+        }
+      ],
+      "billing": "Main CU pool, per-call: serper (Google Images; preferred when key configured) ≈ 3.4 CU at 80% margin; ddgs images = 0.5 CU floor; tavily include_images ≈ 13.8 CU at 80% margin. Billed by the ACTUALLY-executed provider. Results are cached 10 min (sha256 of query+params); cache hits bill the floor CU only and set `cached: true`. Ledger: LLMRequestType.APP_WEB_IMAGE_SEARCH, model_name=\"web:{provider}:image_search\".",
+      "notes": "Rendering result thumbnails requires your bundle CSP to allow the source origins (e.g. csp_overrides img-src https:). The host does not proxy thumbnail bytes — use web.image_fetch to obtain a stored copy."
+    },
+    {
+      "slug": "web-image-fetch",
+      "name": "web.image_fetch",
+      "kind": "Host API method · iframe surface (+ executa reverse-RPC twin `web/image_fetch`)",
+      "group": "Web",
+      "since": "Phase 2 (2026-07-14) · anna-app-runtime v0.13.0 / dispatcher 0.16.0",
+      "direction": "Bundle (iframe) → Host RPC → app_web_facade.web_image_fetch → web_service → native SSRF-guarded downloader → APS files (app self-scope)",
+      "summary": "Download one image **host-side** into the app's APS file storage and get back an artifact REFERENCE — `path` plus a short-lived `get_url` (30 min) — never bytes. The download enforces the same non-negotiable SSRF policy as web.fetch (scheme/port allow-list, DNS-resolve-then-check, per-redirect-hop re-validation) plus an image MIME whitelist (jpeg/png/webp/gif) verified by MAGIC BYTES, not the Content-Type header. The stored object counts against the user's APS storage quota and follows normal files.* lifecycle (re-presign via anna.files.download_url, delete via anna.files.delete). Requires manifest `ui.host_api.web` `image_fetch` AND `web_grant.allowImageFetch` (defaults OFF). SDK alias: `anna.web.imageFetch`.",
+      "params_schema": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "http(s) image URL."
+          },
+          "max_bytes": {
+            "type": "integer",
+            "default": 5242880,
+            "maximum": 20971520,
+            "description": "Default 5 MiB, hard cap 20 MiB."
+          },
+          "purpose": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Optional audit label (recorded in the usage ledger + artifact metadata)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "result_shape": "{ path: string, get_url: string, mime_type: string, bytes_size: number, sha256: string, source_url: string, final_url: string, quota_consumed: number } — note the field is get_url (files.* convention), not url",
+      "errors": [
+        {
+          "code": "APP_NOT_GRANTED",
+          "when": "manifest missing ui.host_api.web `image_fetch`, or web_grant disabled / allowImageFetch=false (defaults OFF)",
+          "http": 403
+        },
+        {
+          "code": "APP_QUOTA_EXCEEDED",
+          "when": "CU pool exhausted OR APS storage quota exceeded",
+          "http": 429
+        },
+        {
+          "code": "APP_INVALID_REQUEST",
+          "when": "bad url / out-of-range max_bytes / SSRF-blocked target (message starts with SSRF_BLOCKED)",
+          "http": 400
+        },
+        {
+          "code": "APP_PROVIDER_ERROR",
+          "when": "download failed (HTTP_4xx/5xx, TIMEOUT, TOO_LARGE, UNSUPPORTED_IMAGE_TYPE, TOO_MANY_REDIRECTS) — NOT billed",
+          "http": 502
+        }
+      ],
+      "billing": "1.0 CU floor per image (native downloader; ≈zero upstream cost) + the stored bytes count against the APS storage quota. Failed downloads are never billed. Ledger: LLMRequestType.APP_WEB_IMAGE_FETCH, model_name=\"web:native:image_fetch\".",
+      "notes": "Executa twin (`web/image_fetch`) stores to the tool scope instead of the app scope and is stdio-frame safe by construction (reference only). Rendering `get_url` in an iframe needs img-src to allow the R2 host — the host auto-injects it into your bundle CSP when the manifest declares web `image_fetch`."
+    },
+    {
+      "slug": "web-grant",
+      "name": "web_grant",
+      "kind": "User grant block · UserAnnaApp.custom_config / UserExecuta.custom_config",
+      "group": "Web",
+      "since": "dispatcher 0.16.0",
+      "direction": "User consent UI → custom_config.web_grant → checked by app_web_facade / executa_web_gate on every call",
+      "summary": "Per-app (and per-executa) user consent for web access. Default is DISABLED — unlike embed, web calls have real upstream cost and crawling side effects, so the first `web.*` call returns `APP_NOT_GRANTED` to drive the consent-card flow. Shape: `{enabled, allowSearch, allowFetch, allowAdvanced, allowImageSearch, allowImageFetch, maxResultsPerCall}`. `allowSearch`/`allowFetch` default true once `enabled`; `allowAdvanced` defaults false (paid tier); `allowImageSearch`/`allowImageFetch` default false (Phase 2 — real crawl cost / storage side effects). Usage is metered by the CU pool only.",
+      "notes": "App-side editing: Installed-Apps permission modal (PATCH /api/v1/apps/{id}/grants, `web_grant` key — clamped against manifest ui.host_api.web). Executa-side: the executa Permissions modal (requires manifest host_capabilities web.search/web.fetch to be in manifest_cache — re-register after adding them). `anna-app dev` installs seed a fully-enabled dev web_grant (dev calls are never billed)."
+    }
+  ]
+}

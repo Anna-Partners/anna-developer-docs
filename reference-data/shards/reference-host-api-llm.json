@@ -1,0 +1,190 @@
+{
+  "section_id": "host-api-llm",
+  "items": [
+    {
+      "slug": "llm-complete",
+      "name": "llm.complete",
+      "kind": "Host API method · iframe surface",
+      "group": "LLM",
+      "since": "Introduced anna-app-runtime v0.2.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade.complete → LangChain ChatOpenAI → provider",
+      "summary": "Stateless single-shot chat completion against the **user's chosen** LLM provider / model — your bundle never sees an API key, never hard-codes a model name, and the request is billed against the user's existing quota and provider routing. MCP-shaped: the request mirrors `sampling/createMessage` (`messages`, `maxTokens`, `temperature`, `modelPreferences`, `systemPrompt`, `stopSequences`) and the response mirrors the MCP result (`role`, `content: {type:'text', text}`, `model`, `stopReason`, `usage`).",
+      "wire": {
+        "json_rpc_method": "llm.complete",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "upstream": "LangChain `ChatOpenAI` against `LLMProviderService.select_model_by_preferences(...)` — provider, base_url, api_key, and `cost_multiplier` all resolved server-side.",
+        "streaming": false
+      },
+      "signature": "anna.llm.complete(args: {messages: Array<{role:'user'|'assistant'|'system', content: string|object}>, maxTokens?: number, temperature?: number, modelPreferences?: {hints?: object, costPriority?: number, speedPriority?: number, intelligencePriority?: number}, systemPrompt?: string, stopSequences?: string[], metadata?: object}, opts?: {timeoutMs?: number}) => Promise<{role:'assistant', content:{type:'text', text:string}, model:string, stopReason:string, usage:{inputTokens:number, outputTokens:number, totalTokens:number}, _meta?:{provider:string|null, latencyMs:number, quotaConsumed:number, appSessionUuid:string}}>",
+      "params": [
+        {
+          "name": "messages",
+          "type": "Array<{role, content}>",
+          "default": null,
+          "required": true,
+          "summary": "Ordered chat transcript to complete. `role` is `user` / `assistant` / `system`. `content` is a string OR an MCP-shaped block (`{type:'text', text}` / `{type:'image', ...}`); blocks are flattened into a LangChain `HumanMessage` / `AIMessage` / `SystemMessage` by `_assemble_lc_messages`.",
+          "notes": [
+            "`APP_INVALID_REQUEST` if missing, non-array, or empty.",
+            "Order is preserved verbatim — caller is responsible for trimming context to the model's window.",
+            "Image content blocks require the selected model to be multimodal; otherwise the provider rejects upstream and the call surfaces as `APP_PROVIDER_ERROR`."
+          ]
+        },
+        {
+          "name": "maxTokens",
+          "type": "number (int)",
+          "default": "session.quota_caps.max_tokens_per_call (default 4096)",
+          "required": false,
+          "summary": "Hard cap on output tokens. Silently clamped down to `session.quota_caps.max_tokens_per_call` — the grant's per-call ceiling intersected with what the user actually granted to *this* app.",
+          "notes": [
+            "`APP_INVALID_REQUEST` if `≤ 0`.",
+            "Clamping is silent — caller does not see the reduced value (read `usage.outputTokens` to confirm what landed).",
+            "Per-app cap is set at install time via `UserAnnaApp.custom_config.llm_grant.quota_caps.max_tokens_per_call`; defaults to 4096 if neither side declares one."
+          ]
+        },
+        {
+          "name": "temperature",
+          "type": "number",
+          "default": "0.7",
+          "required": false,
+          "summary": "Sampling temperature passed through to the provider. Default `0.7` when omitted."
+        },
+        {
+          "name": "modelPreferences",
+          "type": "{hints?, costPriority?, speedPriority?, intelligencePriority?}",
+          "default": null,
+          "required": false,
+          "summary": "Soft routing hints consumed by `LLMProviderService.select_model_by_preferences`. The user's grant ALWAYS overrides — preferences only break ties between providers the user actually enabled.",
+          "notes": [
+            "`hints` is an arbitrary dict (e.g. `{family: 'claude'}`); the selector pattern-matches against `LLMModel.metadata`.",
+            "Priorities are floats in `[0, 1]`; higher means \"more important\".",
+            "If no eligible model is available for the user, the call raises `APP_PROVIDER_ERROR` (`no eligible model available`)."
+          ]
+        },
+        {
+          "name": "systemPrompt",
+          "type": "string",
+          "default": null,
+          "required": false,
+          "summary": "Optional system prompt prepended as a `SystemMessage` before `messages`. Use this for app-specific persona / format instructions instead of injecting into `messages[0]`."
+        },
+        {
+          "name": "stopSequences",
+          "type": "string[]",
+          "default": null,
+          "required": false,
+          "summary": "Forwarded as the provider's `stop` parameter. Caller must trim — the host does not validate length / count limits."
+        },
+        {
+          "name": "metadata",
+          "type": "object",
+          "default": null,
+          "required": false,
+          "summary": "Free-form caller-side tagging. NOT forwarded to the provider; reserved for future telemetry."
+        }
+      ],
+      "returns": {
+        "type": "{role, content, model, stopReason, usage, _meta}",
+        "desc": "MCP-shaped completion result.\n\n**Fields**\n• `role`: always `'assistant'`.\n• `content`: `{type: 'text', text: <model output>}`. Only text is returned today; multimodal output (image / tool_use blocks) is not exposed via `llm.complete` — use `agent.session.run` if you need that.\n• `model`: the model_name actually selected (after `modelPreferences` resolution + user grant filtering) — store this if you need to audit later.\n• `stopReason`: always `'endTurn'` today (provider-specific stop reasons are not yet surfaced).\n• `usage`: token counts as reported by the provider; `totalTokens` falls back to `inputTokens + outputTokens` if the provider omits it.\n• `_meta`: **optional** host-only extension (the cloud facade always populates it, but it is NOT part of the MCP result contract — treat it as best-effort and do not hard-depend on its presence).\n• `_meta.provider`: human-readable provider name (e.g. `OpenAI`, `Anthropic`).\n• `_meta.latencyMs`: end-to-end wall-clock including selector + provider call.\n• `_meta.quotaConsumed`: float — the actual quota debited (provider cost × `cost_multiplier`). Useful for showing in-UI \"X credits used\".\n• `_meta.appSessionUuid`: the lazy-minted `AnnaAppSession.uuid` (kind=`complete`). Same uuid is reused across all `llm.complete` calls from the same window for the token's TTL."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": "APP_NOT_GRANTED",
+          "desc": "User has no `UserAnnaApp.custom_config.llm_grant` block for this app, the grant exists but `enabled: false`, the user has no active subscription, or the user row was deleted between auth and dispatch. `details.jsonrpc_code = -32001`."
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "`messages` missing / empty / non-array, or `maxTokens ≤ 0`. `details.jsonrpc_code = -32004`."
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": "APP_QUOTA_EXCEEDED",
+          "desc": "Pre-flight `check_quota_available` failed OR post-call `check_and_consume_quota_with_redis` failed. Either way, no quota is double-charged — the latter raises *after* the model already returned, so the response is dropped and the caller retries. `details.jsonrpc_code = -32015`."
+        },
+        {
+          "name": "APP_PROVIDER_ERROR",
+          "code": "APP_PROVIDER_ERROR",
+          "desc": "Selector found no eligible model, or LangChain `ainvoke` raised (network error, provider 5xx, content filter, etc.). The original exception type + message is included in the error text. `details.jsonrpc_code = -32003`."
+        },
+        {
+          "name": "APP_SESSION_REVOKED",
+          "code": "APP_SESSION_REVOKED",
+          "desc": "The cached `app_session_token` was revoked server-side (admin action / grant rotated). Caller should reset state and retry — the next call mints a fresh session. `details.jsonrpc_code = -32011`."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Store does not support `llm_complete` (local-dev harness without a facade bridge)."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "Resolved `user_id` no longer exists (token validated but row deleted between auth and dispatch)."
+        }
+      ],
+      "example": "// bundle/app.js — summarise the current note with the user's preferred model.\ntry {\n  const reply = await anna.llm.complete({\n    systemPrompt: \"You are a concise summariser. Output 1–2 sentences.\",\n    messages: [\n      { role: \"user\", content: noteBody.value.slice(0, 8000) },\n    ],\n    maxTokens: 256,\n    temperature: 0.3,\n    modelPreferences: { intelligencePriority: 0.4, speedPriority: 0.6 },\n  }, { timeoutMs: 60_000 });\n\n  render(reply.content.text);\n  log(`model=${reply.model} tokens=${reply.usage.totalTokens} quota=${reply._meta.quotaConsumed}`);\n} catch (e) {\n  switch (e.code) {\n    case \"APP_NOT_GRANTED\":      setStatus(\"User hasn't granted LLM access to this app\"); break;\n    case \"APP_QUOTA_EXCEEDED\":   setStatus(\"Out of quota — try again next cycle\");        break;\n    case \"APP_INVALID_REQUEST\":  setStatus(`Bad request: ${e.message}`);                  break;\n    case \"APP_PROVIDER_ERROR\":   setStatus(\"Model provider error — please retry\");        break;\n    default:                     throw e;\n  }\n}\n",
+      "limitations": [
+        "Non-streaming. The response arrives in one chunk after the provider finishes — for token-by-token UI use `agent.session.run` (LangGraph streaming over `rpc.stream`).",
+        "Text output only. Multimodal blocks in the request (`{type:'image'}` etc.) are accepted by the message assembler but only `text` blocks come back in `content`. Tool-use / structured-output workflows belong to `agent.session.run`.",
+        "`maxTokens` clamping is silent — callers asking for 100k against a 4k cap get a 4k response with no warning. Read back `usage.outputTokens` if you need to detect truncation.",
+        "`stopReason` is hard-coded `'endTurn'`; provider-specific stops (content_filter, tool_use, length) are not yet surfaced. Detect length-stops by comparing `usage.outputTokens` to your `maxTokens`.",
+        "No conversation state. Each call is independent — the lazy-minted `app_session_uuid` is cached server-side only for token reuse, NOT for prompt history. Caller MUST resend full `messages` every call.",
+        "`metadata` is currently ignored end-to-end; do not rely on it for telemetry.",
+        "Per-call deadline default is `DEFAULT_TIMEOUTS_BY_NS.llm = 180_000` ms in the SDK; longer waits require an explicit `{ timeoutMs }`.",
+        "Selector errors (no eligible model) are reported as `APP_PROVIDER_ERROR`, not a dedicated code — branch on `e.message` containing `\"no eligible model\"` if you need to distinguish."
+      ]
+    },
+    {
+      "slug": "llm-stream",
+      "name": "llm.stream",
+      "kind": "Host API method · iframe surface · streaming",
+      "group": "LLM",
+      "since": "Introduced anna-app-runtime v0.10.0 / dispatcher 0.12.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → worker-dispatched app_llm_facade.stream_completion → frames pushed back over `rpc.stream` events",
+      "summary": "Streaming variant of `llm.complete` — same request shape, but the SDK returns an async-iterable `RpcStream`: `for await` yields `{event:'model_token', text}` incremental frames, and the final `{event:'complete', role, content, model, usage, _meta}` frame mirrors the `llm.complete` response exactly. Generation runs on the worker fleet (same single-producer dispatch as `agent.session.run`); frames arrive via the window's `rpc.stream` event channel and are reassembled by the SDK — your bundle just iterates.",
+      "wire": {
+        "json_rpc_method": "llm.stream",
+        "auth": "Handled by the host page — same envelope as `llm.complete`. The RPC returns `{stream_id}` synchronously; token frames arrive as `rpc.stream` events tagged with that id.",
+        "upstream": "`app_llm_facade.stream_completion` — LangChain `chat.astream(stream_usage=True)`; quota check-and-consume runs at stream end.",
+        "streaming": true
+      },
+      "signature": "anna.llm.stream(args: {messages: Array<{role, content}>, maxTokens?: number, temperature?: number, modelPreferences?: object, systemPrompt?: string, stopSequences?: string[], metadata?: object}, opts?: {timeoutMs?: number}) => RpcStream<{event:'model_token', text:string} | {event:'complete', role:'assistant', content:{type:'text',text:string}, model:string, usage:object, _meta?:object}>",
+      "params": [
+        {
+          "name": "(all)",
+          "type": "—",
+          "required": false,
+          "summary": "Identical to `llm.complete`: `messages` (required), `maxTokens` (silently clamped to `quota_caps.max_tokens_per_call`), `temperature`, `modelPreferences`, `systemPrompt`, `stopSequences`, `metadata`. See the `llm.complete` entry for full per-param semantics — the request travels the same validation path."
+        }
+      ],
+      "returns": {
+        "type": "RpcStream (async iterable)",
+        "desc": "Frames in order:\n• zero or more `{event:'model_token', text}` — incremental output; concatenating `text` yields the full completion.\n• exactly one terminal `{event:'complete', role, content, model, usage, _meta}` — byte-equivalent to the `llm.complete` result (quota consumed at this point).\nOn provider failure the stream throws; partial tokens already delivered stay delivered but are NOT billed as a successful completion."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": "APP_NOT_GRANTED",
+          "desc": "Same grant model as `llm.complete` (`ui.host_api.llm` must contain `stream` or `*`, plus the user-side `llm_grant`)."
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "Same validation as `llm.complete` (`messages` missing/empty, `maxTokens ≤ 0`)."
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": "APP_QUOTA_EXCEEDED",
+          "desc": "Pre-flight or end-of-stream consume failed — the terminal frame is replaced by a stream error; no double-charge."
+        }
+      ],
+      "example": "const stream = await anna.llm.stream({\n  messages: [{ role: 'user', content: 'Write a haiku about the sea.' }],\n  maxTokens: 200\n});\nlet text = '';\nfor await (const frame of stream) {\n  if (frame.event === 'model_token') {\n    text += frame.text;\n    output.textContent = text;      // live token-by-token render\n  } else if (frame.event === 'complete') {\n    console.log(frame.model, frame.usage, frame._meta?.quotaConsumed);\n  }\n}",
+      "limitations": [
+        "Requires the worker fleet — in `anna-app dev` the harness bridges to `POST /api/v1/copilot/app/complete/stream` (SSE) instead; behavior matches but latency profile differs.",
+        "Stop-sequence / provider-specific stop reasons are not surfaced per-frame; only the terminal frame carries `usage`.",
+        "Frames share the window's `rpc.stream` event channel — iterate promptly; an abandoned iterator keeps the stream buffered until timeout (`llm` namespace default 180 000 ms)."
+      ]
+    }
+  ]
+}

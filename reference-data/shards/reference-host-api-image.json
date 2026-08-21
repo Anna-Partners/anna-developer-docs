@@ -1,0 +1,317 @@
+{
+  "section_id": "host-api-image",
+  "items": [
+    {
+      "slug": "image-generate",
+      "name": "image.generate",
+      "kind": "Host API method · iframe surface",
+      "group": "Image",
+      "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade → image provider (DALL·E / SDXL / FLUX / …) → R2",
+      "summary": "Generate `n` images from a text prompt using the host's configured image provider. The host enforces the per-(user, App) `image_grant`, checks plan quota, calls the provider, stores bytes on R2, and returns short-lived presigned URLs. The bundle never sees a provider key, never holds R2 credentials, and never bills directly.",
+      "wire": {
+        "json_rpc_method": "image.generate",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.image.generate(args: {prompt: string, n?: number, size?: string, reference_image_urls?: string[], quality?: string, resolution?: string, output_format?: string, enable_web_search?: boolean, thinking_level?: string, modelPreferences?: {hints: {name: string}[]}}, opts?: {timeoutMs?: number}) => Promise<{images, model, quota_used, ...}>",
+      "params": [
+        {
+          "name": "prompt",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Natural-language description of the image to generate. Trimmed; an empty string after trim is rejected with `APP_INVALID_REQUEST`.",
+          "notes": [
+            "Forwarded verbatim to the provider — provider-side safety filters apply.",
+            "Provider safety refusals surface as `APP_PROVIDER_ERROR` (HTTP 502 underneath)."
+          ]
+        },
+        {
+          "name": "n",
+          "type": "integer",
+          "default": "1",
+          "required": false,
+          "desc": "",
+          "summary": "How many images to generate in this call. Must be a positive integer.",
+          "notes": [
+            "Clamped against `image_grant.maxPerCallGenerate` (default **4**) — exceeding → `APP_INVALID_REQUEST` with `n={n} exceeds per-call cap {max}`.",
+            "Independent host hard-cap of **8** lives in the Anna Agent runtime `_MAX_N` for the plugin-side path; the App-side facade enforces only the grant value.",
+            "Per-invoke rolling counter (`image_grant.max_images`) is **not** applied to App-side calls — those quotas are scoped to Executa plugin `tool_invoke_id` and not to App sessions."
+          ]
+        },
+        {
+          "name": "size",
+          "type": "string",
+          "default": "\"1024x1024\"",
+          "required": false,
+          "desc": "",
+          "summary": "Output dimensions as `WxH`. Default `1024x1024`.",
+          "notes": [
+            "Provider-validated — unsupported aspect ratios surface as `APP_PROVIDER_ERROR` (HTTP 400 underneath, code `-32104` on the legacy HTTP route)."
+          ]
+        },
+        {
+          "name": "reference_image_urls",
+          "type": "string[] | null",
+          "default": "null",
+          "required": false,
+          "desc": "",
+          "summary": "Up to 4 reference image URLs the provider may condition on (style transfer / prompt-image blends). Validated by `validate_image_url` (no internal hostnames, no private IPs, no `file://`).",
+          "notes": [
+            "Any failing URL → `APP_INVALID_REQUEST` with `bad ref: <reason>`.",
+            "Prefer `image.edit` over `image.generate + reference_image_urls` when you have a single source image — better fidelity, simpler quota accounting.",
+            "Text-to-image-only models (e.g. Seedream 5.0 Pro on fal) reject reference images with `APP_INVALID_REQUEST` — the capability guard reads the model's `supports_reference_image` flag."
+          ]
+        },
+        {
+          "name": "quality",
+          "type": "\"low\" | \"medium\" | \"high\" | undefined",
+          "default": "undefined (model default, typically \"high\")",
+          "required": false,
+          "desc": "",
+          "summary": "Rendering quality tier for GPT-Image-family models. Strongly drives per-image cost (e.g. GPT Image 2 at 1024×1024: low $0.006 / medium $0.053 / high $0.211) — billing follows the actually-requested tier.",
+          "notes": [
+            "Validated host-side (`parse_image_options`) — any other value → `APP_INVALID_REQUEST`.",
+            "Models without a quality knob (Nano Banana, Seedream, Qwen, Doubao) silently ignore it; no surcharge is billed."
+          ]
+        },
+        {
+          "name": "resolution",
+          "type": "\"0.5K\" | \"1K\" | \"2K\" | \"4K\" | undefined",
+          "default": "undefined (auto-derived from `size`)",
+          "required": false,
+          "desc": "",
+          "summary": "Native output resolution tier for Nano-Banana-family models. Billed at 0.75× / 1× / 1.5× / 2× the model's base per-image rate respectively.",
+          "notes": [
+            "Validated host-side — any other value → `APP_INVALID_REQUEST`.",
+            "When omitted the host derives the tier from `size` (max edge ≤512 → 0.5K, ≤1440 → 1K, ≤2880 → 2K, else 4K).",
+            "Non-Nano-Banana models ignore this option."
+          ]
+        },
+        {
+          "name": "output_format",
+          "type": "\"png\" | \"jpeg\" | \"webp\" | undefined",
+          "default": "undefined (png)",
+          "required": false,
+          "desc": "",
+          "summary": "Encoded output format for fal-hosted models. Falls back to `png` when the routed model does not list the format in its `supported_output_formats`.",
+          "notes": [
+            "No billing impact."
+          ]
+        },
+        {
+          "name": "enable_web_search",
+          "type": "boolean | undefined",
+          "default": "undefined (off)",
+          "required": false,
+          "desc": "",
+          "summary": "Ground the generation in live web results (Nano Banana 2 only). Adds a small per-call surcharge (currently $0.015) which is included in the billed quota.",
+          "notes": [
+            "Ignored (and not surcharged) on models without `supports_web_search`.",
+            "Must be a boolean — any other type → `APP_INVALID_REQUEST`."
+          ]
+        },
+        {
+          "name": "thinking_level",
+          "type": "\"minimal\" | \"high\" | undefined",
+          "default": "undefined (provider default)",
+          "required": false,
+          "desc": "",
+          "summary": "Reasoning depth before rendering (Nano Banana 2). `high` improves compositional planning and adds a small surcharge (currently $0.002) included in the billed quota.",
+          "notes": [
+            "Validated host-side — any other value → `APP_INVALID_REQUEST`."
+          ]
+        },
+        {
+          "name": "modelPreferences",
+          "type": "{hints: {name: string}[]} | undefined",
+          "default": "undefined (user's image_gen preference)",
+          "required": false,
+          "desc": "",
+          "summary": "MCP-shaped request-level model hint. When a hint resolves, it wins over the user's `image_gen` preference for this call; the actually-used model is reported in the response `model` field.",
+          "notes": [
+            "Resolution (`resolve_image_model_hint`): hints tried in order — case-insensitive exact model-name match, then substring — against active `text-to-image` models; plan-gated models outside the user's `allowed_plans` are skipped.",
+            "A miss silently falls back to the user preference route (MCP semantics) — never an error.",
+            "Non-object value → `APP_INVALID_REQUEST`."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "{ images: Array<{url, ...}>, model, model_provider, latency_ms, quota_used, ... }",
+        "desc": "Schema produced by `executa_image_gate._build_response`. The relevant keys for App authors:\n• `images[]` — each `{url}` is a presigned R2 GET, **~30 min TTL** (`R2_TRANSIENT_PRESIGN_EXPIRY = 1800s`). Fetch the bytes or round-trip through `upload.inline`/`upload.negotiate` for durable storage.\n• `model`, `model_provider` — provider that fulfilled the request (lets you label the artifact in your UI).\n• `quota_used` — `{images_today, images_quota, …}` for the user's plan. Use this to gray out the generate button when the cap is hit instead of letting the user click into a 429.\n• `latency_ms` — provider round-trip; not the host wall-clock."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": "APP_NOT_GRANTED",
+          "desc": "`image_grant.enabled == false`, `allowGenerate == false`, or the underlying executa row is disabled. Mapped from `APP_ERR_NOT_GRANTED` (-32001) by the dispatcher. HTTP 403 on the legacy `/api/v1/copilot/app/image/generate` route."
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "Missing/empty `prompt`, non-int `n`, `n <= 0`, `n` over the per-call cap, or a `reference_image_urls` entry failing `validate_image_url`. Mapped from `APP_ERR_INVALID_REQUEST` (-32004)."
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": "APP_QUOTA_EXCEEDED",
+          "desc": "User plan quota exhausted — either the pre-call `check_quota_available` (very small floor of 0.01) or post-call `check_and_consume_quota_with_redis`. Mapped from `APP_ERR_QUOTA_EXCEEDED` (-32015). HTTP 429."
+        },
+        {
+          "name": "APP_PROVIDER_ERROR",
+          "code": "APP_PROVIDER_ERROR",
+          "desc": "Provider 5xx, safety refusal, upstream timeout, or unsupported size/aspect-ratio. Mapped from `APP_ERR_PROVIDER_ERROR` (-32003). The original gate error message is preserved verbatim."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Store does not support `image_generate` (local-dev harness without a facade)."
+        }
+      ],
+      "example": "// Generate a poster and render it in the iframe.\ntry {\n  const out = await anna.image.generate({\n    prompt: \"A bold art-deco poster of the planet Mars.\",\n    n: 1,\n    size: \"1024x1024\",\n  });\n  posterImg.src = out.images[0].url;        // ~30 min TTL\n  quotaLabel.textContent = `${out.quota_used.images_today}/${out.quota_used.images_quota}`;\n} catch (e) {\n  switch (e.code) {\n    case \"APP_NOT_GRANTED\":     setStatus(\"Enable image generation in Anna Admin.\"); break;\n    case \"APP_QUOTA_EXCEEDED\":  setStatus(\"Daily image quota hit — try again tomorrow.\"); break;\n    case \"APP_INVALID_REQUEST\": setStatus(`Bad request: ${e.message}`); break;\n    case \"APP_PROVIDER_ERROR\":  setStatus(\"Upstream provider hiccup — retry once.\"); break;\n    default: throw e;\n  }\n}\n",
+      "limitations": [
+        "Returned URLs expire in ~30 minutes. Never persist them as-is; call `upload.inline` (or `upload.negotiate`+`confirm`) to copy the bytes into the App's durable R2 namespace if you need them later.",
+        "CSP gotcha: the iframe's `img-src` must allow the host's R2 hostname. Either add `https:` (or the specific R2 domain) to `manifest.ui.csp_overrides.img-src`, or display the image via a same-origin proxy.",
+        "Cross-Origin-Embedder-Policy: if the iframe is in `require-corp` mode, R2 presigned URLs that don't include `Cross-Origin-Resource-Policy: cross-origin` will be blocked (`ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep`). The default Anna App runtime does **not** set COEP for this reason — only opt in when SharedArrayBuffer is required.",
+        "No streaming. Image responses are buffered; a slow provider (DALL·E 3 cold-start, FLUX queue) can take 30-60 s — the SDK default per-call timeout is `DEFAULT_TIMEOUTS_BY_NS.image = 180_000` ms (180 s), override via `opts.timeoutMs`.",
+        "Per-invoke rolling quota (`max_images`) used by Executa plugin-side image calls is **not** applied here. Only `image_grant.maxPerCallGenerate` and plan-level quota apply."
+      ]
+    },
+    {
+      "slug": "image-edit",
+      "name": "image.edit",
+      "kind": "Host API method · iframe surface",
+      "group": "Image",
+      "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade → image provider → R2",
+      "summary": "Mutate an existing image URL using a text prompt; the source image is not modified. Requires a stricter grant (`image_grant.allowEdit = true`) than `image.generate` because edits often imply higher provider cost. Optional `mask_url` enables inpainting where the provider supports it.",
+      "wire": {
+        "json_rpc_method": "image.edit",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.image.edit(args: {image_url: string, prompt: string, n?: number, size?: string, mask_url?: string, quality?: string, resolution?: string, output_format?: string, modelPreferences?: {hints: {name: string}[]}}, opts?: {timeoutMs?: number}) => Promise<{images, model, ...}>",
+      "params": [
+        {
+          "name": "image_url",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "The source image to edit. Must pass `validate_image_url` (no internal hostnames, no private IPs, must be `http`/`https`).",
+          "notes": [
+            "Typically the presigned URL returned by a prior `image.generate` (live for ~30 min), or a presigned download URL from `upload.inline`/`upload.confirm`.",
+            "If the URL has expired by the time the provider fetches it, the result is `APP_PROVIDER_ERROR` — re-mint the URL via `image.generate` or by re-issuing the upload flow.",
+            "Validation failure → `APP_INVALID_REQUEST` with `bad image_url: <reason>`."
+          ]
+        },
+        {
+          "name": "prompt",
+          "type": "string",
+          "default": null,
+          "required": true,
+          "desc": "",
+          "summary": "Edit instruction (e.g. 'restyle in cyberpunk aesthetic'). Trimmed; empty → `APP_INVALID_REQUEST`."
+        },
+        {
+          "name": "n",
+          "type": "integer",
+          "default": "1",
+          "required": false,
+          "desc": "",
+          "summary": "Number of edited variants. Must be positive.",
+          "notes": [
+            "Clamped against `image_grant.maxPerCallEdit` (default **1**) — usually stricter than the generate cap because edit variants are expensive.",
+            "Edit providers often return `n=1` regardless of request; check `out.images.length` rather than assuming."
+          ]
+        },
+        {
+          "name": "size",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Output dimensions. When omitted the provider preserves the source `image_url` dimensions.",
+          "notes": [
+            "Some providers reject explicit resize on edit — surfaces as `APP_PROVIDER_ERROR`."
+          ]
+        },
+        {
+          "name": "mask_url",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Optional PNG mask URL for inpainting. White pixels = edit, black pixels = preserve.",
+          "notes": [
+            "Validated by `validate_image_url` — failure → `APP_INVALID_REQUEST` with `bad mask_url: <reason>`.",
+            "Requires a mask-capable model: Doubao Seedream (volcengine) or a fal model with `supports_mask_editing` (GPT Image 2 — forwarded as `mask_image_url`). Otherwise the gate returns `MASK_UNSUPPORTED` → `APP_PROVIDER_ERROR` (HTTP 400 underneath).",
+            "Mask dimensions should match `image_url` dimensions; providers vary on how strictly this is enforced."
+          ]
+        },
+        {
+          "name": "quality / resolution / output_format",
+          "type": "string | undefined",
+          "default": "undefined",
+          "required": false,
+          "desc": "",
+          "summary": "Same semantics and validation as on `image.generate` — quality tier (GPT-Image family, billed per tier), resolution tier (Nano-Banana family, 0.75×–2× rate), output format. Unsupported models ignore them without surcharge.",
+          "notes": [
+            "`enable_web_search` / `thinking_level` are also accepted and apply to Nano-Banana-family edits (same surcharges as on generate)."
+          ]
+        },
+        {
+          "name": "modelPreferences",
+          "type": "{hints: {name: string}[]} | undefined",
+          "default": "undefined (user's image_edit preference)",
+          "required": false,
+          "desc": "",
+          "summary": "Same MCP-shaped hint as `image.generate`, but resolved against active `image-editing` models (plan-checked). A miss silently falls back to the user's `image_edit` preference.",
+          "notes": [
+            "Hints matching text-to-image-only models are skipped — the fallback route is taken instead of an error."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "{ images: Array<{url, ...}>, model, model_provider, latency_ms, quota_used, ... }",
+        "desc": "Same shape as `image.generate`. `images[]` URLs are again presigned R2 GETs with **~30 min TTL**. The source `image_url` is **not** modified — edits land in fresh R2 objects."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": "APP_NOT_GRANTED",
+          "desc": "`image_grant.enabled == false` OR `allowEdit == false` (default). Mapped from `APP_ERR_NOT_GRANTED` (-32001). HTTP 403."
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "Missing `image_url`/`prompt`, bad URL via `validate_image_url`, non-int or non-positive `n`, or `n` over the edit per-call cap."
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": "APP_QUOTA_EXCEEDED",
+          "desc": "User plan quota exhausted."
+        },
+        {
+          "name": "APP_PROVIDER_ERROR",
+          "code": "APP_PROVIDER_ERROR",
+          "desc": "Provider 5xx, safety refusal, or `MASK_UNSUPPORTED` / `INVALID_REQUEST` (mapped to HTTP 400 underneath; gate's message is preserved)."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Store does not support `image_edit`."
+        }
+      ],
+      "example": "// Restyle a previously-generated poster.\nconst gen  = await anna.image.generate({ prompt: \"art-deco Mars poster\", n: 1 });\nconst edit = await anna.image.edit({\n  image_url: gen.images[0].url,           // re-use immediately — URL is fresh\n  prompt: \"Restyle this poster in a cyberpunk aesthetic with neon magenta.\",\n  n: 1,\n});\noutImg.src = edit.images[0].url;\n",
+      "limitations": [
+        "Source URL must be reachable from the provider's network. Internal-only URLs (private R2 bucket without presign, intranet hosts) fail validation or fetch.",
+        "Mask support varies per provider. Probe with a small request before exposing a mask UI to the user.",
+        "Edit grant defaults to **off**. `image_grant.enabled = true` alone is not enough; the user must also flip `allowEdit` in Anna Admin.",
+        "Same URL-expiry, CSP, and COEP caveats as `image.generate`.",
+        "Edits do not chain — each call goes back to the provider; there is no server-side artifact graph that would let the host skip a re-fetch of `image_url`."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,106 @@
+{
+  "section_id": "host-api-embed",
+  "items": [
+    {
+      "slug": "llm-embed",
+      "name": "llm.embed",
+      "kind": "Host API method · iframe surface",
+      "group": "LLM",
+      "since": "Introduced anna-app-runtime v0.3.0 / dispatcher 0.4.0 · current v0.13.0 / dispatcher 0.17.0",
+      "direction": "Bundle (iframe) → Host RPC → app_embed_facade.embed → embedding registry → provider",
+      "summary": "Compute one or more dense embedding vectors **on the user's behalf** — your bundle never holds an embedding API key, never hard-codes a provider model, and the call is metered against the user's plan on an **independent embed billing surface** (`LLMRequestType.APP_EMBED`). Returns an OpenAI-compatible envelope so RAG / semantic-search / clustering code drops in straight from any OpenAI tutorial. Sibling of `llm.complete` — they share the lazy-minted `kind=complete` `app_session_token` but bill against separate `LLMRequestType`s, so a depleted chat quota does not break embeddings (and vice-versa).",
+      "wire": {
+        "json_rpc_method": "llm.embed",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "upstream": "`EmbeddingRegistry.client_for(spec).embed(inputs)` — provider, base_url, api_key, `cost_per_million_tokens` and `quota_per_million_tokens` all resolved server-side from the registered `EmbeddingModelSpec`.",
+        "streaming": false
+      },
+      "signature": "anna.llm.embed(args: {input: string | string[], model?: string, user?: string}, opts?: {timeoutMs?: number}) => Promise<{object: 'list', model: string, data: Array<{object: 'embedding', index: number, embedding: number[]}>, usage: {prompt_tokens: number, total_tokens: number}, _meta: {alias: string, dimensions: number, backendModel: string, provider: string, latencyMs: number, quotaConsumed: number, costUsd: number}}>",
+      "params": [
+        {
+          "name": "input",
+          "type": "string | string[]",
+          "default": null,
+          "required": true,
+          "summary": "Text(s) to embed. A bare string is auto-wrapped to a single-element list. Empty / whitespace-only items are rejected; the whole request fails if **any** item is invalid (no per-item soft-skip).",
+          "notes": [
+            "`APP_INVALID_REQUEST` if missing, wrong type, empty list, or any item is non-string / blank.",
+            "Per-request batch cap: `min(spec.max_inputs_per_request, settings.EMBED_MAX_INPUTS_PER_REQUEST = 64)`. Overrun → `APP_INVALID_REQUEST` with `too many inputs: N > max=64`.",
+            "Per-item char cap: `settings.EMBED_MAX_CHARS_PER_INPUT = 32_000` (≈ 8 K token). Overrun on **any** item → `APP_INVALID_REQUEST` — chunk client-side, no silent truncation.",
+            "Order is preserved verbatim — `data[i].index` mirrors input order, but always branch on `index` not array position for defence."
+          ]
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "default": "settings.EMBEDDING_DEFAULT_ALIAS = \"anna-managed-v1\"",
+          "required": false,
+          "summary": "Host-stable **alias** — never a real provider model name. Resolved by `EmbeddingRegistry.resolve(alias)`. Unknown alias → `APP_INVALID_REQUEST` with the full list of available aliases echoed back in the message.",
+          "notes": [
+            "Today's registered aliases: `anna-managed-v1` (= `openai/text-embedding-3-small`, 1536-dim). `anna-managed-v2` is only registered when `EMBEDDING_ENABLE_V2 = true` (rollout flag, default `false`).",
+            "**Dimensions are an immutable contract.** Once an alias ships at N dim, it never changes; new dim ⇒ new alias. Persist `_meta.alias` + `_meta.dimensions` alongside every stored vector so cross-version reads can refuse / reindex.",
+            "The real backend model name surfaces in `_meta.backendModel` for audit only — do not branch on it."
+          ]
+        },
+        {
+          "name": "user",
+          "type": "string",
+          "default": null,
+          "required": false,
+          "summary": "Optional caller-side tag forwarded to the provider as the `user` label (OpenAI / OpenRouter use this for abuse mitigation). Defaults to `\"u{user_id}\"` when omitted.",
+          "notes": [
+            "Not validated, not rate-limited, not logged in `request_summary` — purely a provider passthrough.",
+            "Use a stable, anonymised value (e.g. hashed user-app pair) if you want providers to bucket your requests; do NOT leak real PII."
+          ]
+        }
+      ],
+      "returns": {
+        "type": "{ object: 'list', model, data: Array<{object, index, embedding}>, usage, _meta }",
+        "desc": "OpenAI `embeddings.create`-shaped result — drop-in compatible with `openai` / `@openai/node` / LangChain `OpenAIEmbeddings` parsers.\n\n**Fields**\n• `object`: always `'list'`.\n• `model`: the **alias** that was resolved. NEVER the backend provider model. Mirror this into your storage layer.\n• `data[i].object`: always `'embedding'`.\n• `data[i].index`: int matching the input position.\n• `data[i].embedding`: `number[]` of length `_meta.dimensions`. Already L2-normalised when the provider does so; do not re-normalise blindly.\n• `usage.prompt_tokens`: tokens charged. When the provider reports its own count it is preferred; otherwise the facade falls back to a char-based estimator (`estimate_input_tokens_from_chars`).\n• `usage.total_tokens`: equal to `prompt_tokens` (embeddings have no completion tokens).\n• `_meta.alias`: identical to top-level `model`. Duplicate exists to keep the envelope symmetric with the plugin-path response.\n• `_meta.dimensions`: int; persist next to every vector.\n• `_meta.backendModel`: real provider model name (e.g. `text-embedding-3-small`). Audit only.\n• `_meta.provider`: provider slug (e.g. `openrouter`, `openai`).\n• `_meta.latencyMs`: end-to-end wall-clock (facade entry → provider response).\n• `_meta.quotaConsumed`: quota units debited (per-alias `quota_per_million_tokens` × tokens).\n• `_meta.costUsd`: provisional USD cost (provider price × tokens) for dashboards / receipts.\n\nNo `_meta.appSessionUuid` — embed bills directly against `user_id` and does not need to thread a session uuid through to the caller."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": "APP_NOT_GRANTED",
+          "desc": "`UserAnnaApp` row missing / disabled, `UserExecuta` row missing / disabled (when the call originates from an executa-bound install), or `embed_grant.enabled = false`. Note: when `embed_grant` is **absent** the default is `{enabled: true}` — embed is opt-out rather than opt-in. `details.jsonrpc_code = -32001`."
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": "APP_INVALID_REQUEST",
+          "desc": "`input` missing / wrong type / empty list / non-string item / blank item / item > `EMBED_MAX_CHARS_PER_INPUT (32_000)` / batch > `min(spec.max_inputs_per_request, EMBED_MAX_INPUTS_PER_REQUEST (64))` / unknown `model` alias. Also returned when `EMBED_API_ENABLED = false`. `details.jsonrpc_code = -32004`."
+        },
+        {
+          "name": "APP_PROVIDER_ERROR",
+          "code": "APP_PROVIDER_ERROR",
+          "desc": "Upstream embedding provider failed — `EmbeddingTimeoutError` (HTTP 504), `EmbeddingRateLimitError` (HTTP 502), `EmbeddingProviderError` (provider's own 4xx/5xx, mapped to `e.status` when 4xx else 502), or generic `EmbeddingClientError` (HTTP 502). The original exception message is included; the upstream code is NOT preserved as a structured field. `details.jsonrpc_code = -32003`."
+        },
+        {
+          "name": "APP_SESSION_REVOKED",
+          "code": "APP_SESSION_REVOKED",
+          "desc": "Cached `kind=complete` `app_session_token` was revoked server-side (admin action / grant rotated). Caller should reset state and retry — the next call mints a fresh session. Shared with `llm.complete` because both methods reuse the same token mint. `details.jsonrpc_code = -32011`."
+        },
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "Store does not support `llm_embed` (local-dev harness booted without a facade bridge — `anna-app dev --no-llm`)."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "Resolved `user_id` no longer exists (token validated but row deleted between auth and dispatch)."
+        }
+      ],
+      "example": "// bundle/app.js — embed a query + a corpus, then nearest-neighbour rank.\n//\n// Persist `_meta.alias` + `_meta.dimensions` alongside every cached vector.\n// If a later registry change rotates the default alias, an alias mismatch\n// is your cue to re-embed instead of silently mixing dimensions.\nasync function embedAll(texts) {\n  const reply = await anna.llm.embed({ input: texts /*, model: \"anna-managed-v1\" */ });\n  return {\n    alias: reply.model,\n    dimensions: reply._meta.dimensions,\n    vectors: reply.data.sort((a, b) => a.index - b.index).map((d) => d.embedding),\n    usage: reply.usage,\n  };\n}\n\nfunction cosine(a, b) {\n  let dot = 0;\n  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];\n  return dot; // both vectors L2-normalised by provider\n}\n\ntry {\n  const corpus = [\"Anna runs apps\", \"Cats nap a lot\", \"Embeddings are dense vectors\"];\n  const { vectors: docVecs, alias, dimensions } = await embedAll(corpus);\n\n  const { vectors: [qVec] } = await embedAll([\"how do anna apps work?\"]);\n\n  const ranked = corpus\n    .map((text, i) => ({ text, score: cosine(qVec, docVecs[i]) }))\n    .sort((a, b) => b.score - a.score);\n\n  console.log(`Top match (${alias}, dim=${dimensions}):`, ranked[0]);\n} catch (e) {\n  switch (e.code) {\n    case \"APP_NOT_GRANTED\":      setStatus(\"User has not granted embed access to this app\"); break;\n    case \"APP_INVALID_REQUEST\":  setStatus(`Bad request: ${e.message}`);                     break;\n    case \"APP_PROVIDER_ERROR\":   setStatus(\"Embedding provider error — please retry\");       break;\n    case \"APP_SESSION_REVOKED\":  resetAndRetry();                                             break;\n    default:                     throw e;\n  }\n}\n",
+      "limitations": [
+        "Non-streaming. The full batch is computed before the reply lands; no per-item chunks. For huge corpora, batch client-side (≤ 64 items per call) and parallelise across calls.",
+        "Reject-not-truncate. Any item > 32 000 chars or batch > 64 fails the **whole** request — there is no automatic chunking. Pre-split long documents and keep a mapping back to your source ids.",
+        "Provider error code is flattened. Timeouts / rate-limits / provider 5xx all surface as a single `APP_PROVIDER_ERROR` — parse `e.message` if you need to distinguish for retry policy.",
+        "Alias dimensions are immutable. Persist `_meta.alias` and `_meta.dimensions` with every stored vector — a registry rotation to a new default alias will silently break similarity search if you don't.",
+        "Tokens accounting falls back to a char-based estimator when the provider omits `usage`. The estimator (`estimate_input_tokens_from_chars`) is conservative; expect ±10 % drift from the real provider count.",
+        "No conversation / session state. Each call is independent — the lazy-minted `kind=complete` `app_session_token` is cached server-side only for token reuse, not for embedding history.",
+        "`embed_grant` defaults to `{enabled: true}` when the field is absent — opt-out, not opt-in. Apps that need a hard preflight should explicitly check `UserAnnaApp.custom_config.embed_grant` server-side; the SDK cannot tell you in advance.",
+        "Per-call default deadline follows the SDK's `DEFAULT_TIMEOUTS_BY_NS.llm = 180_000` ms (180 s) — already generous. Only very large batches against cold-start providers need a HIGHER explicit override (e.g. `{ timeoutMs: 300_000 }`); a smaller value would SHORTEN the deadline, not extend it."
+      ]
+    }
+  ]
+}

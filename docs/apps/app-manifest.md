@@ -17,7 +17,7 @@ This page documents the manifest only.
 
 ## Minimal example
 
-```json
+```json sample=app-manifest
 {
   "schema": 1,
   "required_executas": [
@@ -28,7 +28,7 @@ This page documents the manifest only.
 
 ## Full example
 
-```json
+```json sample=app-manifest
 {
   "schema": 1,
   "required_executas": [

@@ -1,0 +1,832 @@
+{
+  "$comment": "Prose overrides for the GENERATED sections of reference.json (design §9.2). Item names must exactly cover the published schema artefacts; desc/tags/order are editorial. Edit THIS file (not reference.json) and run scripts/generate_reference.py.",
+  "app-manifest": {
+    "source": "app_manifest",
+    "items": [
+      {
+        "name": "schema",
+        "desc": "Manifest schema version. Integer in [1, 2]. Defaults to 1.",
+        "tags": [
+          {
+            "label": "int"
+          }
+        ]
+      },
+      {
+        "name": "required_executas",
+        "desc": "Executas the App needs. Each entry: `{ tool_id, version?, min_version? }`. `version=\"latest\"` auto-freezes at publish time.",
+        "tags": [
+          {
+            "label": "ManifestExecutaRef[]"
+          }
+        ]
+      },
+      {
+        "name": "optional_executas",
+        "desc": "Executas the App can use if installed but does not require. Same shape as `required_executas`.",
+        "tags": [
+          {
+            "label": "ManifestExecutaRef[]"
+          }
+        ]
+      },
+      {
+        "name": "host_capabilities",
+        "desc": "Strict allow-list of host-mediated capability strings (validated against `_ALLOWED_HOST_CAPABILITIES`): `aps.kv`, `aps.files`, `aps.scope.*`, `llm.sample`, `llm.complete`, `llm.embed`, `llm.agent.*`, `llm.image`, `web.*`, `host.upload`. Each bundled Executa must also declare its own `host_capabilities`; per-invoke tokens are gated on the Executa declaration + the user's grant.",
+        "tags": [
+          {
+            "label": "string[]"
+          }
+        ]
+      },
+      {
+        "name": "permissions",
+        "desc": "Coarse permission tokens shown to the user at install time and enforced at the dispatcher.",
+        "tags": [
+          {
+            "label": "string[]"
+          }
+        ]
+      },
+      {
+        "name": "tags",
+        "desc": "Discovery hints; surfaced in App Store search & filters.",
+        "tags": [
+          {
+            "label": "string[]"
+          }
+        ]
+      },
+      {
+        "name": "system_prompt_addendum",
+        "desc": "Text injected into the system prompt when the App is active in a turn. Max 4000 chars.",
+        "tags": [
+          {
+            "label": "string"
+          }
+        ]
+      },
+      {
+        "name": "user_message_prefix_template",
+        "desc": "Optional template prepended to the user message when the App is #mentioned. Max 500 chars.",
+        "tags": [
+          {
+            "label": "string"
+          }
+        ]
+      },
+      {
+        "name": "ui",
+        "desc": "UI bundle section: declares bundle entry, views, host_api grants, CSP overrides. See \"UI manifest\".",
+        "tags": [
+          {
+            "label": "UiManifestSection"
+          }
+        ]
+      },
+      {
+        "name": "dev",
+        "desc": "Local-harness-only config (fixtures, mocks, seed_storage, user_id). Stripped by `anna-app publish`; ignored by production dispatcher.",
+        "tags": [
+          {
+            "label": "AppDevConfig"
+          },
+          {
+            "label": "dev-only",
+            "kind": "warm"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-agent": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "agent.session.create",
+        "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Validates `submode` against the manifest grant and `fixed_client_id` against the allow-list; optional `systemPrompt` overrides the agent's system prompt. Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is runtime-resolved via `effective_granted_tool_names`, NOT a raw manifest echo).",
+        "tags": [
+          {
+            "label": "submode"
+          },
+          {
+            "label": "fixed_client_id"
+          },
+          {
+            "label": "systemPrompt"
+          },
+          {
+            "label": "quotaCaps∩grant"
+          }
+        ]
+      },
+      {
+        "name": "agent.session.catalog",
+        "desc": "Pre-create discovery of the platform-tool universe: which names are legal in create-time `quotaCaps.allowed_tools` / per-run `allowed_tools`, and whether they would resolve for THIS app. Returns `{platform_tools: [{name, description, dev_safe, declared_in_manifest, user_granted, eligible, blocked_by?}], inherit_host_tools_granted, manifest_declared, user_granted}`. `blocked_by` pinpoints WHY a tool is unavailable (`manifest` = not declared in `ui.host_api.agent.tools`; `user_grant` = not authorized in the Permissions modal). Read-only — mints no session, consumes no quota. Previously the resolved surface was only visible after-the-fact via the create response's `granted_tools` echo.",
+        "tags": [
+          {
+            "label": "discovery"
+          },
+          {
+            "label": "read-only"
+          },
+          {
+            "label": "blocked_by"
+          }
+        ]
+      },
+      {
+        "name": "agent.session.run",
+        "desc": "Submit a user turn; returns SYNCHRONOUSLY with `{stream_id, run_id}`. LangGraph response frames arrive via `rpc.stream` events; the SDK's `AgentRunStream` reassembles by `seq` into an `AsyncIterable`. Terminal frame is always `{event:'end', run_id}` + `done:true`. Optional per-run fields: `attachments` (native multimodal image inputs — the session's vision model sees them directly, image/* only, ≤6, SSRF-guarded URLs or base64 `data`; non-vision model fails fast with `APP_MODEL_NOT_VISION_CAPABLE`), `allowed_tools` (narrow this run's tool surface — sandbox sessions only), `modelPreferences`, `systemPrompt`.",
+        "tags": [
+          {
+            "label": "streaming"
+          },
+          {
+            "label": "rpc.stream"
+          },
+          {
+            "label": "attachments"
+          },
+          {
+            "label": "allowed_tools"
+          }
+        ]
+      },
+      {
+        "name": "agent.session.cancel",
+        "desc": "Best-effort cancellation. Records a cancel signal keyed by `(app_session_uuid, run_id)` and maps it onto the underlying worker task: a still-queued run is dropped before start; a running run stops at the next poll checkpoint (every ~30 stream events) — an in-flight provider call still completes. Returns `{cancelled: bool}` — NOT a confirmation the run actually stopped (watch for the `task_cancelled` delta and terminal `end` frame).",
+        "tags": [
+          {
+            "label": "run_id required"
+          },
+          {
+            "label": "best-effort"
+          }
+        ]
+      },
+      {
+        "name": "agent.session.history",
+        "desc": "Read the tail of the LangGraph `channel_values.messages` checkpoint. **Best-effort:** returns `{messages: []}` (NOT an error) when the checkpoint store is unavailable or the thread has no writes yet. `limit` clamped to `[1, 200]`, default 50.",
+        "tags": [
+          {
+            "label": "best-effort"
+          },
+          {
+            "label": "LangGraph checkpoint"
+          }
+        ]
+      },
+      {
+        "name": "agent.session.delete",
+        "desc": "Soft-revoke the session, cancel all of its active runs (best-effort fan-out, forum #191), and pop its cached capability token. Idempotent.",
+        "tags": [
+          {
+            "label": "revoke"
+          },
+          {
+            "label": "idempotent"
+          }
+        ]
+      },
+      {
+        "name": "agent.session.list",
+        "desc": "Enumerate the caller's own agent sessions, scoped to this app (`window.app_id`). Returns `{sessions: [{app_session_uuid, kind, submode, fixed_client_id, label, created_at, last_active_at, expires_at, max_lifetime_at}]}` — metadata only, no token. `include_expired?` (default false); `limit` clamped `[1, 100]`, default 50. Use it to re-attach after an iframe reload instead of minting a duplicate.",
+        "tags": [
+          {
+            "label": "read-only"
+          },
+          {
+            "label": "since v0.8.0"
+          }
+        ]
+      },
+      {
+        "name": "agent.session.refresh",
+        "desc": "Re-mint a fresh capability token for an existing `app_session_uuid` and slide its idle window forward — WITHOUT re-creating the session (which would orphan the LangGraph `thread_id`). Can never push past `max_lifetime_at`. Returns `{app_session_uuid, expires_in, submode, fixed_client_id, expires_at, max_lifetime_at, idle_ttl_seconds, session_expires_in}`.",
+        "tags": [
+          {
+            "label": "extend TTL"
+          },
+          {
+            "label": "since v0.8.0"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-chat": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "chat.append_artifact",
+        "desc": "Attach a generated artifact to the current turn. Reads `args.artifact` (object); fields `kind` (≤40 chars, default `app_event`), `app_slug`, `summary` (≤1000 chars), `payload_ref`, `data`. Emits an `artifact_appended` event and returns `{artifact_id}` (`app-<window_uuid[:8]>-<unix_ts>`). Fully implemented."
+      },
+      {
+        "name": "chat.write_message",
+        "desc": "Append a message authored by the App. `role` (default `assistant`), `content` (string, truncated to ≤4000 chars). Emits a `chat_message_from_app` event and returns `{message_id}` (`msg-<unix_ms>`). **Phase-3 functional stub — does NOT persist.**",
+        "tags": [
+          {
+            "label": "stub",
+            "kind": "stub"
+          }
+        ]
+      },
+      {
+        "name": "chat.read_history",
+        "desc": "Read prior turns of the chat thread. **Phase-3 stub — raises `not_implemented`.**",
+        "tags": [
+          {
+            "label": "stub",
+            "kind": "stub"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-llm": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "llm.complete",
+        "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). `maxTokens` silently clamped to `session.quota_caps.max_tokens_per_call` (default 4096). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED`, `APP_PROVIDER_ERROR`.",
+        "tags": [
+          {
+            "label": "MCP-shaped"
+          },
+          {
+            "label": "stateless"
+          },
+          {
+            "label": "non-streaming"
+          },
+          {
+            "label": "maxTokens clamped"
+          }
+        ]
+      },
+      {
+        "name": "llm.stream",
+        "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
+        "tags": [
+          {
+            "label": "MCP-shaped"
+          },
+          {
+            "label": "streaming"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-image": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "image.generate",
+        "desc": "Generate `n` images (default 1) from a text `prompt`, optional `size` (default `1024x1024`) and `reference_image_urls`. Returns `{images:[{url}], model, quota_used, latency_ms, …}` with ~30-min-TTL presigned R2 URLs."
+      },
+      {
+        "name": "image.edit",
+        "desc": "Restyle / mask-edit an existing `image_url` per a text `prompt`. Optional `mask_url` for inpainting where the provider supports it. Source is not modified; results land in fresh R2 objects.",
+        "tags": [
+          {
+            "label": "edit grant"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-upload": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "upload.inline",
+        "desc": "≤ 20 MiB inline base64 upload. One round-trip; SDK should pre-check `file.size` to fall back to `negotiate` rather than re-encoding on `TOO_LARGE`.",
+        "tags": [
+          {
+            "label": "≤ ~8 MiB raw"
+          }
+        ]
+      },
+      {
+        "name": "upload.negotiate",
+        "desc": "Mint a presigned R2 PUT URL (~5 min TTL) + the durable `r2_key`. Does NOT charge the file counter — `confirm` does. Caller MUST copy the returned `headers` (especially `Content-Type`) onto the PUT verbatim or R2 rejects with SignatureDoesNotMatch.",
+        "tags": [
+          {
+            "label": "presigned-PUT"
+          }
+        ]
+      },
+      {
+        "name": "upload.confirm",
+        "desc": "HEAD R2 to verify the PUT, charge the file counter, return a fresh `download_url`. Idempotent on success (same `r2_key` re-confirm just re-mints the URL — useful for refreshing expired downloads)."
+      }
+    ]
+  },
+  "host-api-storage": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "storage.get",
+        "desc": "Read a value by key. Returns `{value, etag, generation, exists: true}` on hit, `{value: null, exists: false}` on miss / expired / soft-deleted. `etag` feeds back into `set` / `delete` as `if_match` for optimistic concurrency.",
+        "tags": [
+          {
+            "label": "etag"
+          }
+        ]
+      },
+      {
+        "name": "storage.set",
+        "desc": "Upsert a JSON value. Supports `if_match` (optimistic concurrency), `metadata` / `tags` (round-trip on `list`), `ttl_seconds` (auto-expire 1 s..365 d). Returns `{etag, generation, size_bytes}`. Charges per-user byte / entry quota; legacy backend caps the whole bucket at 256 KiB and broadcasts `runtime_state_synced`.",
+        "tags": [
+          {
+            "label": "if_match"
+          },
+          {
+            "label": "ttl_seconds"
+          }
+        ]
+      },
+      {
+        "name": "storage.list",
+        "desc": "Page through keys under `prefix`. Returns metadata-only rows (`{key, etag, size_bytes, metadata, tags, updated_at}`) — no `value`. `limit` 1..1000 (default 100); `cursor` is opaque, not persistable across deploys.",
+        "tags": [
+          {
+            "label": "paginated"
+          }
+        ]
+      },
+      {
+        "name": "storage.delete",
+        "desc": "Soft-delete a key; quota bytes are reclaimed immediately. Accepts `if_match` (APS only). APS raises `not_found` on a missing key; the legacy backend silently no-ops."
+      }
+    ]
+  },
+  "host-api-embed": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "llm.embed",
+        "desc": "Compute dense embeddings for one string or a batch. Returns OpenAI-shaped `{object:'list', model, data:[{index,embedding}], usage, _meta}`. `model` is the stable alias (persist this), `_meta.dimensions` is immutable per alias, `_meta.backendModel` is audit-only. Independent billing surface from `llm.complete`.",
+        "tags": [
+          {
+            "label": "alias"
+          },
+          {
+            "label": "OpenAI-shape"
+          },
+          {
+            "label": "APP_EMBED billing"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-files": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "files.upload_init",
+        "desc": "Phase 1 of upload — reserve a `pending` row, count `size` against quota, return a single-use R2 presigned PUT URL the browser uses directly. Pair with `upload_finalize`.",
+        "tags": [
+          {
+            "label": "presign PUT"
+          },
+          {
+            "label": "quota"
+          },
+          {
+            "label": "if_match"
+          }
+        ]
+      },
+      {
+        "name": "files.upload_finalize",
+        "desc": "Phase 2 of upload — verify the PUT with R2 `HEAD`, flip the row to `active`, commit quota, return the canonical `etag` / `generation`.",
+        "tags": [
+          {
+            "label": "etag"
+          }
+        ]
+      },
+      {
+        "name": "files.download_url",
+        "desc": "Mint a short-lived R2 presigned GET URL. Embed in `<img>` / `<video>` / `<a href>`. Optional `disposition` forces a download dialog. Accepts `scope`/`owner` like files.list (cross-app reads need `aps.scope.app.read`).",
+        "tags": [
+          {
+            "label": "presign GET"
+          },
+          {
+            "label": "ttl_seconds"
+          }
+        ]
+      },
+      {
+        "name": "files.download",
+        "desc": "Host-mediated save (forum #175) — presigns a GET with forced `Content-Disposition: attachment`; the host page (not the sandboxed iframe) clicks a top-level anchor so the browser download dialog opens and the presigned URL never enters app DOM. Args: `path`, optional `filename` / `ttl_seconds` / `scope` / `owner`.",
+        "tags": [
+          {
+            "label": "presign GET"
+          },
+          {
+            "label": "host-mediated"
+          },
+          {
+            "label": "attachment"
+          }
+        ]
+      },
+      {
+        "name": "files.list",
+        "desc": "Page metadata-only rows under an optional `prefix`. Returns `path`, `etag`, `size_bytes`, `content_type`, `metadata`, `tags`, `updated_at`. Cursor-based. Optional `scope`/`owner` args (default: own app scope): with manifest `host_capabilities: [\"aps.scope.app.read\"]`, `owner` may reference ANOTHER app by its public ref (`@handle/slug` or numeric id — bare slugs rejected, slugs are only unique per developer namespace) to browse the objects it stores under the calling user (e.g. `anna.web.image_fetch` artifacts). Rows are always filtered by the calling user's id.",
+        "tags": [
+          {
+            "label": "paginated"
+          },
+          {
+            "label": "cross-app read"
+          }
+        ]
+      },
+      {
+        "name": "files.delete",
+        "desc": "Soft-delete; quota reclaimed immediately, R2 object reaped async. Accepts `if_match`.",
+        "tags": [
+          {
+            "label": "if_match"
+          },
+          {
+            "label": "soft-delete"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-tools": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "tools.list",
+        "desc": "Project the manifest's tool grants. Returns `{tools: [{tool_id, status?}]}` filtered through the `host_api.tools` whitelist; the optional `status` (`available` / `deploying` / `unavailable`, dispatcher ≥ 0.14.0) reflects live deploy-reconciliation facts — disable buttons before a click fails, and pair with `anna.tools.onChanged(cb)` (SDK ≥ 0.12.0) to re-list when `tools.changed` fires after a deploy lands. Pure ACL — no Agent / NATS round-trip; safe to call at bundle boot to decide which buttons to render."
+      },
+      {
+        "name": "tools.invoke",
+        "desc": "Call one tool by id with structured `args` and an optional clamped `timeoutMs` (**max 90 s** — the public edge's held-request ceiling). Routes through the user's online Executa Agent over NATS, strips two envelope layers, and returns the plugin payload — or a stable error code (`tool_timeout`, `tool_failed`, `executa_unavailable`, `agent_unavailable`, `permission_denied`, `invalid_arg`). Calls that may outlive 90 s belong on `tools.invokeAsync`.",
+        "tags": [
+          {
+            "label": "timeoutMs"
+          }
+        ]
+      },
+      {
+        "name": "tools.invokeAsync",
+        "desc": "Start a long tool call as a host-owned **job** and return `{jobId, state: \"queued\", deadlineMs}` immediately — no long-held HTTP request. `timeoutMs` is the job deadline (default 30 min, clamp 60 s–24 h); `clientTag` (≤120 chars) is your reload-recovery key. Progress/terminal updates are pushed as `tool_job` window events and read authoritatively via `tools.getJob`. SDK sugar: `anna.tools.invokeAsyncAwait(args, {onProgress, signal})`.",
+        "tags": [
+          {
+            "label": "async job"
+          },
+          {
+            "label": "clientTag"
+          }
+        ]
+      },
+      {
+        "name": "tools.getJob",
+        "desc": "Authoritative job snapshot + incremental progress: `{jobId, sinceSeq?, limit?}` → `JobSnapshot` with `state`, `result` (succeeded), structured `error` (failed/cancelled/expired), and the progress slice with `seq > sinceSeq` (per-job ring of the latest 500). Also the polling fallback and the reload-recovery read — events are an optimisation, this is the truth.",
+        "tags": [
+          {
+            "label": "sinceSeq"
+          }
+        ]
+      },
+      {
+        "name": "tools.cancelJob",
+        "desc": "Cooperative, **idempotent** cancel: active job → agent-side graceful task cancel (same plugin's other invokes are untouched; process-group kill only as 500 ms fallback) and `state: \"cancelled\"`; terminal job → `{cancelled: false}` no-op. Optional `reason` (≤200 chars) lands in the job's error message.",
+        "tags": [
+          {
+            "label": "idempotent"
+          }
+        ]
+      },
+      {
+        "name": "tools.listJobs",
+        "desc": "Recent jobs for the current user — the reload-recovery entry point. Filter by `tool_id`, `state` (single or array), `clientTag`, `since` (RFC3339, ≤7 d lookback); `limit` 1–100 (default 20). Returns `{jobs, truncated}` sorted newest-first. Cross-user rows never appear (ownership is enforced row-level).",
+        "tags": [
+          {
+            "label": "recovery"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-credentials": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "credentials.list_accounts",
+        "desc": "`{provider}` → `{accounts: [{account_id, email, label, is_default, status, scopes}]}`. Metadata only — never tokens. Render an account picker or feed `account_id` into `get_token`.",
+        "tags": [
+          {
+            "label": "metadata-only"
+          }
+        ]
+      },
+      {
+        "name": "credentials.get_token",
+        "desc": "`{provider, account_id?}` → `{access_token, account_id, expires_at}`. Omit `account_id` for the user's default account. Dead credentials (revoked / needs re-auth) fail with `APP_NOT_GRANTED` carrying the reconnect hint.",
+        "tags": [
+          {
+            "label": "per-call token",
+            "kind": "warm"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-web": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "web.search",
+        "desc": "`{query, max_results?, search_depth?, topic?, time_range?, region?, include_domains?, exclude_domains?}` → `{results: [{title, url, snippet, site, published_at?, score?}], provider_tier, quota_consumed}`. `score`/`published_at` are optional — never assume they exist. Out-of-cap params are REJECTED (`APP_INVALID_REQUEST`), never silently truncated. `search_depth: \"advanced\"` needs `web_grant.allowAdvanced`; usage is metered by the CU pool only (no per-minute/daily caps).",
+        "tags": [
+          {
+            "label": "billed per call"
+          },
+          {
+            "label": "provider-agnostic"
+          }
+        ]
+      },
+      {
+        "name": "web.fetch",
+        "desc": "`{urls (1-10), format?, max_chars?, timeout_ms?}` → `{pages: [{url, final_url?, ok, title?, content?, truncated?, error?}], quota_consumed}` — same length & order as input, **per-item failure isolation** (check `pages[i].ok`; errors: `SSRF_BLOCKED`, `TIMEOUT`, `HTTP_<status>`, `PARSE_FAILED`, `TOO_LARGE`, `RESPONSE_BUDGET_EXCEEDED`, …). Hard SSRF policy: private/metadata IPs blocked after DNS resolution, re-validated per redirect hop. 512 KB response budget. `web_grant` shape: `{enabled, allowSearch, allowFetch, allowAdvanced, allowImageSearch, allowImageFetch, maxResultsPerCall (10)}` — default disabled; edited in the Installed-Apps permission modal; `anna-app dev` installs seed a fully-enabled dev grant (dev calls never billed). Pass `{timeoutMs: 90000}` for large batches (SDK web-namespace default is 60s).",
+        "tags": [
+          {
+            "label": "billed per URL"
+          },
+          {
+            "label": "SSRF-guarded"
+          }
+        ]
+      },
+      {
+        "name": "web.image_search",
+        "desc": "`{query, max_results? (8, cap 50), min_width?, min_height?, aspect? (any|wide|tall|square)}` → `{results: [{image_url, thumbnail_url?, source_url, title?, width?, height?, mime_type?, license_hint?}], quota_consumed, cached?}`. **Safe-search is force-enabled platform-side** (`safe_search: false` is rejected). `license_hint` is best-effort — no copyright warranty. Needs `web_grant.allowImageSearch` (defaults OFF even when web is enabled). Results cached 10 min; cache hits bill the floor CU and set `cached: true`. Provider chain: serper (Google Images, when key configured) → ddgs.images → tavily include_images. SDK alias `anna.web.imageSearch`.",
+        "tags": [
+          {
+            "label": "billed per call"
+          },
+          {
+            "label": "safe-search forced"
+          }
+        ]
+      },
+      {
+        "name": "web.image_fetch",
+        "desc": "`{url, max_bytes? (5 MiB, cap 20 MiB), purpose?}` → `{path, get_url, mime_type, bytes_size, sha256, source_url, final_url, quota_consumed}` — an artifact REFERENCE (`get_url` is a 30-min presigned URL; field is `get_url`, not `url`), never bytes. Host downloads with the full SSRF policy + image MIME whitelist (jpeg/png/webp/gif) verified by **magic bytes**, then stores into the app's APS files self-scope (counts against storage quota; manage via `anna.files.*`). Needs `web_grant.allowImageFetch` (defaults OFF). 1.0 CU floor per image; failed downloads never billed. SDK alias `anna.web.imageFetch`.",
+        "tags": [
+          {
+            "label": "billed per image"
+          },
+          {
+            "label": "SSRF-guarded"
+          },
+          {
+            "label": "APS artifact"
+          }
+        ]
+      }
+    ]
+  },
+  "host-api-apps": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "apps.list",
+        "desc": "List the user's installed (enabled) apps with basic metadata for a launcher grid."
+      },
+      {
+        "name": "apps.search",
+        "desc": "Filter installed apps by name/slug substring."
+      },
+      {
+        "name": "apps.get",
+        "desc": "Fetch one installed app by `app_ref` (id or `@handle/slug`)."
+      },
+      {
+        "name": "apps.launch",
+        "desc": "Open an installed app's window (optionally a named `view` with a `payload`). Emits `open_view`.",
+        "tags": [
+          {
+            "label": "opens window"
+          }
+        ]
+      },
+      {
+        "name": "apps.deck.list",
+        "desc": "Read the pinned deck, in order."
+      },
+      {
+        "name": "apps.deck.add",
+        "desc": "Pin an installed app to the deck."
+      },
+      {
+        "name": "apps.deck.remove",
+        "desc": "Unpin an app from the deck."
+      },
+      {
+        "name": "apps.deck.reorder",
+        "desc": "Persist a new deck order (full list of app ids)."
+      }
+    ]
+  },
+  "host-api-window": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "window.hello",
+        "desc": "Initial handshake from the bundle to the runtime.",
+        "tags": [
+          {
+            "label": "no auth",
+            "kind": "noauth"
+          }
+        ]
+      },
+      {
+        "name": "window.ready",
+        "desc": "Bundle signals it is ready to receive `runtime_state` and events.",
+        "tags": [
+          {
+            "label": "no auth",
+            "kind": "noauth"
+          }
+        ]
+      },
+      {
+        "name": "window.report_error",
+        "desc": "Forward a bundle-side exception to the host error log.",
+        "tags": [
+          {
+            "label": "no auth",
+            "kind": "noauth"
+          }
+        ]
+      },
+      {
+        "name": "window.open_view",
+        "desc": "Open one of the views declared in `ui.views`."
+      },
+      {
+        "name": "window.close",
+        "desc": "Close the current (or named) view."
+      },
+      {
+        "name": "window.focus",
+        "desc": "Pull a view to the foreground."
+      },
+      {
+        "name": "window.set_title",
+        "desc": "Update the window chrome title at runtime."
+      },
+      {
+        "name": "window.resize",
+        "desc": "Programmatically resize the current view (subject to min/max in the view spec)."
+      }
+    ]
+  },
+  "host-api-stubs": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "artifact.create",
+        "desc": "Artifact create — reserved.",
+        "tags": [
+          {
+            "label": "stub",
+            "kind": "stub"
+          }
+        ]
+      },
+      {
+        "name": "artifact.update",
+        "desc": "Artifact update — reserved.",
+        "tags": [
+          {
+            "label": "stub",
+            "kind": "stub"
+          }
+        ]
+      },
+      {
+        "name": "artifact.delete",
+        "desc": "Artifact delete — reserved.",
+        "tags": [
+          {
+            "label": "stub",
+            "kind": "stub"
+          }
+        ]
+      },
+      {
+        "name": "fs.read",
+        "desc": "Sandboxed filesystem read — reserved.",
+        "tags": [
+          {
+            "label": "stub",
+            "kind": "stub"
+          }
+        ]
+      },
+      {
+        "name": "fs.write",
+        "desc": "Sandboxed filesystem write — reserved.",
+        "tags": [
+          {
+            "label": "stub",
+            "kind": "stub"
+          }
+        ]
+      },
+      {
+        "name": "prefs.get",
+        "desc": "User preference reads — reserved.",
+        "tags": [
+          {
+            "label": "stub",
+            "kind": "stub"
+          }
+        ]
+      }
+    ]
+  },
+  "sse-events": {
+    "source": "events",
+    "items": [
+      {
+        "name": "ping",
+        "desc": "Keep-alive heartbeat. Ignore unless you care about connection liveness."
+      },
+      {
+        "name": "open_view",
+        "desc": "A new view instance was opened (typically by `window.open_view` or `default=true`)."
+      },
+      {
+        "name": "close_view",
+        "desc": "A view instance was closed by the user or the bundle."
+      },
+      {
+        "name": "window_focus_changed",
+        "desc": "Focus moved between views."
+      },
+      {
+        "name": "geometry_changed",
+        "desc": "The user resized or moved a window."
+      },
+      {
+        "name": "title_changed",
+        "desc": "The window title was updated (via `window.set_title`)."
+      },
+      {
+        "name": "status_changed",
+        "desc": "High-level App status transition surfaced by the runtime."
+      },
+      {
+        "name": "runtime_state_synced",
+        "desc": "Hydrated state delivered after `window.ready`, or after a remote storage write."
+      },
+      {
+        "name": "artifact_appended",
+        "desc": "A `chat.append_artifact` call landed in the conversation."
+      },
+      {
+        "name": "chat_message_from_app",
+        "desc": "A `chat.write_message` call from this App was committed to the thread."
+      },
+      {
+        "name": "rpc.stream",
+        "desc": "Progressive frame from a streaming RPC (tool or LLM call).",
+        "tags": [
+          {
+            "label": "streaming",
+            "kind": "warm"
+          }
+        ]
+      },
+      {
+        "name": "anna_app_tools_changed",
+        "desc": "Deploy reconciliation landed this app's tools on the agent (MCP list-changed analogue). Re-run `anna.tools.list()` and re-enable buttons; or subscribe via `anna.tools.onChanged(cb)`."
+      },
+      {
+        "name": "executa_reconcile_result",
+        "desc": "Outcome of a one-click executa repair / reconcile run (成功/失败 + per-executa detail). Surfaced to the initiating window."
+      },
+      {
+        "name": "executa_readiness",
+        "desc": "Window-open probe found required executas not yet ready on the agent — render a preparing/degraded mask until `anna_app_tools_changed` arrives."
+      }
+    ]
+  }
+}

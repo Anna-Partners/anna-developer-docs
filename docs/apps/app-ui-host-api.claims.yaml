@@ -1,0 +1,10 @@
+# Machine-checkable claims for docs/apps/app-ui-host-api.md (design §5.3.1).
+host_api_methods:
+  - storage.get
+  - storage.set
+  - storage.delete
+  - storage.list
+  - llm.complete
+  - tools.invoke
+  - tools.getJob
+  - tools.listJobs

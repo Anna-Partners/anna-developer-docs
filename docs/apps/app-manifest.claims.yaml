@@ -1,0 +1,51 @@
+# Machine-checkable claims for docs/apps/app-manifest.md (design §5.3.1).
+# Every literal is asserted against the published @anna-ai/app-schema bundle
+# by scripts/check_claims.py — see that script's docstring for the contract.
+manifest_fields:
+  - schema
+  - required_executas
+  - optional_executas
+  - permissions
+  - host_capabilities
+  - system_prompt_addendum
+  - user_message_prefix_template
+  - tags
+  - ui
+  - dev
+permissions:
+  - ui.svg
+  - fs.read
+  - fs.write
+  - tools.invoke
+  - chat.read
+  - chat.write_message
+  - chat.append_artifact
+  - artifact.create
+  - artifact.update
+  - artifact.delete
+  - llm.complete
+  - storage.read
+  - storage.write
+  - prefs.read
+capabilities:
+  - llm.sample
+  - llm.complete
+  - llm.embed
+  - llm.agent.auto
+  - llm.agent.fixed
+  - llm.image
+  - llm.image.edit
+  - web.search
+  - web.fetch
+  - web.image_search
+  - web.image_fetch
+  - host.upload
+  - aps.kv
+  - aps.files
+  - aps.scope.user.read
+  - aps.scope.user.write
+  - aps.scope.app.read
+  - aps.scope.app.write
+  - aps.scope.tool.read
+  - aps.scope.tool.write
+  - aps.scope.admin

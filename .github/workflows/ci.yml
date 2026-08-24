@@ -63,6 +63,53 @@ jobs:
       - run: npm install --no-save "@anna-ai/app-schema@$(cat .schema-version)"
       - run: python scripts/check_reference_drift.py
 
+  # P3 §5.3.1 — article claims asserted against the published schema bundle.
+  schema-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install -r requirements.txt
+      - run: npm install --no-save "@anna-ai/app-schema@$(cat .schema-version)"
+      - run: python scripts/check_claims.py
+
+  # P3 §5.3.2 — tagged doc samples executed against the pinned published CLI.
+  samples-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install -r requirements.txt
+      - run: python scripts/run_samples.py
+
+  # P3 §9.2 — generated reference sections reject hand edits (regenerate-diff).
+  reference-regen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install -r requirements.txt
+      - run: npm install --no-save "@anna-ai/app-schema@$(cat .schema-version)"
+      - run: python scripts/generate_reference.py --check
+
   tests:
     runs-on: ubuntu-latest
     steps:

@@ -64,10 +64,29 @@ describing it wrong) belong on the [forum](https://forum.anna.partners/), not he
   external code only to **published** artifacts (npm/PyPI/public repos).
 - Never include credentials, internal hostnames, or private source paths.
 
+## Machine-checked facts (P3 verification layer)
+
+- **Claims sidecars** — when an article states capability strings, manifest
+  fields, host API methods, event kinds, or permission scopes, list them in
+  `docs/<section>/<slug>.claims.yaml`. CI (`schema-drift`) asserts every
+  literal against the published `@anna-ai/app-schema` bundle **and** that it
+  still appears verbatim in the article. Sidecars are optional but strongly
+  encouraged — they are what keeps this class of doc bug extinct.
+- **Executable samples** — tag a fence with `sample=<kind>` to have CI run
+  it: ` ```json sample=app-manifest ` blocks are validated with the pinned
+  published CLI (`anna-app validate`, version in `.cli-version`).
+- **Generated reference sections** — the `reference.json` sections carrying
+  `source: host_api | events | app_manifest` are **generated**. Do not edit
+  them directly (the `reference-regen` check will reject it): edit the prose
+  in `reference-data/overrides/reference-prose.json` and run
+  `python scripts/generate_reference.py`, committing both files. Facts
+  (names) come from the schema bundle; only `desc`/`tags`/order are yours.
+
 ## Review & merge
 
 - CI must be green (`validate`, `links`, `build-dry-run`,
-  `reference-validate`, `tests`).
+  `reference-validate`, `tests`, `schema-drift`, `samples-run`,
+  `reference-regen`).
 - One maintainer approval (CODEOWNERS) merges via **squash**. First response
   within 3 business days.
 - After merge, publication to the live site is automatic (no action needed).

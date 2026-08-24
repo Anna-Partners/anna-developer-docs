@@ -18,6 +18,7 @@ Upload to R2 + pointer flip live in publish.yml (P2), not here.
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import hashlib
 import json
 import shutil
@@ -31,7 +32,7 @@ from validate import MAX_TOTAL_BYTES, load_tree  # noqa: E402
 REPO = Path(__file__).resolve().parent.parent
 PREFIX = "developers-hub"
 MAX_MANIFEST_BYTES = 256 * 1024
-REPO_URL = "https://github.com/whtcjdtc2007/anna-developer-docs"
+REPO_URL = "https://github.com/Anna-Partners/anna-developer-docs"
 
 
 def _sha256(data: bytes) -> str:
@@ -92,7 +93,7 @@ def build_manifest(docs_root: Path, reference_dir: Path, commit: str) -> tuple[d
         "schema_version": 1,
         "repo": REPO_URL,
         "commit": commit,
-        "built_at": None,  # stamped at publish time
+        "built_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "articles": entries,
         "reference": {
             "schema_version": ref_version,

@@ -1,0 +1,7 @@
+# Machine-checkable claims for docs/tools/executa-lifecycle.md (design §5.3.1).
+# Asserted by scripts/check_claims.py against the published @anna-ai/app-schema
+# bundle and against the article body (forum #248 item 1).
+capabilities:
+  - llm.sample
+  - aps.kv
+  - aps.files

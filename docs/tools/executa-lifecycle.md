@@ -4,8 +4,9 @@ description: "How the Agent spawns, initializes, calls, and shuts down an Execut
 section: tools
 slug: executa-lifecycle
 order: 6
-updated: 2026-05-11
+updated: 2026-08-25
 estimated_minutes: 7
+verified_runtime: "1.1.0-beta.135"
 ---
 
 Every Executa plugin runs as a **single, long-running process** that the Matrix Agent owns end-to-end. Understanding the five lifecycle phases — and the v2 capability handshake that gates [Sampling](/developers/tools/executa-sampling) and [Persistent Storage](/developers/tools/executa-storage) — is the prerequisite for everything beyond `invoke`.
@@ -91,7 +92,7 @@ The negotiation in `initialize` is necessary but not sufficient. To actually use
 {
   "name": "my-tool",
   "version": "0.1.0",
-  "host_capabilities": ["llm.sample", "storage.tool"],
+  "host_capabilities": ["llm.sample", "aps.kv"],
   "tools": [ /* ... */ ]
 }
 ```
@@ -99,9 +100,10 @@ The negotiation in `initialize` is necessary but not sufficient. To actually use
 | Capability string | Unlocks | Reverse RPC methods |
 |---|---|---|
 | `llm.sample` | [Sampling](/developers/tools/executa-sampling) | `sampling/createMessage` |
-| `storage.user` | [APS](/developers/tools/executa-storage) — user drive | `storage/*`, `files/*` (with `scope: "user"`) |
-| `storage.app` | APS — app namespace | `storage/*`, `files/*` |
-| `storage.tool` | APS — tool-private namespace | `storage/*`, `files/*` |
+| `aps.kv` | [APS](/developers/tools/executa-storage) — KV store | `storage/*` |
+| `aps.files` | APS — object/file store | `files/*` |
+
+Which APS *scopes* a plugin may touch (`user` / `tool`) is pinned by the user's storage grant (`allowedScopes`), not by extra capability strings — `storage.user` / `storage.app` / `storage.tool` are **not** valid `host_capabilities` values. See [Persistent Storage](/developers/tools/executa-storage#three-pre-conditions) for the full accepted allow-list.
 
 Without the manifest declaration, Nexus refuses the corresponding reverse RPC at the gate (`-32008 not_negotiated` for sampling, `-32021 not_granted` for storage).
 

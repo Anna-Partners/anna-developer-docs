@@ -4,9 +4,10 @@ description: "Run an Anna App locally with `anna-app dev` — in-process dispatc
 section: apps
 slug: local-dev
 order: 16
-updated: 2026-04-29
+updated: 2026-08-25
 estimated_minutes: 5
 category: "Local Development & Testing"
+verified_cli: "0.1.49"
 ---
 
 # Local Development with `anna-app dev`
@@ -59,6 +60,7 @@ host_api the manifest grants.
 | `--port <n>` | `5180` | HTTP port for the dev server. |
 | `--user-id <id>` | `1` | Harness user_id (also overridable via `manifest.dev.user_id`). |
 | `--no-watch` | (watcher on) | Disable bundle file watcher (LiveReload). |
+| `--storage <mode>` | `legacy` | APS backend: `legacy` = in-memory `runtime_state` (offline); `aps` = **real** Nexus APS via `/api/v1/storage/*` — see [Storage backends](#storage-backends). |
 | `--matrix-nexus-root <path>` | (auto) | Use an in-tree nexus checkout instead of `uvx`. |
 | `--executa <spec>` *(repeatable)* | (auto-discovery) | Register an executa explicitly; spec is comma-separated `key=value` (`dir=<path>[,tool_id=<id>][,type=python\|node\|go\|binary][,command="<argv>"]`). When given, replaces auto-discovery for the run and bypasses `enabled: false` on the chosen dir. |
 
@@ -81,6 +83,54 @@ host_api the manifest grants.
 
 The two modes are byte-equivalent at runtime — the dispatcher code is
 the same wheel either way.
+
+## Storage backends
+
+By default `anna-app dev` keeps all APS storage **in memory** for offline
+parity (`legacy` mode, seeded from `manifest.dev.seed_storage`). To exercise
+real APS — the same wire path as production — run:
+
+```bash
+anna-app dev --storage aps
+```
+
+while logged in (`anna-app login`). The boot banner confirms the mode:
+
+```text
+storage backend   aps (real nexus APS via /api/v1/storage/*)
+```
+
+`--storage aps` requires the real LLM bridge — it cannot be combined with
+`--no-llm` or `--mock-llm`.
+
+> [!TIP]
+> Exercising real APS locally is the difference between finding a scope or
+> capability bug in an afternoon and finding it in Marketplace review — the
+> in-memory backend does not enforce `host_capabilities` or
+> `storage_token` scopes the way production does.
+
+## `executas/` discovery requirements
+
+- An explicit `executa.json` **requires both** `tool_id` and `type`
+  (`python | node | go | binary`). Missing either one skips the executa with
+  only a startup warning
+  (`⚠ skipping executa <name>: executa.json missing required \`tool_id\``)
+  — the plugin is silently not spawned, and every `tools.invoke` then fails
+  with `not_implemented: tools.invoke is not available in this runtime`.
+- `app.json`'s `bundled_executas` is an **object keyed by handle**, not an
+  array:
+
+  ```json
+  {
+    "bundled_executas": {
+      "error-journal": { "path": "executas/error-journal" }
+    }
+  }
+  ```
+
+  Passing an array instead produces
+  `⚠ bundled handle "0" → executas/error-journal: no executa discovered at that path`
+  — the `"0"` is the array index being read as a handle name.
 
 ## `manifest.dev` block
 

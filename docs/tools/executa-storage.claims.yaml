@@ -1,0 +1,13 @@
+# Machine-checkable claims for docs/tools/executa-storage.md (design §5.3.1).
+# Asserted by scripts/check_claims.py against the published @anna-ai/app-schema
+# bundle and against the article body (forum #248 item 1).
+capabilities:
+  - aps.kv
+  - aps.files
+  - aps.scope.user.read
+  - aps.scope.user.write
+  - aps.scope.tool.read
+  - aps.scope.tool.write
+  - aps.scope.app.read
+  - aps.scope.app.write
+  - aps.scope.admin

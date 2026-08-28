@@ -1,0 +1,4 @@
+# Machine-checkable claims for docs/apps/app-mobile.md.
+# form_factors ships in @anna-ai/app-schema >= 0.21.0 (UiManifestSection).
+ui_manifest_fields:
+  - form_factors

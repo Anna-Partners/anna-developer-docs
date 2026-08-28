@@ -4,7 +4,7 @@ description: "Walk an app through review and into the Anna App Store."
 section: apps
 slug: app-publish
 order: 7
-updated: 2026-04-22
+updated: 2026-08-26
 estimated_minutes: 5
 category: "Distribution & Lifecycle"
 ---
@@ -67,6 +67,7 @@ Reviewers verify, at minimum:
 
 - Manifest re-validates against the schema and against the live Executa catalogue.
 - Listing copy and screenshots match observed behaviour.
+- *(Apps declaring `"mobile"` in `ui.form_factors`)* Every hard requirement in the [mobile adaptation checklist](/developers/apps/app-mobile) is walked through in a mobile viewport — a failed row blocks approval.
 
 There is no enforced SLA today; check **My Apps** in the Console for the current status.
 

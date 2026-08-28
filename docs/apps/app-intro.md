@@ -406,4 +406,4 @@ Only `PUBLISHED` apps are visible in the App Store and installable by new users.
 - **Listing** — [Listing assets](/developers/apps/app-listing).
 - **Submitting** — [Publishing an app](/developers/apps/app-publish).
 - **Updates** — [Versioning & updates](/developers/apps/app-versioning).
-- **App UI** — [Overview](/developers/apps/app-ui-overview), [Manifest `ui` section](/developers/apps/app-ui-manifest), [Bundle pipeline](/developers/apps/app-ui-bundle), [Window lifecycle](/developers/apps/app-ui-windows), [SDK](/developers/apps/app-ui-sdk), [Host API](/developers/apps/app-ui-host-api), [LLM integration](/developers/apps/app-ui-llm).
+- **App UI** — [Overview](/developers/apps/app-ui-overview), [Manifest `ui` section](/developers/apps/app-ui-manifest), [Bundle pipeline](/developers/apps/app-ui-bundle), [Window lifecycle](/developers/apps/app-ui-windows), [SDK](/developers/apps/app-ui-sdk), [Host API](/developers/apps/app-ui-host-api), [LLM integration](/developers/apps/app-ui-llm), [Mobile support](/developers/apps/app-mobile).

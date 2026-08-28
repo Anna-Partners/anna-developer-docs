@@ -4,7 +4,7 @@ description: "The `ui` section of a schema-2 manifest: bundle, views, host_api, 
 section: apps
 slug: app-ui-manifest
 order: 10
-updated: 2026-04-28
+updated: 2026-08-26
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -72,6 +72,7 @@ When `schema: 2`, an Anna App manifest gains a `ui` section that describes the s
 |---|---|---|---|
 | `bundle` | object | yes | See [`bundle`](#bundle) |
 | `views` | array | yes | 1–16 entries; at most one `default: true`. See [`views[]`](#views) |
+| `form_factors` | array of string | no | Containers the app supports: `"desktop"` / `"mobile"`. Defaults to `["desktop"]` — declare `"mobile"` to appear in the Anna mobile launcher. See [Mobile Support](/developers/apps/app-mobile) |
 | `host_api` | object | no | RPC ACL. See [`host_api`](#host_api). Defaults to all empty (only the always-allowed `window` scope) |
 | `csp_overrides` | object | no | Map of CSP directive → list of values. Only the directives below are accepted; `script-src` / `style-src` accept only `'self'`, `'sha256-...'`, `'nonce-...'` |
 | `state_merge` | string | no | Reserved. Default `"last_writer_wins"` |
@@ -102,6 +103,7 @@ A view is a named UI surface inside your bundle. The LLM passes `view: "<name>"`
   "title": "Research Workspace",  // 1..120 chars
   "default": true,
   "entry": "index.html#/route",   // optional; otherwise bundle.entry
+  "mobile_entry": "mobile.html",  // optional mobile-specific entry; defaults to entry
   "min_size":     { "w": 480, "h": 360 },
   "default_size": { "w": 960, "h": 640 },
   "max_size":     { "w": 1920, "h": 1200 },
@@ -114,6 +116,8 @@ A view is a named UI surface inside your bundle. The LLM passes `view: "<name>"`
 ```
 
 Sizes are integers in CSS pixels, `120 ≤ w,h ≤ 4096`. The validator rejects `default_size` outside `[min_size, max_size]`.
+
+`mobile_entry` is served instead of `entry` when the window is opened from a mobile container — see [Mobile Support](/developers/apps/app-mobile). A single responsive entry is recommended.
 
 `single_instance: true` means: opening the same `view` again under the same `(user, conversation_session_uuid, app_id)` re-focuses the existing window and merges the new payload into `entry_payload` rather than spawning a second window.
 

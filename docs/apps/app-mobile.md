@@ -66,6 +66,8 @@ The mobile shell is a plain nexus page. From a desktop browser you can exercise 
 
 During local development, `anna-app dev` validates `form_factors` / `mobile_entry` like any other manifest field (requires CLI ≥ 0.1.50).
 
+A runnable reference lives in the examples repository: [`anna-app-mobile-demo`](https://github.com/talentai/anna-executa-examples/tree/main/examples/anna-app-mobile-demo) — dual `mobile_entry`, the `anna.mobile.*` native bridge (share / haptics / camera), desktop degradation, and `dev.mocks` for phone-free local runs.
+
 ## Review
 
 Reviewers treat the table above as **hard requirements** for any app declaring `"mobile"` — a failed row blocks approval the same way a broken manifest does. Apps that do not declare mobile are reviewed for desktop only and show "Desktop only" on their store page. See [Publishing an App](/developers/apps/app-publish) for the overall pipeline.

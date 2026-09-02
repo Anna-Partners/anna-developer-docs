@@ -4,7 +4,7 @@ description: "The bugs that show up most often when authors build Executa plugin
 section: tools
 slug: executa-pitfalls
 order: 14
-updated: 2026-05-11
+updated: 2026-08-31
 estimated_minutes: 8
 ---
 
@@ -297,6 +297,35 @@ The plugin returned the `invoke` result and immediately did `process.exit()` / `
 **Fix**
 
 Same as Pitfall #1 — the plugin process must be long-running. The official SDKs (`sdk/{python,nodejs,go}` in [anna-executa-examples](https://github.com/whtcjdtc2007/anna-executa-examples)) ship a single-reader-with-dispatch pattern that handles both Agent requests **and** host responses to your reverse RPCs. Use it.
+
+---
+
+## 9a · Published executa shows no **Permission** button — `UPLOAD_NOT_GRANTED` / `-32201`
+
+**Symptom**
+
+You publish an App with a bundled executa via `anna-app apps publish` (or a standalone `executa publish`). The CLI reports success, the executa installs and runs — but its card on `/executa` has no **Permission** entry, so users cannot grant `host.upload` / `aps.*` / `llm.*`, and the first reverse-RPC call fails, e.g.:
+
+```json
+{ "code": -32201, "message": "Upload token missing — host did not authorize host/uploadFile",
+  "data": { "errorCode": "UPLOAD_NOT_GRANTED" } }
+```
+
+**Cause**
+
+The permission UI and every reverse-RPC token gate read the capability declaration from the executa's **protocol manifest registered on the server** (`manifest_cache`), not from the binary itself. CLI versions before `0.1.50` never uploaded that manifest, so the server had no idea which capabilities your plugin declares.
+
+**Fix**
+
+Upgrade to `anna-app` ≥ `0.1.50` and keep the plugin's `describe` manifest next to `executa.json` as `manifest.json` (or point at it with the `executa.json` `manifest_file` field). `executa publish` / `apps publish` / `apps push` then sync it to the server on every publish — the CLI prints `protocol manifest synced (host capabilities: …)` and warns when the file is missing.
+
+For executas already published without a manifest, any of these heals the row:
+
+- re-publish with CLI ≥ `0.1.50`;
+- a successful install / reinstall / upgrade on any Agent (the platform now caches the manifest the Agent gets from `describe`);
+- manually pasting the `describe` JSON in **/executa → My Tools → Edit → Manifest**.
+
+Note the capability strings are validated against the platform allow-list at write time — a typo like `host.uploadFile` is now rejected with HTTP 400 instead of silently hiding the Permission entry.
 
 ---
 

@@ -53,9 +53,9 @@ There is no syntax for `path://`, `catalogue://`, `hub://`, or any other referen
 
 ## Lifecycle of a bundle
 
-1. **Create version** (`POST /api/v1/developer/apps/{id}/versions`) — manifest is parsed; every `tool_id` is checked for existence in the Executa catalogue. The version is stored with `is_latest=False`.
+1. **Create version** — `anna-app apps publish` is a composite of `apps push` (stage the working draft) + `apps cut <version>` (snapshot + **freeze** every executa ref to an immutable `ExecutaVersion`), so the version carries its `anna_app_executas` bindings from the moment it exists. The raw `POST /api/v1/developer/apps/{id}/versions` endpoint is the legacy path: manifest `tool_id`s are checked for existence, but bindings are only frozen later, at release. Either way the version is stored with `is_latest=False`.
 2. **Publish version** (`POST /api/v1/developer/apps/{id}/versions/{vid}/publish`) — the manifest is **re-validated** (in case an Executa was removed in the meantime). On success:
-   - `anna_app_executas` snapshot table is rebuilt for this version: `required` first, then `optional`, in declared order, with `display_order` and `is_required` recorded.
+   - Cut-time `anna_app_executas` bindings are reused as-is; versions without them (legacy path) get the snapshot rebuilt here: `required` first, then `optional`, in declared order, with `display_order` and `is_required` recorded.
    - The app's `latest_version` cache is updated.
    - If the app's `status` is `APPROVED` or `PENDING_REVIEW`, it is auto-promoted to `PUBLISHED`.
 3. **User install** (`install_app`) — only allowed when `status ∈ {PUBLISHED, APPROVED}`. The latest published version is fetched; missing `UserExecuta` rows for `required_executas` are created. `optional_executas` are not auto-installed.

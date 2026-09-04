@@ -54,6 +54,8 @@ Server-side checks:
 
 The version is created with `is_latest=False`. It does not affect anyone until you publish it.
 
+> **CLI note** — `anna-app apps publish` no longer calls this endpoint directly: it runs `apps push` + `apps cut <version>`, so the resulting version also carries cut-time frozen executa bindings. The endpoint above remains for raw API/CI callers.
+
 ## Publishing
 
 `POST /api/v1/developer/apps/{id}/versions/{vid}/publish` — see [Publishing an App](/developers/apps/app-publish#4-publish-a-version) for the full flow. In short:

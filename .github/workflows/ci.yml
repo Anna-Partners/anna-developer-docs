@@ -90,11 +90,15 @@ jobs:
           cache: pip
       - uses: actions/setup-node@v4
         with:
-          # @anna-ai/cli engines node>=22; also npx cold-cache install hangs
-          # forever under node 20's npm 10.8.2 (reproduced with any package).
+          # @anna-ai/cli engines node>=22.
           node-version: "22"
       - run: pip install -r requirements.txt
+      # npx's cold-cache install hangs forever on hosted runners; install the
+      # pinned CLI locally (the pattern the other jobs use) and run its bin.
+      - run: npm install --no-save "@anna-ai/cli@$(cat .cli-version)"
       - run: python scripts/run_samples.py
+        env:
+          ANNA_APP_CLI: node_modules/.bin/anna-app
 
   # P3 §9.2 — generated reference sections reject hand edits (regenerate-diff).
   reference-regen:

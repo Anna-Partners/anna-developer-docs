@@ -98,7 +98,13 @@ def run_app_manifest(sample: Sample) -> str | None:
         tmp.write(sample.body)
         manifest_path = tmp.name
     cmd = [*_cli_command(), "validate", "--manifest", manifest_path]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        stdin=subprocess.DEVNULL,
+    )
     if proc.returncode != 0:
         tail = (proc.stdout + proc.stderr).strip().splitlines()[-6:]
         return "anna-app validate failed:\n      " + "\n      ".join(tail)

@@ -4,7 +4,7 @@ description: "Run an Anna App locally with `anna-app dev` — in-process dispatc
 section: apps
 slug: local-dev
 order: 16
-updated: 2026-08-25
+updated: 2026-09-10
 estimated_minutes: 5
 category: "Local Development & Testing"
 verified_cli: "0.1.49"
@@ -97,17 +97,36 @@ anna-app dev --storage aps
 while logged in (`anna-app login`). The boot banner confirms the mode:
 
 ```text
-storage backend   aps (real nexus APS via /api/v1/storage/*)
+storage backend   aps (real nexus APS via /api/v1/storage/*) · caps gate strict (production parity)
 ```
 
 `--storage aps` requires the real LLM bridge — it cannot be combined with
 `--no-llm` or `--mock-llm`.
 
+### Storage capability gate (production parity)
+
+In `aps` mode the harness enforces the same capability gate as the platform
+minter: if your manifest declares **no** `aps.*` entry in
+`host_capabilities` (and no schema-3 `storage` entry), any `storage/*` /
+`files/*` call for a non-self scope fails locally with the exact production
+error plus a fix hint:
+
+```text
+-32021: storage_token missing — host did not authorize storage for this invoke
+hint: declare "aps.kv" (KV) / "aps.files" (Files) in host_capabilities; the
+platform will not mint a plugin storage_token without them (docs: executa-storage)
+```
+
+Pass `--no-strict-caps` to downgrade the gate to a one-shot warning while you
+iterate on the manifest — but note the warning is honest: the same call **will**
+fail in production until the declaration lands.
+
 > [!TIP]
 > Exercising real APS locally is the difference between finding a scope or
 > capability bug in an afternoon and finding it in Marketplace review — the
-> in-memory backend does not enforce `host_capabilities` or
-> `storage_token` scopes the way production does.
+> in-memory backend does not enforce `storage_token` scopes the way
+> production does (missing `host_capabilities` declarations are now caught
+> by the strict caps gate above even in local runs).
 
 ## `executas/` discovery requirements
 

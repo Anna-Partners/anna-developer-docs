@@ -4,7 +4,7 @@ description: "The manifest JSON that declares which Executas an app bundles and 
 section: apps
 slug: app-manifest
 order: 4
-updated: 2026-08-18
+updated: 2026-09-10
 estimated_minutes: 6
 ---
 
@@ -52,18 +52,19 @@ The manifest is parsed by the `AppManifest` Pydantic model with `extra="forbid"`
 
 | Field | Type | Required | Constraints |
 |---|---|---|---|
-| `schema` | integer | yes | `1` (no UI) or `2` (UI runtime). `2` enables the [`ui`](/developers/apps/app-ui-manifest) section |
+| `schema` | integer | yes | `1` (no UI), `2` (UI runtime, enables the [`ui`](/developers/apps/app-ui-manifest) section) or `3` (adds the structured [`storage`](#storage-schema-3) entry and **removes** `permissions`) |
 | `required_executas` | array | yes | Length ≥ 1. Items: `{ "tool_id": string, "min_version"?: string, "version"?: string }` |
 | `optional_executas` | array | no | Same item shape as `required_executas`. Defaults to `[]` |
-| `permissions` | array of string | no | **Strict allow-list.** Unknown values are rejected. The Anna App UI Runtime enforces these scopes per RPC — see [Host API](/developers/apps/app-ui-host-api). For `schema: 1` apps with no UI the values are stored but currently have no runtime effect |
-| `host_capabilities` | array of string | no | **Strict allow-list** (see below). Declares the host-mediated capabilities the app's bundled Executas rely on (APS storage scopes, LLM sampling, web search, …). Note: each Executa must **also** declare its own `host_capabilities` in its plugin manifest — per-invoke tokens (e.g. `storage_token`) are gated on the Executa's declaration plus the user's grant, not on this field alone |
+| `permissions` | array of string | no | **Deprecated — display-only, `schema ≤ 2` only.** Never enforced anywhere: iframe method gating is `ui.host_api`, storage scope gating is `host_capabilities`. Store/review permission displays are **derived** from those enforced declarations, not from this list. `schema: 3` rejects the field: `permissions: removed in schema 3 — permission display is derived from ui.host_api + storage/host_capabilities` |
+| `host_capabilities` | array of string | no | **Strict allow-list** (see below). Declares the host-mediated capabilities the app's bundled Executas rely on (APS storage scopes, LLM sampling, web search, …). Note: each Executa must **also** declare its own `host_capabilities` in its plugin manifest — per-invoke tokens (e.g. `storage_token`) are gated on the Executa's declaration plus the user's grant, not on this field alone. At `schema: 3`, when an Executa's manifest declares storage the publish validator requires both declarations to normalize to the **same** storage surface |
+| `storage` | object | no | **`schema: 3` only.** Structured APS declaration replacing the `aps.*` capability strings — see [`storage` (schema 3)](#storage-schema-3). Mutually exclusive with `aps.*` entries in `host_capabilities` |
 | `system_prompt_addendum` | string | no | Max 4000 characters. Appended to the assistant's system prompt when the user `#`mentions the app |
 | `user_message_prefix_template` | string | no | Max 500 characters. Must contain **exactly one** `{user_message}` placeholder. See [Runtime behaviour](#runtime-behaviour) for current limitations |
 | `tags` | array of string | no | Free-form tags. Stored but not surfaced in the App Store today |
 | `ui` | object | no (yes when `schema: 2`) | UI bundle + views + host API ACL. Full reference: [App UI Manifest](/developers/apps/app-ui-manifest) |
 | `dev` | object | no | **Local-harness-only.** Consumed by `anna-app dev`; production dispatcher ignores it at runtime, and `anna-app publish` strips it before upload. See [`dev` block](#dev-block-local-harness-only) |
 
-Allowed `permissions` values (`_ALLOWED_PERMISSIONS`):
+Allowed `permissions` values (`_ALLOWED_PERMISSIONS`, `schema ≤ 2` only — the whole field is display-only and removed at `schema: 3`):
 
 ```
 ui.svg
@@ -90,6 +91,35 @@ aps.scope.app.read, aps.scope.app.write
 aps.scope.tool.read, aps.scope.tool.write
 aps.scope.admin   (platform pre-installed apps only)
 ```
+
+Every `aps.*` string — including the `aps.scope.*` family — also triggers plugin-side `storage_token` minting when it appears in an **Executa's** manifest (“wide convergence”; see [Persistent Storage](/developers/tools/executa-storage#three-pre-conditions)).
+
+### `storage` (schema 3)
+
+From `schema: 3` the ten `aps.*` capability strings collapse into one structured entry (the legacy strings remain permanent aliases for `schema ≤ 2` manifests — both forms normalize to the same declaration):
+
+```json
+{
+  "schema": 3,
+  "storage": {
+    "kv": true,
+    "files": false,
+    "scopes": { "user": "rw", "tool": "rw" }
+  }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kv` | boolean | KV surface: plugin `storage/*` reverse RPCs + iframe `anna.storage.*`. Implies self-owned `scope=app` access (legacy `aps.kv` parity) |
+| `files` | boolean | Object/file surface: plugin `files/*` reverse RPCs + iframe `anna.files.*`. Also implies self app-scope |
+| `scopes` | object | Explicit cross-scope grants: key ∈ `user` \| `app` \| `tool`, value ∈ `"r"` \| `"w"` \| `"rw"`. `app` here means **cross-owner** app-scope (self app-scope comes from `kv`/`files`); consumed by the iframe scope gate. Plugin tokens stay pinned to `user`/`tool` regardless |
+
+Rules enforced by the publish validator:
+
+- `storage` requires `schema ≥ 3` (`manifest.storage requires schema >= 3 (declare legacy aps.* host_capabilities instead)`);
+- `storage` and `aps.*` strings in `host_capabilities` are **mutually exclusive** (`storage declaration: use either manifest.storage (schema 3) or legacy aps.* host_capabilities, not both`);
+- when a bundled Executa's own manifest declares storage, its normalized declaration must **equal** the app's (single-source rule — kills the “declared in both places, drifted silently” failure class).
 
 ### `required_executas[]` and `optional_executas[]`
 

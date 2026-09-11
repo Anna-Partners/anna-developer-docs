@@ -244,7 +244,8 @@ Most of an Anna App is filled in via the [Developer Console](/developer); there 
 | **Listing tab** | `slug`, `name`, `category`, `tagline`, `description`, `logo` (uploaded; cropped to 256×256 WebP), optional `screenshots[]` (URLs), `homepage_url`, `support_url`, `privacy_url`, `cover_url` |
 | **Versions tab** | A SemVer `version` string, a `changelog`, and a JSON **manifest** that declares `required_executas`, optional Executas, prompt directives, and (for `schema: 2`) the `ui` section |
 | **Versions tab → Bundle** *(UI apps only)* | A static SPA bundle (HTML/JS/CSS/...) uploaded with `bundle/init` → per-file PUT → `bundle/finalize`. See [App UI Bundle Pipeline](/developers/apps/app-ui-bundle) |
-| **Settings tab** | Submit for review; archive the app |
+| **Versions tab → Submit for review** | Sends the newest cut version to admin review (pinned as the *review candidate*); re-submitting switches the candidate to a newer cut |
+| **Settings tab** | Archive the app |
 
 Each version is an immutable snapshot. To change the bundled Executas, the prompt, or the UI assets, you create a new version (with a strictly greater SemVer), upload its bundle if applicable, and publish it.
 
@@ -318,9 +319,8 @@ Each version is an immutable snapshot. To change the bundled Executas, the promp
 <rect width="95" height="120" rx="10" fill="#0A0B11" stroke="#FFC8A2" stroke-opacity="0.4"/>
 <text x="12" y="22" font-family="Space Grotesk, sans-serif" font-size="9" letter-spacing="0.2em" fill="#FFC8A2">SETTINGS</text>
 <g font-family="Inter, sans-serif" font-size="10" fill="#A6A8B5">
-<text x="12" y="50">Submit</text>
-<text x="12" y="66">Archive</text>
-<text x="12" y="82">Transfer</text>
+<text x="12" y="50">Archive</text>
+<text x="12" y="66">Transfer</text>
 </g>
 </g>
 </svg>

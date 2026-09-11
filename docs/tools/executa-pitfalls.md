@@ -4,7 +4,7 @@ description: "The bugs that show up most often when authors build Executa plugin
 section: tools
 slug: executa-pitfalls
 order: 14
-updated: 2026-08-31
+updated: 2026-09-10
 estimated_minutes: 8
 ---
 
@@ -389,7 +389,7 @@ Always pass `scope` explicitly:
 | Want | Pass |
 |---|---|
 | Plugin-private state | `scope: "tool"` |
-| Shared between views of the same Anna App | `scope: "app"` |
+| Shared between views of the same Anna App | `scope: "app"` (plugin side: only authorized for invokes dispatched from that App's context — see [Scopes](/developers/tools/executa-storage#scopes)) |
 | Visible across the user's whole drive | `scope: "user"` on any `files/*` or `storage/*` call |
 
 ---

@@ -44,13 +44,18 @@ Defined in `AnnaAppStatus`:
 
 ## 2. Submit for review
 
-In the Console: **Settings tab → Submit for review** (`POST /developer/apps/{id}/submit-review`).
+In the Console: **Versions tab → Submit for review** (`POST /developer/apps/{id}/submit-review`), or `anna-app apps submit-review`.
+
+The review targets a **specific version**: at submit time the newest cut version is pinned as the *review candidate* (`review_candidate_version`). The Console button names it (e.g. *Submit v1.2.0 for review*), and the Versions table marks the pinned row with a `review candidate` badge while the review is in flight. Reviewer installs, review windows, and approval all resolve to the pinned version — cutting new versions during review does **not** move the target.
 
 Backend rules:
 
-- The app must currently be `DRAFT` or `REJECTED`.
-- The app must have at least one version (otherwise: `"提交审核前需至少创建一个版本"`).
-- On success the status flips to `PENDING_REVIEW`.
+- The app must currently be `DRAFT`, `REJECTED`, or `PENDING_REVIEW` (re-submit; see below).
+- The app must have at least one cut version (otherwise: `"提交审核前需至少创建一个版本"`).
+- A release precheck runs at submission (manifest validation, executa-binding freeze dry-run, UI bundle readiness for `schema: 2`). Failures come back to you as a `400` at submit time instead of surfacing to the admin at approval time.
+- On success the status flips to `PENDING_REVIEW` and the candidate is pinned.
+
+**Switching the candidate**: if you cut a new version while `PENDING_REVIEW`, run submit-review again — the Console button becomes *Switch review candidate to v⟨new⟩*. This explicitly re-pins the review to the newest cut and re-runs the precheck. Re-submitting with an unchanged candidate is an idempotent no-op; if the precheck fails, the previous candidate stays under review.
 
 There is no email notification today.
 
@@ -61,7 +66,7 @@ An admin (or super-admin with the `APPS_MGMT` section) acts on the app via:
 - `POST /api/v1/super-admin/apps/{id}/approve` with body `{ "publish": bool, "notes": string? }`
   - Status must be `PENDING_REVIEW`.
   - With `publish: false` → status becomes `APPROVED`.
-  - With `publish: true` → the most-recently created version is published (becomes `is_latest`) and status becomes `PUBLISHED`.
+  - With `publish: true` → the pinned review-candidate version is published (becomes `is_latest`) and status becomes `PUBLISHED`.
   - `review_notes`, `reviewed_at`, `reviewed_by_id` are recorded.
 - `POST /api/v1/super-admin/apps/{id}/reject` — status becomes `REJECTED`. You can revise and submit again.
 

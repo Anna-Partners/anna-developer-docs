@@ -4,7 +4,7 @@ description: "Anna apps can reach for the platform's host API or for a custom Ex
 section: apps
 slug: host-api-vs-executa
 order: 24
-updated: 2026-05-27
+updated: 2026-09-10
 estimated_minutes: 8
 ---
 
@@ -74,7 +74,7 @@ If none of the above applies, **use the host API**. You inherit maintenance, mul
 1. **The iframe is UI + orchestration.** It calls the host API for user-identity-bound operations (LLM, storage, image, upload), and it calls executas to trigger custom heavy logic.
 2. **The host API is the default.** If a capability exists there, use it — you get platform maintenance, cross-platform behaviour, and audit / quota for free.
 3. **Put only "must run locally" code in an executa.** And when an executa needs user-scoped capabilities, it should reverse-RPC back into the host API — never bring its own OpenAI key or roll its own storage layer.
-4. **Always use APS for persistence** (see `local-dev` `--storage aps` to exercise the real backend in local development). Do not fake persistence by writing files inside an executa.
+4. **Always use APS for persistence** (see `local-dev` `--storage aps` to exercise the real backend in local development). Do not fake persistence by writing files inside an executa. When a bundled executa produces App-level data, write it with `scope: "app"` directly from the plugin — invokes dispatched from your App's context carry a host-attested app-scope `storage_token` (see [Persistent Storage § Scopes](/developers/tools/executa-storage#scopes)). The older pattern of relaying results through the iframe (`tools.invoke` → iframe writes `anna.storage.set`) is now **legacy**: it only works while the window is alive, which async jobs and background invokes are not.
 5. **Quick test:** identity / billing / sync / cross-device → host API; CPU / state / private keys / system access → executa.
 
 ## In one sentence

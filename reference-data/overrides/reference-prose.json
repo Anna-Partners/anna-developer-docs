@@ -137,7 +137,7 @@
       },
       {
         "name": "agent.session.run",
-        "desc": "Submit a user turn; returns SYNCHRONOUSLY with `{stream_id, run_id}`. LangGraph response frames arrive via `rpc.stream` events; the SDK's `AgentRunStream` reassembles by `seq` into an `AsyncIterable`. Terminal frame is always `{event:'end', run_id}` + `done:true`. Optional per-run fields: `attachments` (native multimodal image inputs — the session's vision model sees them directly, image/* only, ≤6, SSRF-guarded URLs or base64 `data`; non-vision model fails fast with `APP_MODEL_NOT_VISION_CAPABLE`), `allowed_tools` (narrow this run's tool surface — sandbox sessions only), `modelPreferences`, `systemPrompt`.",
+        "desc": "Submit a user turn; returns SYNCHRONOUSLY with `{stream_id, run_id}`. LangGraph response frames arrive via `rpc.stream` events; the SDK's `AgentRunStream` reassembles by `seq` into an `AsyncIterable`. Terminal frame is always `{event:'end', run_id}` + `done:true`. The `run_meta` frame and the `task_complete` delta carry `model` / `provider` — the model the server ACTUALLY routed to after `modelPreferences` resolution and any fallback (soft preference; forum #270). Optional per-run fields: `attachments` (native multimodal image inputs — the session's vision model sees them directly, image/* only, ≤6, SSRF-guarded URLs or base64 `data`; non-vision model fails fast with `APP_MODEL_NOT_VISION_CAPABLE`), `allowed_tools` (narrow this run's tool surface — sandbox sessions only), `modelPreferences`, `systemPrompt`.",
         "tags": [
           {
             "label": "streaming"

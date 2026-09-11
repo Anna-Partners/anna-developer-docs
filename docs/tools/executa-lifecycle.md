@@ -4,7 +4,7 @@ description: "How the Agent spawns, initializes, calls, and shuts down an Execut
 section: tools
 slug: executa-lifecycle
 order: 6
-updated: 2026-08-25
+updated: 2026-09-10
 estimated_minutes: 7
 verified_runtime: "1.1.0-beta.135"
 ---
@@ -103,7 +103,7 @@ The negotiation in `initialize` is necessary but not sufficient. To actually use
 | `aps.kv` | [APS](/developers/tools/executa-storage) — KV store | `storage/*` |
 | `aps.files` | APS — object/file store | `files/*` |
 
-Which APS *scopes* a plugin may touch (`user` / `tool`) is pinned by the user's storage grant (`allowedScopes`), not by extra capability strings — `storage.user` / `storage.app` / `storage.tool` are **not** valid `host_capabilities` values. See [Persistent Storage](/developers/tools/executa-storage#three-pre-conditions) for the full accepted allow-list.
+Which APS *scopes* a plugin may touch (`user` / `tool`) is a **platform constant** baked into the `storage_token`, not a grant field or extra capability strings — `storage.user` / `storage.app` / `storage.tool` are **not** valid `host_capabilities` values. The `aps.scope.*` family (an App-side declaration) **also** triggers plugin-side `storage_token` minting — the mint gate and every validation surface share one predicate, so a scope-only manifest no longer dies with `-32021` in production only. See [Persistent Storage](/developers/tools/executa-storage#three-pre-conditions) for the full accepted allow-list.
 
 Without the manifest declaration, Nexus refuses the corresponding reverse RPC at the gate (`-32008 not_negotiated` for sampling, `-32021 not_granted` for storage).
 
@@ -134,7 +134,7 @@ Once v2 is live, every `invoke` request also carries a `context` block beside `t
 | `sampling_token` | Nexus, JWT `aud=executa-sampling`, TTL 600 s | `sampling/createMessage` authorization |
 | `storage_token`  | Nexus, JWT `aud=aps-storage`, TTL 600 s | `storage/*` & `files/*` authorization |
 
-Tokens are bound to (`user_id`, `executa_tool_id`, `tool_invoke_id`) and expire shortly after the invoke completes — **never** persist them across invocations.
+Tokens are bound to (`user_id`, `executa_tool_id`, `tool_invoke_id`) and expire shortly after the invoke completes — **never** persist them across invocations. When the invoke is dispatched from an Anna App context (window `tools.invoke` / async job), the `storage_token` additionally carries host-attested `app_id`/`app_slug` claims that unlock the hosting App's own `scope="app"` bucket — see [Persistent Storage § Scopes](/developers/tools/executa-storage#scopes) for the exact conditions.
 
 ## Health probe (optional)
 

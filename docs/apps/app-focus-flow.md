@@ -125,7 +125,7 @@ This runs the same three layers Nexus applies on submission:
 
 1. **`AppManifest`** Pydantic model (`extra="forbid"`) — shape & types
 2. **`validate_ui_section_static`** — CSP, view geometry, and the rule that every `host_api.tools` entry resolves to a declared `required_executas` / `optional_executas` ID
-3. **Bundle linter** — entry exists, view names unique, sizes well-formed; `--strict` greps the bundle JS for `anna.<ns>.<method>` usage and asserts each is allow-listed
+3. **Bundle linter** — entry exists, view names unique, sizes well-formed; `--strict` scans the bundle JS (string literals and comments excluded) for `anna.<ns>.<method>` usage and asserts each is allow-listed
 
 ## 5. Test the contract
 

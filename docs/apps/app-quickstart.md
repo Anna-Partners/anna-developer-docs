@@ -82,7 +82,7 @@ The validator is fail-fast and layered:
 1. JSON Schema (`@anna-ai/app-schema`) — same definition the server uses on `POST /api/v1/developer/apps/{id}/versions`.
 2. UI static checks — bundle entry exists, view names unique, sizes well-formed.
 3. Cross-file `tool_id` linter — every `host_api.tools[]` entry resolves to a `required_executas[]` entry, with Levenshtein-1 typo suggestions.
-4. `--strict` — greps your bundle JS/TS for `anna.<ns>.<method>` usage and verifies each is allowlisted in `manifest.ui.host_api`.
+4. `--strict` — scans your bundle JS/TS for `anna.<ns>.<method>` usage and verifies each is allowlisted in `manifest.ui.host_api`. String literals and comments are lexically stripped first, so a diagnostic string like `"recover via anna.tools.getJob({jobId})"` is not treated as a call.
 
 If everything is green, you have a publishable artifact.
 

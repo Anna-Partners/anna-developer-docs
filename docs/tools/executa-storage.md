@@ -4,7 +4,7 @@ description: "Per-user durable KV + object store hosted by Anna — no cloud acc
 section: tools
 slug: executa-storage
 order: 11
-updated: 2026-08-25
+updated: 2026-09-10
 estimated_minutes: 9
 verified_runtime: "1.1.0-beta.135"
 verified_cli: "0.1.49"
@@ -32,8 +32,8 @@ If your data is bigger than a few KB or is binary, prefer object storage — KV 
 End-to-end APS access requires **all** of:
 
 1. **v2 negotiation.** Plugin echoes `protocolVersion: "2.0"` and exposes the storage capability in its `initialize` response (`capabilities.storage = {}` is sufficient).
-2. **Manifest declaration.** `host_capabilities` declares the APS surface the plugin uses: `aps.kv` for the KV API (`storage/*`), `aps.files` for the object/file API (`files/*`). These are the strings that make the host mint a plugin-side `storage_token`.
-3. **User grant.** The end user enabled storage for this Executa in their Anna Admin panel. The grant pins `allowed_scopes`, `quotaBytes`, and `objectMaxBytes`.
+2. **Manifest declaration.** `host_capabilities` declares the APS surface the plugin uses: `aps.kv` for the KV API (`storage/*`), `aps.files` for the object/file API (`files/*`). Any `aps.*` string — **including the `aps.scope.*` family** — makes the host mint a plugin-side `storage_token` (“wide convergence”: a scope-only declaration used to be silently dead on the plugin surface and failed with `-32021` in production while every local check passed). Apps on manifest `schema: 3` may declare the structured [`storage` entry](/developers/apps/app-manifest#storage-schema-3) instead — the two forms are normalized to the same thing.
+3. **User grant.** The end user enabled storage for this Executa in their Anna Admin panel. The grant is an enable switch plus quota knobs (`maxCalls`, `quotaBytes`, `objectMaxBytes`); which scopes a plugin token may use is a **platform constant** (`user`, `tool`), not a grant field.
 
 If anything is missing, Nexus rejects the reverse RPC with `-32021 STORAGE_NOT_GRANTED`.
 
@@ -48,6 +48,8 @@ If anything is missing, Nexus rejects the reverse RPC with `-32021 STORAGE_NOT_G
 > | `aps.scope.tool.read` / `aps.scope.tool.write` | App Host API: read / write `scope=tool` (per-executa cache) |
 > | `aps.scope.app.read` / `aps.scope.app.write` | App Host API: read / write **another** app's `scope=app` (requires `owner`) |
 > | `aps.scope.admin` | Full (scope, owner) matrix — system apps only |
+>
+> Every `aps.*` string above also counts as “this plugin uses storage” for `storage_token` minting — the mint gate, the `apps grants` missing-grant warning and the local harness all evaluate the **same shared predicate**, so a green local run implies a token in production.
 
 > [!NOTE]
 > When the Executa ships inside an Anna App, declare `host_capabilities` in **both** places: the top-level entry in `manifest.json` drives app-side validation and packaging; the entry in the Executa's `describe` manifest drives server-side `storage_token` issuance. For a standalone Executa published outside an App, only the describe manifest applies. (Capabilities placed under `ui.host_api` fail schema validation — `additionalProperties: false`.)
@@ -57,11 +59,21 @@ If anything is missing, Nexus rejects the reverse RPC with `-32021 STORAGE_NOT_G
 | Scope | Owner | Visibility |
 |---|---|---|
 | `user` | The end user | Their own dashboards & every plugin they grant. |
-| `app`  | The Anna App bundle | Shared across the same app for one user. **App-side Host API only** — not reachable from plugin reverse RPCs. |
+| `app`  | The Anna App bundle | Shared across the same app for one user. Reachable from the App-side Host API, and from plugin reverse RPCs **only when the invoke comes from that App's context** (window `tools.invoke` or an async job) — see the warning below. |
 | `tool` | The Executa plugin | Strictly local to (user × executa). |
 
 > [!WARNING]
-> Plugin-side `storage_token`s are issued for `scope='user'` and `scope='tool'` **only** — the platform grant pins `allowedScopes: ["user", "tool"]`. Calling any `storage/*` / `files/*` method with `scope: "app"` from a plugin fails with `storage_token does not permit scope='app'; allowed=['tool', 'user']`. The `app` scope belongs to the App-side iframe [Host API](/developers/apps/app-ui-host-api) (where `aps.kv` grants self-owned `scope=app` access). For per-user app data from a plugin, use `scope: "user"` with the user grant in place.
+> Plugin-side `storage_token`s carry `scope='user'` and `scope='tool'` as the **baseline** — a platform constant baked into the token's `allowed_scopes` claim (older grants stored an `allowedScopes` field; it was never user-configurable and is ignored today). Calling `storage/*` / `files/*` with `scope: "app"` outside the conditions below fails with `storage_token does not permit scope='app'; allowed=['tool', 'user']`.
+>
+> **App-context exception (host-attested).** When the invoke is dispatched from an Anna App context, the host mints the App's own identity into the token (`app_id`/`app_slug` claims + `"app"` in `allowed_scopes`) and the plugin may read/write **that App's own** bucket. All five conditions must hold:
+>
+> 1. the invoke comes from an App context — window `tools.invoke` or an async tool job (chat / agent-session invokes never qualify);
+> 2. the Executa manifest declares storage (any `aps.*` capability or the structured `storage` entry);
+> 3. the user enabled the Executa's storage grant;
+> 4. the **App's** manifest declares the storage surface (`aps.kv` / `aps.files` or `storage.kv` / `storage.files`);
+> 5. the user has not switched off the App-level Storage permission.
+>
+> Conditions 4–5 failing only drop `"app"` from the token — `user`/`tool` access is unaffected. The bucket owner always comes from the token claims: passing `owner` in the request is ignored, and another App's bucket is **never** reachable from a plugin (cross-owner app access remains iframe-only via `aps.scope.app.*`). For per-user data from a plugin, prefer `scope: "user"`.
 
 Always pass `scope` explicitly on every call — client and host defaults differ. To write into the end user's drive, pass `scope: "user"` on the same `files/*` methods — the per-scope grant is enforced by the `storage_token`'s `allowed_scopes` claim, not by the method name.
 
@@ -201,7 +213,7 @@ Treat `RATE_LIMITED` and `QUOTA_EXCEEDED` as **non-retryable** within the same i
 | `-32026` | `RATE_LIMITED` | Per-invoke RPC budget exhausted. |
 | `-32027` | `INVALID_PATH` | Reserved / out-of-bucket path. |
 | `-32028` | `INVALID_REQUEST` | Missing required field, wrong type. |
-| `-32029` | `UPSTREAM_ERROR` | Network / 5xx from Nexus REST. Also surfaces Nexus 403s — e.g. `storage_token does not permit scope='app'; allowed=['tool', 'user']` when a plugin requests the App-side `app` scope. |
+| `-32029` | `UPSTREAM_ERROR` | Network / 5xx from Nexus REST. Also surfaces Nexus 403s — e.g. `storage_token does not permit scope='app'; allowed=['tool', 'user']` when a plugin requests the `app` scope outside an App-context invoke (see [Scopes](#scopes)). |
 
 ## Built-in user-storage tools
 

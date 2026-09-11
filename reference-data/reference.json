@@ -811,7 +811,7 @@
       "id": "executa-cloud-storage",
       "kicker": "Executa · runtime environment · Storage lifecycle",
       "title": "Cloud Agent filesystem — what survives restarts, upgrades & reclamation",
-      "sub": "Your Executa runs on an **Anna Agent** — either the user's own machine (local agent) or a managed Cloud Agent microVM. On a Cloud Agent the filesystem has **two tiers**: the root filesystem (ephemeral — rebuilt from the image on every upgrade) and a per-user **persistent volume mounted at `/data`** (survives restarts, suspend/resume and image upgrades).\n\n**The official workspace contract is the `ANNA_WORKSPACE_DIR` environment variable**, injected into every Executa process. It points at the durable workspace root: `/data/workspace` on Cloud Agents, `~/anna-workspace` on local agents (users may reconfigure it). It is a real POSIX filesystem — directory trees, atomic write-then-rename, partial reads all work.\n\n**Never hardcode `os.homedir()` / `~` as your workspace root.** On a Cloud Agent the home directory lives on the ephemeral rootfs and is silently wiped by every image upgrade. Resolve your root as `process.env.ANNA_WORKSPACE_DIR ?? path.join(os.homedir(), \"anna-workspace\")` (same idea in any language) and create an app-scoped subdirectory under it.\n\n**Persistence is bounded, not eternal.** A Cloud Agent that stays completely idle is suspended (state fully retained), and after ~90 days of dormancy the instance **and its volume** are reclaimed. Treat the workspace as the durable *working set* — task state, intermediate artifacts, resume checkpoints — and persist *authoritative* results (finished documents, exports, anything the user must never lose) to **APS** (`storage/*` KV + `files/*` objects), which lives host-side and is fully decoupled from the agent instance lifecycle.",
+      "sub": "Your Executa runs on an **Anna Agent** — either the user's own machine (local agent) or a managed Cloud Agent microVM. On a Cloud Agent the filesystem has **two tiers**: the root filesystem (ephemeral — rebuilt from the image on every upgrade) and a per-user **persistent volume mounted at `/data`** (survives restarts, suspend/resume and image upgrades).\n\n**The official workspace contract is the `ANNA_WORKSPACE_DIR` environment variable**, injected into every Executa process. It points at the durable workspace root: `/data/workspace` on Cloud Agents, `~/anna-workspace` on local agents (users may reconfigure it). It is a real POSIX filesystem — directory trees, atomic write-then-rename, partial reads all work.\n\n**Never hardcode `os.homedir()` / `~` as your workspace root.** On a Cloud Agent the home directory lives on the ephemeral rootfs and is silently wiped by every image upgrade. Resolve your root as `process.env.ANNA_WORKSPACE_DIR ?? path.join(os.homedir(), \"anna-workspace\")` (same idea in any language) and create an app-scoped subdirectory under it.\n\n**Persistence is bounded, not eternal.** A Cloud Agent that stays completely idle is suspended (state fully retained), and after ~3 days of dormancy the instance **and its volume** are reclaimed. Treat the workspace as the durable *working set* — task state, intermediate artifacts, resume checkpoints — and persist *authoritative* results (finished documents, exports, anything the user must never lose) to **APS** (`storage/*` KV + `files/*` objects), which lives host-side and is fully decoupled from the agent instance lifecycle.",
       "groups": [
         {
           "label": "Path map",
@@ -884,10 +884,10 @@
             },
             {
               "name": "Dormancy reclamation",
-              "desc": "An instance left suspended for ~90 days is destroyed **together with its volume**. Workspace contents are unrecoverable afterwards; APS data is unaffected. Any later use of Anna resets the clock.",
+              "desc": "An instance left suspended for ~3 days is destroyed **together with its volume**. Workspace contents are unrecoverable afterwards; APS data is unaffected. Any later use of Anna resets the clock.",
               "tags": [
                 {
-                  "label": "90 days"
+                  "label": "3 days"
                 }
               ]
             }
@@ -2239,7 +2239,7 @@
           "items": [
             {
               "name": "csp_overrides",
-              "desc": "Per-directive CSP additions (object of directive → string[]).",
+              "desc": "Per-directive CSP additions (object of directive → string[]). `script-src` additionally accepts `'wasm-unsafe-eval'` to run WebAssembly packaged in the bundle (single-threaded only — no SharedArrayBuffer).",
               "tags": [
                 {
                   "label": "object"
@@ -2790,7 +2790,7 @@
         },
         {
           "name": "agent.session.run",
-          "desc": "Submit a user turn; returns SYNCHRONOUSLY with `{stream_id, run_id}`. LangGraph response frames arrive via `rpc.stream` events; the SDK's `AgentRunStream` reassembles by `seq` into an `AsyncIterable`. Terminal frame is always `{event:'end', run_id}` + `done:true`. Optional per-run fields: `attachments` (native multimodal image inputs — the session's vision model sees them directly, image/* only, ≤6, SSRF-guarded URLs or base64 `data`; non-vision model fails fast with `APP_MODEL_NOT_VISION_CAPABLE`), `allowed_tools` (narrow this run's tool surface — sandbox sessions only), `modelPreferences`, `systemPrompt`.",
+          "desc": "Submit a user turn; returns SYNCHRONOUSLY with `{stream_id, run_id}`. LangGraph response frames arrive via `rpc.stream` events; the SDK's `AgentRunStream` reassembles by `seq` into an `AsyncIterable`. Terminal frame is always `{event:'end', run_id}` + `done:true`. The `run_meta` frame and the `task_complete` delta carry `model` / `provider` — the model the server ACTUALLY routed to after `modelPreferences` resolution and any fallback (soft preference; forum #270). Optional per-run fields: `attachments` (native multimodal image inputs — the session's vision model sees them directly, image/* only, ≤6, SSRF-guarded URLs or base64 `data`; non-vision model fails fast with `APP_MODEL_NOT_VISION_CAPABLE`), `allowed_tools` (narrow this run's tool surface — sandbox sessions only), `modelPreferences`, `systemPrompt`.",
           "tags": [
             {
               "label": "streaming"

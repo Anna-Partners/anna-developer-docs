@@ -74,7 +74,7 @@ When `schema: 2`, an Anna App manifest gains a `ui` section that describes the s
 | `views` | array | yes | 1–16 entries; at most one `default: true`. See [`views[]`](#views) |
 | `form_factors` | array of string | no | Containers the app supports: `"desktop"` / `"mobile"`. Defaults to `["desktop"]` — declare `"mobile"` to appear in the Anna mobile launcher. See [Mobile Support](/developers/apps/app-mobile) |
 | `host_api` | object | no | RPC ACL. See [`host_api`](#host_api). Defaults to all empty (only the always-allowed `window` scope) |
-| `csp_overrides` | object | no | Map of CSP directive → list of values. Only the directives below are accepted; `script-src` / `style-src` accept only `'self'`, `'sha256-...'`, `'nonce-...'` |
+| `csp_overrides` | object | no | Map of CSP directive → list of values. Only the directives below are accepted; `style-src` accepts only `'self'`, `'sha256-...'`, `'nonce-...'`; `script-src` additionally accepts `'wasm-unsafe-eval'` (see [WebAssembly](#webassembly)) |
 | `state_merge` | string | no | Reserved. Default `"last_writer_wins"` |
 
 ### `bundle`
@@ -148,7 +148,7 @@ img-src
 media-src
 font-src
 style-src     ('self' | 'sha256-...' | 'nonce-...' only)
-script-src    ('self' | 'sha256-...' | 'nonce-...' only)
+script-src    ('self' | 'wasm-unsafe-eval' | 'sha256-...' | 'nonce-...' only)
 ```
 
 Anything else is rejected. The base CSP is always:
@@ -169,6 +169,23 @@ form-action 'self'
 
 `external_origins` from `ui.bundle` are automatically added to `connect-src` and `img-src` — you do **not** need to repeat them in `csp_overrides`.
 
+### WebAssembly
+
+`WebAssembly.compile` / `WebAssembly.instantiate` are gated by `script-src`, and the base CSP does not allow them. Opt in per app:
+
+```jsonc
+"csp_overrides": {
+  "script-src": ["'wasm-unsafe-eval'"]
+}
+```
+
+`'wasm-unsafe-eval'` enables **only** WebAssembly compilation — it does not enable JS `eval()` / `new Function()`.
+
+- Ship `.wasm` files inside your bundle (`application/wasm` is on the [upload whitelist](/developers/apps/app-ui-bundle)) and fetch them same-origin. `connect-src` stays `'self'` unless you extend it, so runtime loading of WASM from third-party origins is blocked by default — keep it that way.
+- **Single-threaded builds only.** App iframes are not cross-origin isolated (no COOP/COEP), so `SharedArrayBuffer` is unavailable and pthread/multi-threaded WASM builds will not run. Use single-threaded variants (e.g. the single-thread ffmpeg.wasm core).
+- CSP has no per-module hash pinning for WASM — the directive applies to all WASM compiled in the iframe.
+- Available on every plan; no review flag or extra permission is required.
+
 ### Top-level `permissions`
 
 Although the field lives at the manifest root (not under `ui`), the Anna App UI Runtime enforces it on every host RPC call: a method whose namespace is gated by a permission (e.g. `chat.write_message` requires the `chat.write_message` permission) will return `permission_denied` when not declared. Allowed values are listed in the [Manifest reference](/developers/apps/app-manifest#field-reference).
@@ -188,7 +205,8 @@ Both raise `ManifestValidationError` with a Chinese-language reason string. Comm
 - `view '<name>' default_size 小于 min_size`
 - `host_api.tools 引用未在 manifest 中声明的 tool_id: <ref>`
 - `csp_overrides 含不允许的 directive: [...]`
-- `csp_overrides[script-src] 仅允许 'self' / 'sha256-...' / 'nonce-...'`
+- `csp_overrides[script-src] 仅允许 'self' / 'wasm-unsafe-eval' / 'sha256-...' / 'nonce-...'`
+- `csp_overrides[style-src] 仅允许 'self' / 'sha256-...' / 'nonce-...'`
 - `ui.bundle.entry '<path>' 未在上传的 file_map 中` *(at finalize)*
 
 Next: [App UI Bundle Pipeline](/developers/apps/app-ui-bundle).

@@ -9,7 +9,7 @@ estimated_minutes: 4
 category: "App UI"
 ---
 
-When the user `#`mentions a `schema: 2` app whose manifest contains `ui.views`, three LangChain tools are auto-injected into the assistant's tool list for that turn:
+When the user `#`mentions a `schema ≥ 2` app whose manifest contains `ui.views`, three LangChain tools are auto-injected into the assistant's tool list for that turn:
 
 | Tool | Purpose |
 |---|---|

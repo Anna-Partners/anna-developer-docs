@@ -12,7 +12,7 @@ category: "Distribution & Lifecycle"
 An Anna App's *Executa* bundling is **not a file package**. "Bundling" Executas means listing their `tool_id`s inside the version's manifest JSON — there is no zip or tarball for that part.
 
 > [!NOTE]
-> *UI* assets are different. Schema-2 apps additionally upload a static SPA (HTML/JS/CSS/wasm) via the bundle pipeline. That is a real file bundle and is documented in [App UI Bundle Pipeline](/developers/apps/app-ui-bundle).
+> *UI* assets are different. Schema ≥ 2 apps additionally upload a static SPA (HTML/JS/CSS/wasm) via the bundle pipeline. That is a real file bundle and is documented in [App UI Bundle Pipeline](/developers/apps/app-ui-bundle).
 
 If you haven't already, read [App Manifest](/developers/apps/app-manifest) first — this page only covers the `required_executas` / `optional_executas` arrays.
 

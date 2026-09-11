@@ -4,7 +4,7 @@ description: "RPC namespaces and methods your iframe can call on the host, with 
 section: apps
 slug: app-ui-host-api
 order: 14
-updated: 2026-04-28
+updated: 2026-09-11
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -12,8 +12,8 @@ category: "App UI"
 Every call from your iframe goes through `postMessage → Host Bridge → POST /api/v1/anna-apps/runtime/rpc → anna_app_rpc_dispatcher.dispatch`. The dispatcher does three things in order:
 
 1. **Auth.** `decode_window_token(t)` against the JWT bound to `(window_uuid, user_id, app_id, version_id, scopes)` (TTL 120s, audience `anna-app-window`).
-2. **ACL.** `host_api_allows(manifest, ns, method)` checks `manifest.ui.host_api[ns]` (with `*` and `<id>` wildcards). `window.*` is always allowed.
-3. **Permissions.** Top-level `permissions` are checked for write/append actions (e.g. `chat.write_message` requires `chat.write_message`).
+2. **ACL.** `host_api_allows(manifest, ns, method)` checks `manifest.ui.host_api[ns]` (with `*` and `<id>` wildcards). `window.*` is always allowed. Top-level `permissions` is **never** consulted (display-only legacy; rejected at `schema: 3`).
+3. **Per-app grants.** Some namespaces are additionally gated by a user-controlled grant enforced inside the handler/facade: `image_grant`, `upload_grant`, `web_grant`, `credentials_grant`, and the install-time `storage_token` scopes for `storage`/`files`.
 
 Then it dispatches to the namespace handler. Any failure returns `{ ok: false, error: { code, message, details? } }`.
 
@@ -70,7 +70,7 @@ Status legend:
 | method | status | args | result |
 |---|---|---|---|
 | `list` | ✅ | `{}` | `{ tools: [{ tool_id, plugin_name, tool_name, description, input_schema }] }` filtered to your `host_api.tools` allow-list |
-| `invoke` | ✅ | `{ tool_id, method?, args, timeoutMs? }` | `{ result }` — routes via NATS to the user's online Anna Agent; **≤ 90 s** |
+| `invoke` | ✅ | `{ tool_id, method?, args, timeoutMs? }` | `{ result }` — routes via NATS to the user's online Anna Agent; `timeoutMs` clamped to **1–180 s** (default 65 s) |
 | `invokeAsync` | ✅ | `{ tool_id, method?, args?, timeoutMs?, clientTag? }` | `{ jobId, state: "queued", deadlineMs }` — returns immediately; see [Async tool jobs](#async-tool-jobs-invokeasync) |
 | `getJob` | ✅ | `{ jobId, sinceSeq?, limit? }` | `JobSnapshot` — authoritative state + incremental progress slice |
 | `cancelJob` | ✅ | `{ jobId, reason? }` | `{ jobId, state, cancelled }` — idempotent |
@@ -251,7 +251,9 @@ In the local-dev harness (`anna-app dev`) these handlers operate on the
 window's 256 KB `runtime_state` blob. In production they are
 overridden at startup to talk to **Anna Persistent Storage (APS)** —
 `scope='app'`, `owner_id=window.app_id` — so values are durable across
-window lifetimes.
+window lifetimes. ACL: `manifest.ui.host_api.storage` must list the called
+method — `storage.get` / `storage.set` / `storage.delete` / `storage.list`
+map to `["get", "set", "delete", "list"]` (or `*`).
 
 | method | status | args | result |
 |---|---|---|---|
@@ -283,6 +285,7 @@ not a flat method list — a session is granted when at least one submode
 | `session.list` | ✅ | `{ include_expired? }` | `{ sessions: […] }` |
 | `session.delete` | ✅ | `{}` | `{ deleted: true }` |
 | `session.refresh` | ✅ | `{}` | `{ … }` — re-mints the session token before expiry |
+| `session.catalog` | ✅ | `{}` | `{ … }` — the tool/model surface available to sessions of this window |
 
 ### `image`
 
@@ -306,38 +309,24 @@ Invoke-scoped, transient artifact upload to host R2. Gated by
 | `negotiate` | ✅ | `{ mime, purpose, size_bytes }` | `{ upload_url, file_ref }` |
 | `confirm` | ✅ | `{ file_ref }` | `{ url, … }` |
 
-### `artifact`, `llm`, `fs`, `prefs`
+### `artifact`, `fs`, `prefs`
 
-All declared in the dispatcher but stubbed today (`not_implemented`). Plan for Phase 3:
+Declared in the dispatcher but stubbed today (`not_implemented`). Plan for Phase 3:
 
 - `artifact.create` / `update` / `delete`
-- `llm.complete` (host-side completion bound to the user's quota)
 - `fs.read` / `fs.write` (R2-backed workspace, mirrors the Anna Agent FS)
 - `prefs.get` (read user preference keys)
 
-## Permissions matrix
+`llm.complete` / `llm.stream` / `llm.embed` are **implemented** (host-side calls bound to the user's quota) — see [LLM & Agent](/developers/apps/llm-and-agent). `files.*` (APS object storage), `web.*` (host-managed search/fetch), `apps.*` (launcher) and `credentials.*` (platform accounts) are implemented nexus-side; `mobile.*` executes only inside the anna-mobile shell. See the namespace table in [App UI Manifest](/developers/apps/app-ui-manifest#host_api) for their method lists.
 
-`permissions` (top-level on the manifest) acts as a coarse capability gate; `ui.host_api` is the fine-grained ACL. Both are checked.
+## ACL & per-app grants
 
-| Permission | Required for |
-|---|---|
-| `tools.invoke` | `tools.invoke` |
-| `chat.read` | `chat.read_history` |
-| `chat.write_message` | `chat.write_message` |
-| `chat.append_artifact` | `chat.append_artifact` |
-| `artifact.create` / `update` / `delete` | matching `artifact.*` calls |
-| `llm.complete` | `llm.complete` |
-| `fs.read` / `fs.write` | matching `fs.*` calls |
-| `storage.read` | `storage.get`, `storage.list` |
-| `storage.write` | `storage.set`, `storage.delete` |
-| `prefs.read` | `prefs.get` |
-| `ui.svg` | rendering inline SVG inside chat artifacts your app appends |
+What actually gates a call, in order:
 
-`agent.session.*`, `image.*`, and `upload.*` are gated by their
-`ui.host_api.{agent,image,upload}` entries (the method-level surface) **plus**
-the per-app grant enforced inside the facade (`image_grant` / `upload_grant`,
-and for agent the user's session quota) — not by a coarse top-level
-`permissions` verb.
+1. **`ui.host_api.<ns>`** must list the method name (or `*`); `window.*` is always allowed; `agent` uses an object spec (`session.auto` / `session.fixed`).
+2. **Per-app user grants** for some namespaces, enforced inside the facade: `image_grant` (`image.*`), `upload_grant` (`upload.*`), `web_grant` (`web.*`), `credentials_grant` (`credentials.*`), and the install-time `storage_token` `allowed_scopes` claim for non-default `storage`/`files` scopes.
+
+The top-level manifest `permissions` list is **not** part of this chain — it has zero enforcement sites, is display-only on `schema ≤ 2`, and is rejected at `schema: 3` (permission display is derived from `ui.host_api` + the storage declaration instead).
 
 Anything not declared is rejected with `permission_denied` before reaching the handler.
 
@@ -346,7 +335,7 @@ Anything not declared is rejected with `permission_denied` before reaching the h
 | Code | When |
 |---|---|
 | `invalid_token` | JWT expired, signature mismatch, or `wid` does not match `window_uuid` |
-| `permission_denied` | `(ns, method)` not in `host_api`, missing top-level permission, or `tool_id` not in `host_api.tools` allow-list |
+| `permission_denied` | `(ns, method)` not in `host_api`, per-app grant disabled, or `tool_id` not in `host_api.tools` allow-list |
 | `invalid_arg` | Pydantic validation failure on `args` |
 | `not_found` | window closed; storage key missing |
 | `agent_unavailable` | `tools.invoke` could not route to the user's Anna Agent (no NATS listener) |

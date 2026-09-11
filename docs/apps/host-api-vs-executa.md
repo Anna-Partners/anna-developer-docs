@@ -4,7 +4,7 @@ description: "Anna apps can reach for the platform's host API or for a custom Ex
 section: apps
 slug: host-api-vs-executa
 order: 24
-updated: 2026-09-10
+updated: 2026-09-11
 estimated_minutes: 8
 ---
 
@@ -27,7 +27,7 @@ At first glance the **Host API** (`anna.llm`, `anna.agent`, `anna.storage`, `ann
 | **State** | Stateless — every call independent | Can hold long-lived state (a warm model client, a DB connection pool, an open file handle) |
 | **Reach** | Whatever the platform has abstracted | Local filesystem, GPU, private SDKs, third-party systems |
 | **Versioning** | Evolves with the dispatcher (schema pinned at `dispatcher_version=0.10.0`, tracking the `anna-app-schema` version) | Developer bumps it independently |
-| **Permission model** | User grants per-namespace via `manifest.permissions` | Once installed, the executa is trusted wholesale |
+| **Permission model** | Method-level ACL via `manifest.ui.host_api` + per-app user grants (`image_grant` / `upload_grant` / `web_grant` / …); legacy `manifest.permissions` is display-only and removed at `schema: 3` | Once installed, the executa is trusted wholesale |
 | **Platform reach** | Web, Desktop, Mobile — all the same wire contract | Only where an Anna runtime is installed |
 
 ## The key clarification: Executa is not a substitute for the host API — it is an extension point for it

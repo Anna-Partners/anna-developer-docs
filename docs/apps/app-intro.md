@@ -13,7 +13,7 @@ An **Anna App** is the highest-level packaging unit in the Anna App Store. It bu
 - A curated set of **Executas** (Anna's tool/skill plugins) the app depends on.
 - Prompt instructions (`system_prompt_addendum`, `user_message_prefix_template`) that steer the assistant when the user `#`mentions the app in a chat.
 - **Listing metadata** (name, slug, category, tagline, description, logo, screenshots, homepage, pricing model) that powers the App Store entry.
-- *(Optional, manifest `schema: 2`)* an **App UI bundle** — a static SPA (HTML/JS/CSS/wasm/fonts) that is uploaded to Anna and rendered inside a sandboxed `<iframe>` window on the dashboard. See [App UI Overview](/developers/apps/app-ui-overview).
+- *(Optional, manifest `schema ≥ 2`)* an **App UI bundle** — a static SPA (HTML/JS/CSS/wasm/fonts) that is uploaded to Anna and rendered inside a sandboxed `<iframe>` window on the dashboard. See [App UI Overview](/developers/apps/app-ui-overview).
 
 When a user installs an app from the **Anna App Store**, every `required_executas` entry that the user does not yet have is auto-installed for them. From that point on, the user can `#`mention the app in any conversation to apply its bundled tools and prompt directives for that turn. If the app ships a UI, the assistant can also summon the app window via the built-in `open_app_view` tool.
 
@@ -242,7 +242,7 @@ Most of an Anna App is filled in via the [Developer Console](/developer); there 
 | Where | What you provide |
 |---|---|
 | **Listing tab** | `slug`, `name`, `category`, `tagline`, `description`, `logo` (uploaded; cropped to 256×256 WebP), optional `screenshots[]` (URLs), `homepage_url`, `support_url`, `privacy_url`, `cover_url` |
-| **Versions tab** | A SemVer `version` string, a `changelog`, and a JSON **manifest** that declares `required_executas`, optional Executas, prompt directives, and (for `schema: 2`) the `ui` section |
+| **Versions tab** | A SemVer `version` string, a `changelog`, and a JSON **manifest** that declares `required_executas`, optional Executas, prompt directives, and (for `schema ≥ 2`) the `ui` section |
 | **Versions tab → Bundle** *(UI apps only)* | A static SPA bundle (HTML/JS/CSS/...) uploaded with `bundle/init` → per-file PUT → `bundle/finalize`. See [App UI Bundle Pipeline](/developers/apps/app-ui-bundle) |
 | **Versions tab → Submit for review** | Sends the newest cut version to admin review (pinned as the *review candidate*); re-submitting switches the candidate to a newer cut |
 | **Settings tab** | Archive the app |

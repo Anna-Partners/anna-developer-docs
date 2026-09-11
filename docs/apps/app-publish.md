@@ -39,7 +39,7 @@ Defined in `AnnaAppStatus`:
 - [ ] Listing fields filled in ([Listing Fields](/developers/apps/app-listing)).
 - [ ] At least one version exists ([App Manifest](/developers/apps/app-manifest)).
 - [ ] **Validate** in the Versions tab returns `valid: true`.
-- [ ] *(UI apps, `schema: 2`)* The version's UI bundle has been uploaded and `bundle/finalize` returned `status: bundle_ready`. The platform refuses to open windows for any version whose bundle is still `draft`. See [App UI Bundle Pipeline](/developers/apps/app-ui-bundle).
+- [ ] *(UI apps, `schema ≥ 2`)* The version's UI bundle has been uploaded and `bundle/finalize` returned `status: bundle_ready`. The platform refuses to open windows for any version whose bundle is still `draft`. See [App UI Bundle Pipeline](/developers/apps/app-ui-bundle).
 - [ ] You have installed and used the app yourself end-to-end.
 
 ## 2. Submit for review
@@ -52,7 +52,7 @@ Backend rules:
 
 - The app must currently be `DRAFT`, `REJECTED`, or `PENDING_REVIEW` (re-submit; see below).
 - The app must have at least one cut version (otherwise: `"提交审核前需至少创建一个版本"`).
-- A release precheck runs at submission (manifest validation, executa-binding freeze dry-run, UI bundle readiness for `schema: 2`). Failures come back to you as a `400` at submit time instead of surfacing to the admin at approval time.
+- A release precheck runs at submission (manifest validation, executa-binding freeze dry-run, UI bundle readiness for `schema ≥ 2`). Failures come back to you as a `400` at submit time instead of surfacing to the admin at approval time.
 - On success the status flips to `PENDING_REVIEW` and the candidate is pinned.
 
 **Switching the candidate**: if you cut a new version while `PENDING_REVIEW`, run submit-review again — the Console button becomes *Switch review candidate to v⟨new⟩*. This explicitly re-pins the review to the newest cut and re-runs the precheck. Re-submitting with an unchanged candidate is an idempotent no-op; if the precheck fails, the previous candidate stays under review.

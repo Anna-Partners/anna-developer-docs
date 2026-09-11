@@ -9,7 +9,7 @@ estimated_minutes: 5
 category: "App UI"
 ---
 
-A `schema: 1` Anna App is just "a manifest + a set of Executas". When you bump the manifest to `schema: 2` and add a `ui` section, the app graduates to a **Talk-to-the-App, Run-in-a-Window** form factor: Anna can summon a sandboxed `<iframe>` window on the dashboard, the user can drag/resize/minimize it, and your iframe code can call back into the host through a typed RPC bridge.
+A `schema: 1` Anna App is just "a manifest + a set of Executas". When you bump the manifest to `schema ≥ 2` and add a `ui` section, the app graduates to a **Talk-to-the-App, Run-in-a-Window** form factor: Anna can summon a sandboxed `<iframe>` window on the dashboard, the user can drag/resize/minimize it, and your iframe code can call back into the host through a typed RPC bridge.
 
 This page is the framework-level orientation. Every concrete file/contract is linked to its detail page.
 
@@ -18,7 +18,7 @@ This page is the framework-level orientation. Every concrete file/contract is li
 | Thing | Where it lives |
 |---|---|
 | `AnnaApp` row (listing, status, developer) | DB `anna_apps` |
-| `AnnaAppVersion` row + manifest JSON (`schema: 2`, contains `ui`) | DB `anna_app_versions.manifest` |
+| `AnnaAppVersion` row + manifest JSON (`schema ≥ 2`, contains `ui`) | DB `anna_app_versions.manifest` |
 | `AnnaAppUiBundle` + `AnnaAppUiFile[]` rows | DB; assets in R2 (`anna-app-bundles/<env>/<slug>/<version>/...`) |
 | Static assets (your SPA: `index.html`, JS, CSS, wasm, fonts) | Uploaded by you via `bundle/init` → per-file PUT → `bundle/finalize` |
 | `AnnaAppWindowSession` rows (one per opened window) | DB `anna_app_window_sessions` (created at runtime) |
@@ -126,6 +126,6 @@ Build it in this order:
 1. [App UI Manifest](/developers/apps/app-ui-manifest) — declare `ui.bundle`, `ui.views`, `ui.host_api`.
 2. [App UI Bundle Pipeline](/developers/apps/app-ui-bundle) — upload your static SPA via `bundle/init` → file PUT → `bundle/finalize`.
 3. [App UI SDK](/developers/apps/app-ui-sdk) — wire `AnnaAppRuntime.connect()` inside your `index.html`.
-4. [App UI Host API](/developers/apps/app-ui-host-api) — full RPC namespace reference + permissions matrix.
+4. [App UI Host API](/developers/apps/app-ui-host-api) — full RPC namespace reference + ACL & per-app grants.
 5. [App UI Windows](/developers/apps/app-ui-windows) — window lifecycle, persistence, multi-device sync, dock, sizing.
 6. [App UI LLM Integration](/developers/apps/app-ui-llm) — `open_app_view` / `update_app_view` / `close_app_view`, SSE events, chat ↔ window patterns.

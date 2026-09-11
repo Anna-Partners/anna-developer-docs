@@ -1,6 +1,6 @@
 ---
 title: "App UI Bundle Pipeline"
-description: "Upload your static SPA bundle for a schema-2 Anna App version: init, file PUTs, finalize."
+description: "Upload your static SPA bundle for a schema ≥ 2 Anna App version: init, file PUTs, finalize."
 section: apps
 slug: app-ui-bundle
 order: 11
@@ -9,7 +9,7 @@ estimated_minutes: 5
 category: "App UI"
 ---
 
-A `schema: 2` Anna App version is bound 1:1 to an immutable **bundle** — the static assets your iframe loads. This page covers the upload pipeline. The bundle is stored in R2 under `anna-app-bundles/<env>/<slug>/<version>/<relative_path>` and served at `GET /anna-apps/{slug}/{version}/{path}` with per-bundle CSP and `Cache-Control: public, max-age=31536000, immutable`.
+A `schema ≥ 2` Anna App version is bound 1:1 to an immutable **bundle** — the static assets your iframe loads. This page covers the upload pipeline. The bundle is stored in R2 under `anna-app-bundles/<env>/<slug>/<version>/<relative_path>` and served at `GET /anna-apps/{slug}/{version}/{path}` with per-bundle CSP and `Cache-Control: public, max-age=31536000, immutable`.
 
 ## Quotas
 

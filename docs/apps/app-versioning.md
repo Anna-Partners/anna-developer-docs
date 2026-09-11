@@ -9,7 +9,7 @@ estimated_minutes: 4
 category: "Distribution & Lifecycle"
 ---
 
-Each Anna App version is an immutable `AnnaAppVersion` row consisting of a SemVer string, a free-form `changelog`, and the manifest JSON. For `schema: 2` apps the version is also bound 1:1 to an immutable `AnnaAppUiBundle` (the uploaded static SPA) — a bundle that has been finalized cannot be edited; you must create a new version. To change anything bundled or any prompt directive, create a new version with a strictly greater SemVer and publish it.
+Each Anna App version is an immutable `AnnaAppVersion` row consisting of a SemVer string, a free-form `changelog`, and the manifest JSON. For `schema ≥ 2` apps the version is also bound 1:1 to an immutable `AnnaAppUiBundle` (the uploaded static SPA) — a bundle that has been finalized cannot be edited; you must create a new version. To change anything bundled or any prompt directive, create a new version with a strictly greater SemVer and publish it.
 
 ## SemVer rules
 

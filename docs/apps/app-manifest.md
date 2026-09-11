@@ -4,7 +4,7 @@ description: "The manifest JSON that declares which Executas an app bundles and 
 section: apps
 slug: app-manifest
 order: 4
-updated: 2026-09-10
+updated: 2026-09-11
 estimated_minutes: 6
 ---
 
@@ -61,7 +61,7 @@ The manifest is parsed by the `AppManifest` Pydantic model with `extra="forbid"`
 | `system_prompt_addendum` | string | no | Max 4000 characters. Appended to the assistant's system prompt when the user `#`mentions the app |
 | `user_message_prefix_template` | string | no | Max 500 characters. Must contain **exactly one** `{user_message}` placeholder. See [Runtime behaviour](#runtime-behaviour) for current limitations |
 | `tags` | array of string | no | Free-form tags. Stored but not surfaced in the App Store today |
-| `ui` | object | no (yes when `schema: 2`) | UI bundle + views + host API ACL. Full reference: [App UI Manifest](/developers/apps/app-ui-manifest) |
+| `ui` | object | no (required in practice when `schema ≥ 2` — mandatory for bundle-only apps with no `required_executas`) | UI bundle + views + host API ACL. Full reference: [App UI Manifest](/developers/apps/app-ui-manifest) |
 | `dev` | object | no | **Local-harness-only.** Consumed by `anna-app dev`; production dispatcher ignores it at runtime, and `anna-app publish` strips it before upload. See [`dev` block](#dev-block-local-harness-only) |
 
 Allowed `permissions` values (`_ALLOWED_PERMISSIONS`, `schema ≤ 2` only — the whole field is display-only and removed at `schema: 3`):
@@ -179,19 +179,20 @@ Validation runs in two places:
 Checks performed (`anna_app_validator.validate_manifest`):
 
 1. **Structure** — Pydantic `AppManifest` parsing (`extra="forbid"`, types, length limits).
-2. **`schema`** must be `1` or `2`.
-3. **`required_executas` non-empty** — **required for `schema: 1`** (chat-augmentation apps need at least one tool, otherwise the app is a runtime no-op). **Optional for `schema: 2`**: Bundle-only UI apps that rely solely on `ui.host_api` (e.g. `image.*`, `storage.*`, `llm.*`) may leave both `required_executas` and `optional_executas` empty.
+2. **`schema`** must be `1`, `2` or `3`.
+3. **`required_executas` non-empty** — **required for `schema: 1`** (chat-augmentation apps need at least one tool, otherwise the app is a runtime no-op). **Optional for `schema ≥ 2`**: Bundle-only UI apps that rely solely on `ui.host_api` (e.g. `image.*`, `storage.*`, `llm.*`) may leave both `required_executas` and `optional_executas` empty.
 4. **Placeholder rule** — if `user_message_prefix_template` is set, it must contain exactly one `{user_message}` substring. Zero or two+ occurrences fail.
 5. **Executa existence + visibility** — every `tool_id` must resolve to a non-archived `executas` row whose `visibility` is `app_bundled` or `public`.
 6. **Uniqueness** — no `tool_id` may appear twice across `required_executas + optional_executas`.
-7. **Permissions allow-list** — unknown `permissions` entries are rejected.
-8. **UI section** — when `schema: 2`, the `ui` section is statically validated (`validate_ui_section_static`). Bundle entry path existence is re-checked at `bundle/finalize`. See [App UI Manifest](/developers/apps/app-ui-manifest) for the full rules.
+7. **Permissions allow-list** — on `schema ≤ 2`, unknown `permissions` entries are rejected. On `schema: 3` any non-empty `permissions` is rejected (the field is removed — display is derived from `ui.host_api` + the storage declaration).
+8. **UI section** — when `schema ≥ 2`, the `ui` section is statically validated (`validate_ui_section_static`). Bundle entry path existence is re-checked at `bundle/finalize`. See [App UI Manifest](/developers/apps/app-ui-manifest) for the full rules.
+9. **Storage declaration** (`schema: 3`) — `manifest.storage` is mutually exclusive with `aps.*` strings in `host_capabilities`, and a bundled Executa's own storage declaration must normalize to exactly the app's (single-source rule). See [storage (schema 3)](#storage-schema-3).
 
 Common rejection reasons:
 
 - Missing or wrong-typed required field.
 - An unknown field (manifest uses `extra="forbid"`).
-- `required_executas` empty **on a `schema: 1` app** (allowed on `schema: 2` Bundle-only apps).
+- `required_executas` empty **on a `schema: 1` app** (allowed on `schema ≥ 2` Bundle-only apps).
 - `tool_id` not found in the Executa catalogue.
 - `user_message_prefix_template` missing `{user_message}` or containing it more than once.
 
@@ -210,9 +211,9 @@ The manifest only takes effect when the user explicitly `#`mentions the app in a
 | `optional_executas` | On `#`mention, tool documentation is injected. **Not** auto-installed |
 | `system_prompt_addendum` | Wrapped in `<app><system_prompt_addendum>...</system_prompt_addendum></app>` and appended to the system prompt. Treated as authoritative for that turn |
 | `user_message_prefix_template` | **Partial.** The template is surfaced to the model as a `<user_message_prefix_template>` block in the system prompt, so the assistant is aware of it. The placeholder is **not** yet substituted into the user's actual message — treat it as a hint, not a hard rewrite |
-| `permissions` | Validated against the allow-list at submission. For `schema: 2` UI apps, the Anna App UI Runtime enforces these scopes on every host RPC call (see [Host API](/developers/apps/app-ui-host-api)). For non-UI apps, no further runtime gating is applied today |
+| `permissions` | **Never enforced at runtime** — display-only legacy metadata on `schema ≤ 2` (iframe gating is `ui.host_api`; see [Host API](/developers/apps/app-ui-host-api)). Rejected at `schema: 3` |
 | `tags` | Stored only |
-| `schema` | `1` = no UI; `2` = UI runtime enabled. When `2`, the `<ui_views>` block is appended to the per-app prompt and the LLM gets the `open_app_view` / `update_app_view` / `close_app_view` tools |
+| `schema` | `1` = no UI; `≥ 2` = UI runtime enabled; `3` additionally enables `storage` and removes `permissions`. When `≥ 2`, the `<ui_views>` block is appended to the per-app prompt and the LLM gets the `open_app_view` / `update_app_view` / `close_app_view` tools |
 | `ui` | See [App UI Overview](/developers/apps/app-ui-overview) and [App UI Manifest](/developers/apps/app-ui-manifest) |
 
 If multiple apps are mentioned in the same turn, all `system_prompt_addendum` blocks are concatenated in mention order; `user_message_prefix_template` is taken from the first non-empty mentioned app (mention order).

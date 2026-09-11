@@ -1,26 +1,21 @@
 ---
 title: "App UI Manifest"
-description: "The `ui` section of a schema-2 manifest: bundle, views, host_api, csp_overrides."
+description: "The `ui` section of a schema ≥ 2 manifest: bundle, views, host_api, csp_overrides."
 section: apps
 slug: app-ui-manifest
 order: 10
-updated: 2026-08-26
+updated: 2026-09-11
 estimated_minutes: 6
 category: "App UI"
 ---
 
-When `schema: 2`, an Anna App manifest gains a `ui` section that describes the static bundle, the named views the LLM can summon, the host API scopes the iframe is allowed to call, and any per-bundle CSP overrides. Everything else from [App Manifest](/developers/apps/app-manifest) still applies.
+When `schema` ≥ 2 (current maximum: 3), an Anna App manifest gains a `ui` section that describes the static bundle, the named views the LLM can summon, the host API scopes the iframe is allowed to call, and any per-bundle CSP overrides. Everything else from [App Manifest](/developers/apps/app-manifest) still applies — including the schema-3 changes (structured [`storage`](/developers/apps/app-manifest#storage-schema-3) entry, top-level `permissions` removed).
 
 ## Example
 
 ```jsonc
 {
-  "schema": 2,
-  "permissions": [
-    "tools.invoke",
-    "chat.append_artifact",
-    "storage.read", "storage.write"
-  ],
+  "schema": 3,
   "required_executas": [
     { "tool_id": "tool-yourhandle-browser-abcd1234" }
   ],
@@ -123,17 +118,25 @@ Sizes are integers in CSS pixels, `120 ≤ w,h ≤ 4096`. The validator rejects 
 
 ### `host_api`
 
-The ACL that gates host RPC calls from your iframe. Each namespace key is a list of methods the iframe is allowed to invoke. `window.*` is always granted; everything else requires explicit listing.
+The ACL that gates host RPC calls from your iframe. Each namespace key is a list of **method names** the iframe is allowed to invoke (`agent` is the one exception — an object spec). `window.*` is always granted; everything else requires explicit listing. This ACL is the **only** manifest-level gate — the legacy top-level `permissions` list is never consulted (see below). Some namespaces are additionally gated by a per-app, user-controlled grant enforced host-side (noted per row).
 
 | Namespace | Allowed values | What it grants |
 |---|---|---|
-| `tools` | `required:*` &#124; `optional:*` &#124; `required:<tool_id>` &#124; `optional:<tool_id>` &#124; `<tool_id>` | Calls to [`tools.invoke`](/developers/apps/app-ui-host-api#tools) on the listed Executas. Bare `<tool_id>`s must appear in `required_executas` or `optional_executas` |
-| `chat` | `read`, `write_message`, `append_artifact` | Read history, post messages, attach artifact cards |
-| `artifact` | `create`, `update`, `delete` | Manipulate chat artifacts |
-| `llm` | `complete` | Trigger a host-side LLM completion |
-| `fs` | `read`, `write` | R2 / Anna Agent filesystem access |
-| `storage` | `read`, `write` | Per-window `runtime_state` (≤256 KB) |
-| `prefs` | `read` | Read user preferences |
+| `tools` | `required:*` &#124; `optional:*` &#124; `required:<tool_id>` &#124; `optional:<tool_id>` &#124; `<tool_id>` | Calls to [`tools.invoke`](/developers/apps/app-ui-host-api#tools) on the listed Executas. Bare `<tool_id>`s must appear in `required_executas` or `optional_executas`. **Optional narrowing**: empty/omitted ⇒ every declared executa is callable |
+| `chat` | `append_artifact`, `write_message` ⏳, `read_history` ⏳ | Attach artifact cards; post messages / read history (stubs today) |
+| `artifact` | `create`, `update`, `delete` | Manipulate chat artifacts *(stub, Phase 3)* |
+| `llm` | `complete`, `stream`, `embed` | Host-side LLM calls bound to the user's quota — see [LLM & Agent](/developers/apps/llm-and-agent) |
+| `agent` | object, not a list: `{ "session": { "auto": true, "fixed": false }, "tools": […] }` | Multi-turn agent sessions (`agent.session.*`); at least one submode must be `true`. `tools` optionally narrows the session's tool surface |
+| `fs` | `read`, `write` | Anna Agent filesystem access *(stub, Phase 3)* |
+| `storage` | `get`, `set`, `delete`, `list` | Per-window `runtime_state` (≤256 KB); with a schema-3 [`storage`](/developers/apps/app-manifest#storage-schema-3) declaration the same methods are APS-backed (`anna.storage.*`) |
+| `files` | `upload_init`, `upload_finalize`, `download_url`, `download`, `list`, `delete` | APS object/file storage (`anna.files.*`); per-call scope is gated by the install-time `storage_token`, not by this list |
+| `prefs` | `get` | Read user preferences *(stub)* |
+| `image` | `generate`, `edit` | Host-mediated image generation/editing — also gated by the per-app `image_grant` |
+| `upload` | `inline`, `negotiate`, `confirm` | User-artifact uploads to host storage — also gated by the per-app `upload_grant` |
+| `web` | `search`, `fetch`, `image_search`, `image_fetch` | Host-managed web search/fetch (provider keys, SSRF guard, billing stay host-side) — also gated by the per-app `web_grant` |
+| `apps` | `list`, `search`, `get`, `launch`, `deck.list`, `deck.add`, `deck.remove`, `deck.reorder` | Apps launcher: browse/launch the user's installed apps, curate the "我的 Apps" deck |
+| `credentials` | **provider ids** (e.g. `google`), not method names | `credentials.list_accounts` / `credentials.get_token` for the listed providers — also gated by the per-app `credentials_grant` |
+| `mobile` | `share`, `haptics`, `camera_capture` | Native bridge — only executable inside the anna-mobile shell; desktop containers answer `unsupported_container` |
 | `window` | (always granted) | Geometry, title, focus, open/close — listing values here is harmless |
 
 Full method-level reference: [App UI Host API](/developers/apps/app-ui-host-api).
@@ -186,9 +189,9 @@ form-action 'self'
 - CSP has no per-module hash pinning for WASM — the directive applies to all WASM compiled in the iframe.
 - Available on every plan; no review flag or extra permission is required.
 
-### Top-level `permissions`
+### Top-level `permissions` (legacy, `schema ≤ 2` only)
 
-Although the field lives at the manifest root (not under `ui`), the Anna App UI Runtime enforces it on every host RPC call: a method whose namespace is gated by a permission (e.g. `chat.write_message` requires the `chat.write_message` permission) will return `permission_denied` when not declared. Allowed values are listed in the [Manifest reference](/developers/apps/app-manifest#field-reference).
+The root-level `permissions` list is **display-only legacy metadata with zero enforcement sites** — the dispatcher gates every host RPC on `ui.host_api` (plus the per-app grants noted above) and never reads `permissions`. At `schema: 3` the field is **rejected outright** (`permissions: removed in schema 3 — permission display is derived from ui.host_api + storage/host_capabilities`); the Store/review permission display is derived from the enforced declarations instead. On `schema ≤ 2` apps it is accepted (allow-list validated) but ignored at runtime — see the [Manifest reference](/developers/apps/app-manifest#field-reference).
 
 ## Validation
 

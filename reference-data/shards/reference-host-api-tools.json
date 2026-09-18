@@ -111,7 +111,7 @@
       ],
       "returns": {
         "type": "object",
-        "desc": "The plugin's `invoke` payload, with both envelope layers stripped.\n\nThe raw NATS reply is `{success: bool, data: {success: bool, tool, data: <payload>, error?}}` (see *executa-invoke-result-shape*). The host:\n1. On a failed **outer** envelope, first classifies plugin JSON-RPC errors (structured `data.jsonrpc_error.code` from Agent ≥ 1.1.0-beta.33, else the `\"invoke error: {'code': ...\"` string): `-32602` → `invalid_arg`, `-32601`/`-32603`/`-32000..-32099` → `tool_failed` (both carry `details.jsonrpc_code` + `source: \"plugin\"`); anything else → `executa_unavailable`.\n2. Rejects with `tool_failed` if the **inner** envelope is missing or `success != true`.\n3. Returns `invoke.data` if it's an object, else `{}`.\n\nMost plugins return a domain payload (e.g. `{state, etag}`); callers should treat unknown keys as additive."
+        "desc": "The plugin's `invoke` payload, with both envelope layers stripped.\n\nThe raw NATS reply is `{success: bool, data: {success: bool, tool, data: <payload>, error?}}` (see *executa-invoke-result-shape*). The host:\n1. On a failed **outer** envelope, first intercepts the Agent's `RESULT_TOO_LARGE` envelope → `result_too_large`, then classifies plugin JSON-RPC errors (structured `data.jsonrpc_error.code` from Agent ≥ 1.1.0-beta.33, else the `\"invoke error: {'code': ...\"` string): `-32602` → `invalid_arg`, `-32601`/`-32603`/`-32000..-32099` → `tool_failed` (both carry `details.jsonrpc_code` + `source: \"plugin\"`); anything else → `executa_unavailable`.\n2. Rejects with `tool_failed` if the **inner** envelope is missing or `success != true`.\n3. Returns `invoke.data` if it's an object, else `{}`.\n\n**Integrity guarantee.** The payload arrives **verbatim** — the platform never truncates or rewrites string fields inside a successful result (an earlier 32 000-char LLM-context clamp that corrupted HTML/base64 data while still reporting success was removed — forum #320). A result that cannot be transported fails explicitly with `result_too_large` instead.\n\nMost plugins return a domain payload (e.g. `{state, etag}`); callers should treat unknown keys as additive."
       },
       "errors": [
         {
@@ -145,6 +145,11 @@
           "desc": "Plugin executed but reported failure — via `success: false` envelope (or a non-dict), OR via raise → JSON-RPC `-32601`/`-32603`/`-32000..-32099` (then `details` carries `{jsonrpc_code, source: \"plugin\"}`). The plugin's error string is surfaced verbatim in `message`."
         },
         {
+          "name": "result_too_large",
+          "code": "result_too_large",
+          "desc": "The full serialized invoke result exceeded the NATS transport limit (`max_payload`, **4 MiB** in production). The result is discarded — never truncated — and `details` carries `{size, max, retriable: false}` (same keys as the async channel's 256 KB cap). Return a file reference (`host/uploadFile` or APS `files/*`) instead of inline data."
+        },
+        {
           "name": "not_implemented",
           "code": "not_implemented",
           "desc": "Store does not support `invoke_executa_tool` (local-dev harness without a NATS bridge)."
@@ -158,6 +163,7 @@
       "example": "// bundle/app.js — call a server-minted focus-session tool.\nconst TOOL_ID = \"tool-test-focus-session-12345678\";\nconst TOOL_METHOD = \"session_action\";\n\ntry {\n  const result = await anna.tools.invoke({\n    tool_id: TOOL_ID,\n    method:  TOOL_METHOD,\n    args:    { action: \"start\", duration_min: 25 },\n    timeoutMs: 60_000,            // within the 1 s–90 s clamp, so passed through as-is\n  });\n  applyState(result);             // plugin payload, envelopes stripped\n} catch (e) {\n  switch (e.code) {\n    case \"tool_timeout\":          setStatus(\"plugin took too long\");  break;\n    case \"agent_unavailable\":     setStatus(\"agent is offline\");      break;\n    case \"permission_denied\":     setStatus(\"tool not whitelisted\");  break;\n    case \"tool_failed\":           setStatus(`plugin: ${e.message}`);  break;\n    default:                       throw e;\n  }\n}\n",
       "limitations": [
         "Synchronous ceiling is **90 s** (edge-bound). Work that may exceed it must go through the async job channel — `tools.invokeAsync` / `getJob` / `cancelJob` / `listJobs` (dispatcher ≥ 0.19.0).",
+        "**Result size ceiling is ~4 MiB** — the full serialized result (payload + envelopes) must fit one NATS message (`max_payload = 4194304`). Oversize results fail explicitly with `result_too_large`; string fields are never silently truncated (forum #320). Request args on the sync channel share the same NATS ceiling; the async channel additionally caps args at 64 KB and results at 256 KB.",
         "Per-call `timeoutMs` is **silently clamped** to policy bounds — out-of-range values do not raise. Read back the host's `details.timeout_ms` on `tool_timeout` to see what was actually used.",
         "Manifest-side per-tool overrides are not yet threaded through the host store; today only the caller value and the policy default apply. The Agent honours its own manifest `tool_def.timeout` when the caller omits `timeoutMs`.",
         "Routing picks the user's `default_agent_client_id` when online, otherwise the first online Agent — there is no client_id pinning from the bundle side.",

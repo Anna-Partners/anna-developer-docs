@@ -108,6 +108,27 @@ When the host wait elapses the call rejects with:
 | `tool_timeout` | The plugin did not return a response within the (clamped) `timeoutMs` window. The host also sends a best-effort `_cancel_invoke` command to the Agent, which stops the in-flight invocation and reaps the plugin's whole subprocess tree (e.g. a hung headless Chrome). |
 | `subcall_timeout` | A reverse-RPC subcall (storage/image/upload) timed out while the outer `tools.invoke` was still within its deadline. Same wire shape, but `error.details.subcall` identifies the channel. |
 
+#### Result size and integrity
+
+Successful `tools.invoke` results are delivered to the bundle **verbatim** —
+the platform never truncates or rewrites string fields inside a result.
+(An earlier server-side 32 000-character clamp, designed for LLM chat context
+and mistakenly applied to app data, corrupted HTML and base64 payloads while
+still reporting success — removed, forum #320.)
+
+The size contract is instead explicit:
+
+| Channel | Limit | Over-limit behavior |
+|---|---|---|
+| `tools.invoke` (sync) | **~4 MiB** for the full serialized result (payload + envelopes), bounded by the NATS transport `max_payload` (4 194 304 bytes) | Call rejects with `result_too_large`; `error.details` carries `{size, max, retriable: false}` |
+| `tools.invokeAsync` (job) | **256 KB** result cap | Job fails with `result_too_large` |
+
+Content larger than these caps must not be returned inline: upload it via
+`host/uploadFile` (Executa side) or APS `files/*` and return a reference
+instead. There is **no** intermediate per-string-field limit — payloads such
+as a 100 KB HTML document or a 200 KB base64 data URL pass through unchanged
+as long as the whole result fits the channel cap.
+
 Example:
 
 ```ts

@@ -4,7 +4,7 @@ description: "RPC namespaces and methods your iframe can call on the host, with 
 section: apps
 slug: app-ui-host-api
 order: 14
-updated: 2026-09-11
+updated: 2026-09-24
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -128,6 +128,23 @@ Content larger than these caps must not be returned inline: upload it via
 instead. There is **no** intermediate per-string-field limit — payloads such
 as a 100 KB HTML document or a 200 KB base64 data URL pass through unchanged
 as long as the whole result fits the channel cap.
+
+**Request arguments.** Synchronous `tools.invoke` arguments ride the same
+NATS channel as results, so the same **~4 MiB** ceiling (args + envelopes)
+applies to the request side. The async channel caps args at **64 KB**
+(`invalid_arg` on excess). Ship large inputs by reference (APS `files/*` /
+`host/uploadFile`), not inline.
+
+**Local dev parity.** `anna-app dev` (CLI ≥ 0.1.54, `anna-app-runtime-local`
+≥ 0.2.0a24) enforces the same **~4 MiB** sync-result boundary with the same
+`result_too_large` error — an app hits the limit on your laptop, not in
+review. The harness's stdio transport additionally caps any single JSON-RPC
+frame at **16 MiB** (sized for inline `host/uploadFile` reverse-RPC frames);
+oversized frames are rejected with a structured `frame_too_large` error
+(`data: {frame_bytes, max_frame_bytes}`) while the bridge and the plugin
+process keep serving subsequent calls. Earlier harness versions failed at
+64 KiB with misleading `python bridge exited` / `executa process exited`
+errors (forum #338) — upgrade the CLI if you see those.
 
 Example:
 

@@ -104,7 +104,7 @@
     "items": [
       {
         "name": "agent.session.create",
-        "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Validates `submode` against the manifest grant and `fixed_client_id` against the allow-list; optional `systemPrompt` overrides the agent's system prompt. Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is runtime-resolved via `effective_granted_tool_names`, NOT a raw manifest echo).",
+        "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Validates `submode` against the manifest grant and `fixed_client_id` against the allow-list; optional `systemPrompt` overrides the agent's system prompt. `quotaCaps` keeps only capability bounds (`allowed_tools` ∩ grant, `inherit_host_tools`) — the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (accepted, never 400). Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is runtime-resolved via `effective_granted_tool_names`, NOT a raw manifest echo).",
         "tags": [
           {
             "label": "submode"
@@ -116,7 +116,7 @@
             "label": "systemPrompt"
           },
           {
-            "label": "quotaCaps∩grant"
+            "label": "allowed_tools∩grant"
           }
         ]
       },
@@ -249,7 +249,7 @@
     "items": [
       {
         "name": "llm.complete",
-        "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). `maxTokens` silently clamped to `session.quota_caps.max_tokens_per_call` (default 4096). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED`, `APP_PROVIDER_ERROR`.",
+        "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ 8192, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
         "tags": [
           {
             "label": "MCP-shaped"
@@ -261,19 +261,22 @@
             "label": "non-streaming"
           },
           {
-            "label": "maxTokens clamped"
+            "label": "sync cap 8192"
           }
         ]
       },
       {
         "name": "llm.stream",
-        "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
+        "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
         "tags": [
           {
             "label": "MCP-shaped"
           },
           {
             "label": "streaming"
+          },
+          {
+            "label": "cap 65536"
           }
         ]
       }

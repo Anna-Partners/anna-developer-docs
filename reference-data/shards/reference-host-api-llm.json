@@ -22,23 +22,28 @@
           "type": "Array<{role, content}>",
           "default": null,
           "required": true,
-          "summary": "Ordered chat transcript to complete. `role` is `user` / `assistant` / `system`. `content` is a string OR an MCP-shaped block (`{type:'text', text}` / `{type:'image', ...}`); blocks are flattened into a LangChain `HumanMessage` / `AIMessage` / `SystemMessage` by `_assemble_lc_messages`.",
+          "summary": "Ordered chat transcript to complete. `role` is `user` / `assistant` / `system`. `content` is a string, an MCP-shaped block, or an array of blocks. Supported blocks: `{type:'text', text}` and `{type:'image', data:'<raw base64 or data: URI>', mimeType:'image/png'}` (or `{type:'image', url:'https://...'}`). Text-only content is flattened into a LangChain `HumanMessage` / `AIMessage` / `SystemMessage` by `_assemble_lc_messages`; image blocks become OpenAI-style `image_url` content parts sent to the provider.",
           "notes": [
             "`APP_INVALID_REQUEST` if missing, non-array, or empty.",
             "Order is preserved verbatim — caller is responsible for trimming context to the model's window.",
-            "Image content blocks require the selected model to be multimodal; otherwise the provider rejects upstream and the call surfaces as `APP_PROVIDER_ERROR`."
+            "**Image blocks**: `data` accepts raw base64 (with `mimeType`, default `image/png`) or a full `data:` URI; `url` accepts HTTP(S) and is SSRF-validated server-side. Max 20 MB per image; MIME must be one of `image/jpeg|png|gif|webp|bmp|svg+xml`.",
+            "Text and images may be mixed in one content array, or placed in separate consecutive `user` messages — both are supported.",
+            "Image blocks are only allowed in `user` messages; in `system` / `assistant` messages they raise `APP_INVALID_REQUEST`.",
+            "If the resolved model is not multimodal the call fails fast with `APP_MODEL_NOT_VISION_CAPABLE` (`-32019`) — pick a vision model via `modelPreferences.hints`. Images are never silently dropped.",
+            "Unknown block types (`{type:'audio'}` etc.) raise `APP_INVALID_REQUEST` — they are not silently ignored."
           ]
         },
         {
           "name": "maxTokens",
           "type": "number (int)",
-          "default": "session.quota_caps.max_tokens_per_call (default 4096)",
+          "default": "8192 (platform default when omitted)",
           "required": false,
-          "summary": "Hard cap on output tokens. Silently clamped down to `session.quota_caps.max_tokens_per_call` — the grant's per-call ceiling intersected with what the user actually granted to *this* app.",
+          "summary": "Hard cap on output tokens. The effective cap is resolved per call as `min(maxTokens ∥ 8192, model output cap, path ceiling)` — path ceiling is **8 192** for `llm.complete` (held-HTTP sync channel) and **65 536** for `llm.stream`. There is no per-app grant knob — caps are platform constants ∩ model capability.",
           "notes": [
             "`APP_INVALID_REQUEST` if `≤ 0`.",
-            "Clamping is silent — caller does not see the reduced value (read `usage.outputTokens` to confirm what landed).",
-            "Per-app cap is set at install time via `UserAnnaApp.custom_config.llm_grant.quota_caps.max_tokens_per_call`; defaults to 4096 if neither side declares one."
+            "Clamping is visible: the response `_meta.maxTokens` echoes `{requested, effective, limitedBy: 'request'|'model'|'transport'|'default'}`.",
+            "For outputs beyond 8 192 tokens use `llm.stream` (ceiling 65 536). With `@anna-ai/app-runtime` ≥ 0.17.0, `llm.complete` with `maxTokens > 8192` is automatically delivered over the streaming channel and resolves with the identical single-result shape.",
+            "Pre-flight quota check is worst-case: a call may be rejected with `APP_QUOTA_EXCEEDED` (429) when the balance cannot cover the *effective* cap — the error `data` carries `{requiredCu, remainingCu, requestedMaxTokens}` so the app can lower `maxTokens` and retry."
           ]
         },
         {
@@ -84,7 +89,7 @@
       ],
       "returns": {
         "type": "{role, content, model, stopReason, usage, _meta}",
-        "desc": "MCP-shaped completion result.\n\n**Fields**\n• `role`: always `'assistant'`.\n• `content`: `{type: 'text', text: <model output>}`. Only text is returned today; multimodal output (image / tool_use blocks) is not exposed via `llm.complete` — use `agent.session.run` if you need that.\n• `model`: the model_name actually selected (after `modelPreferences` resolution + user grant filtering) — store this if you need to audit later.\n• `stopReason`: always `'endTurn'` today (provider-specific stop reasons are not yet surfaced).\n• `usage`: token counts as reported by the provider; `totalTokens` falls back to `inputTokens + outputTokens` if the provider omits it.\n• `_meta`: **optional** host-only extension (the cloud facade always populates it, but it is NOT part of the MCP result contract — treat it as best-effort and do not hard-depend on its presence).\n• `_meta.provider`: human-readable provider name (e.g. `OpenAI`, `Anthropic`).\n• `_meta.latencyMs`: end-to-end wall-clock including selector + provider call.\n• `_meta.quotaConsumed`: float — the actual quota debited (provider cost × `cost_multiplier`). Useful for showing in-UI \"X credits used\".\n• `_meta.appSessionUuid`: the lazy-minted `AnnaAppSession.uuid` (kind=`complete`). Same uuid is reused across all `llm.complete` calls from the same window for the token's TTL."
+        "desc": "MCP-shaped completion result.\n\n**Fields**\n• `role`: always `'assistant'`.\n• `content`: `{type: 'text', text: <model output>}`. Only text is returned today; multimodal output (image / tool_use blocks) is not exposed via `llm.complete` — use `agent.session.run` if you need that.\n• `model`: the model_name actually selected (after `modelPreferences` resolution + user grant filtering) — store this if you need to audit later.\n• `stopReason`: the provider's real `finish_reason` mapped to `'endTurn' | 'maxTokens' | 'contentFilter' | 'toolUse'` — `'maxTokens'` means the output was truncated at the effective cap. Unknown / missing provider reasons fall back to `'endTurn'`; stop-sequence hits are indistinguishable from natural completion on the OpenAI protocol, so `'stopSequence'` is never returned.\n• `usage`: token counts as reported by the provider; `totalTokens` falls back to `inputTokens + outputTokens` if the provider omits it.\n• `_meta`: **optional** host-only extension (the cloud facade always populates it, but it is NOT part of the MCP result contract — treat it as best-effort and do not hard-depend on its presence).\n• `_meta.provider`: human-readable provider name (e.g. `OpenAI`, `Anthropic`).\n• `_meta.latencyMs`: end-to-end wall-clock including selector + provider call.\n• `_meta.quotaConsumed`: float — the actual quota debited (provider cost × `cost_multiplier`). Useful for showing in-UI \"X credits used\".\n• `_meta.maxTokens`: `{requested, effective, limitedBy}` — the output cap actually applied (`limitedBy` ∈ `request|model|transport|default`).\n• `_meta.appSessionUuid`: the lazy-minted `AnnaAppSession.uuid` (kind=`complete`). Same uuid is reused across all `llm.complete` calls from the same window for the token's TTL."
       },
       "errors": [
         {
@@ -95,7 +100,12 @@
         {
           "name": "APP_INVALID_REQUEST",
           "code": "APP_INVALID_REQUEST",
-          "desc": "`messages` missing / empty / non-array, or `maxTokens ≤ 0`. `details.jsonrpc_code = -32004`."
+          "desc": "`messages` missing / empty / non-array, `maxTokens ≤ 0`, a malformed image block (no `data`/`url`, oversize, unsupported MIME, SSRF-rejected URL), an image block in a `system`/`assistant` message, or an unknown content block type. `details.jsonrpc_code = -32004`."
+        },
+        {
+          "name": "APP_MODEL_NOT_VISION_CAPABLE",
+          "code": "APP_MODEL_NOT_VISION_CAPABLE",
+          "desc": "`messages` contain image blocks but the resolved model has no vision capability. Retry with a multimodal model via `modelPreferences.hints`; `data.modelName` names the model that was resolved. `details.jsonrpc_code = -32019`."
         },
         {
           "name": "APP_QUOTA_EXCEEDED",
@@ -123,12 +133,12 @@
           "desc": "Resolved `user_id` no longer exists (token validated but row deleted between auth and dispatch)."
         }
       ],
-      "example": "// bundle/app.js — summarise the current note with the user's preferred model.\ntry {\n  const reply = await anna.llm.complete({\n    systemPrompt: \"You are a concise summariser. Output 1–2 sentences.\",\n    messages: [\n      { role: \"user\", content: noteBody.value.slice(0, 8000) },\n    ],\n    maxTokens: 256,\n    temperature: 0.3,\n    modelPreferences: { intelligencePriority: 0.4, speedPriority: 0.6 },\n  }, { timeoutMs: 60_000 });\n\n  render(reply.content.text);\n  log(`model=${reply.model} tokens=${reply.usage.totalTokens} quota=${reply._meta.quotaConsumed}`);\n} catch (e) {\n  switch (e.code) {\n    case \"APP_NOT_GRANTED\":      setStatus(\"User hasn't granted LLM access to this app\"); break;\n    case \"APP_QUOTA_EXCEEDED\":   setStatus(\"Out of quota — try again next cycle\");        break;\n    case \"APP_INVALID_REQUEST\":  setStatus(`Bad request: ${e.message}`);                  break;\n    case \"APP_PROVIDER_ERROR\":   setStatus(\"Model provider error — please retry\");        break;\n    default:                     throw e;\n  }\n}\n",
+      "example": "// bundle/app.js — summarise the current note with the user's preferred model.\ntry {\n  const reply = await anna.llm.complete({\n    systemPrompt: \"You are a concise summariser. Output 1–2 sentences.\",\n    messages: [\n      { role: \"user\", content: noteBody.value.slice(0, 8000) },\n    ],\n    maxTokens: 256,\n    temperature: 0.3,\n    modelPreferences: { intelligencePriority: 0.4, speedPriority: 0.6 },\n  }, { timeoutMs: 60_000 });\n\n  render(reply.content.text);\n  log(`model=${reply.model} tokens=${reply.usage.totalTokens} quota=${reply._meta.quotaConsumed}`);\n} catch (e) {\n  switch (e.code) {\n    case \"APP_NOT_GRANTED\":      setStatus(\"User hasn't granted LLM access to this app\"); break;\n    case \"APP_QUOTA_EXCEEDED\":   setStatus(\"Out of quota — try again next cycle\");        break;\n    case \"APP_INVALID_REQUEST\":  setStatus(`Bad request: ${e.message}`);                  break;\n    case \"APP_PROVIDER_ERROR\":   setStatus(\"Model provider error — please retry\");        break;\n    default:                     throw e;\n  }\n}\n\n// Image input — MCP image block (raw base64 + mimeType, a data: URI, or an https URL).\n// Text and image may share one content array or sit in separate user messages.\nconst b64 = dataUrl.split(\",\")[1];   // FileReader.readAsDataURL → strip prefix\ntry {\n  const reply = await anna.llm.complete({\n    messages: [{\n      role: \"user\",\n      content: [\n        { type: \"text\", text: \"What is in this image?\" },\n        { type: \"image\", data: b64, mimeType: \"image/png\" },\n      ],\n    }],\n    maxTokens: 512,\n  });\n  render(reply.content.text);\n} catch (e) {\n  if (e.code === \"APP_MODEL_NOT_VISION_CAPABLE\") {\n    setStatus(`Model ${e.data?.modelName} can't see images — pass a multimodal hint`);\n  } else throw e;\n}\n",
       "limitations": [
-        "Non-streaming. The response arrives in one chunk after the provider finishes — for token-by-token UI use `agent.session.run` (LangGraph streaming over `rpc.stream`).",
-        "Text output only. Multimodal blocks in the request (`{type:'image'}` etc.) are accepted by the message assembler but only `text` blocks come back in `content`. Tool-use / structured-output workflows belong to `agent.session.run`.",
-        "`maxTokens` clamping is silent — callers asking for 100k against a 4k cap get a 4k response with no warning. Read back `usage.outputTokens` if you need to detect truncation.",
-        "`stopReason` is hard-coded `'endTurn'`; provider-specific stops (content_filter, tool_use, length) are not yet surfaced. Detect length-stops by comparing `usage.outputTokens` to your `maxTokens`.",
+        "Non-streaming. The response arrives in one chunk after the provider finishes — for token-by-token UI use `llm.stream` or `agent.session.run`.",
+        "Text output only. Image input blocks ARE forwarded to the model (as OpenAI-style `image_url` parts), but the response `content` is always a single `{type:'text'}` block — multimodal output / tool_use belongs to `agent.session.run`.",
+        "Sync output ceiling is 8 192 tokens (held-HTTP transport budget). The effective cap is echoed in `_meta.maxTokens` — nothing is silently reduced any more. Long outputs: use `llm.stream` (ceiling 65 536), or rely on the SDK ≥ 0.17.0 auto-routing of `maxTokens > 8192` over the streaming channel.",
+        "`stopReason` distinguishes truncation (`'maxTokens'`) from natural completion (`'endTurn'`), but stop-sequence hits report `'stop'` upstream and thus surface as `'endTurn'`; provider `finish_reason` normalisation quality varies — `usage.outputTokens ≈ _meta.maxTokens.effective` remains a useful corroborating truncation signal.",
         "No conversation state. Each call is independent — the lazy-minted `app_session_uuid` is cached server-side only for token reuse, NOT for prompt history. Caller MUST resend full `messages` every call.",
         "`metadata` is currently ignored end-to-end; do not rely on it for telemetry.",
         "Per-call deadline default is `DEFAULT_TIMEOUTS_BY_NS.llm = 180_000` ms in the SDK; longer waits require an explicit `{ timeoutMs }`.",
@@ -155,12 +165,12 @@
           "name": "(all)",
           "type": "—",
           "required": false,
-          "summary": "Identical to `llm.complete`: `messages` (required), `maxTokens` (silently clamped to `quota_caps.max_tokens_per_call`), `temperature`, `modelPreferences`, `systemPrompt`, `stopSequences`, `metadata`. See the `llm.complete` entry for full per-param semantics — the request travels the same validation path."
+          "summary": "Identical to `llm.complete`: `messages` (required; same text + image block support and vision gating), `maxTokens` (effective cap = `min(maxTokens ∥ 8192, model output cap, 65 536 stream ceiling)` — echoed in the terminal frame's `_meta.maxTokens`), `temperature`, `modelPreferences`, `systemPrompt`, `stopSequences`, `metadata`. See the `llm.complete` entry for full per-param semantics — the request travels the same validation path."
         }
       ],
       "returns": {
         "type": "RpcStream (async iterable)",
-        "desc": "Frames in order:\n• zero or more `{event:'model_token', text}` — incremental output; concatenating `text` yields the full completion.\n• exactly one terminal `{event:'complete', role, content, model, usage, _meta}` — byte-equivalent to the `llm.complete` result (quota consumed at this point).\nOn provider failure the stream throws; partial tokens already delivered stay delivered but are NOT billed as a successful completion."
+        "desc": "Frames in order:\n• zero or more `{event:'model_token', text}` — incremental output; concatenating `text` yields the full completion.\n• exactly one terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` — same shape as the `llm.complete` result (quota consumed at this point). `stopReason` maps the provider's real finish_reason (`'maxTokens'` = truncated at the effective cap).\n• When the accumulated text exceeds ~48 KB the terminal frame is slimmed: `content.text` is `''` and `_meta.textOmitted: true` + `_meta.textLength` (chars) are set — reassemble from the `model_token` frames you already received (the SDK's ≥ 0.17.0 complete-over-stream path does this for you).\nOn provider failure the stream throws; partial tokens already delivered stay delivered but are NOT billed as a successful completion."
       },
       "errors": [
         {
@@ -171,7 +181,12 @@
         {
           "name": "APP_INVALID_REQUEST",
           "code": "APP_INVALID_REQUEST",
-          "desc": "Same validation as `llm.complete` (`messages` missing/empty, `maxTokens ≤ 0`)."
+          "desc": "Same validation as `llm.complete` (`messages` missing/empty, `maxTokens ≤ 0`, malformed image blocks)."
+        },
+        {
+          "name": "APP_MODEL_NOT_VISION_CAPABLE",
+          "code": "APP_MODEL_NOT_VISION_CAPABLE",
+          "desc": "Same vision gate as `llm.complete`: image blocks with a non-multimodal resolved model fail before the first frame."
         },
         {
           "name": "APP_QUOTA_EXCEEDED",
@@ -182,7 +197,9 @@
       "example": "const stream = await anna.llm.stream({\n  messages: [{ role: 'user', content: 'Write a haiku about the sea.' }],\n  maxTokens: 200\n});\nlet text = '';\nfor await (const frame of stream) {\n  if (frame.event === 'model_token') {\n    text += frame.text;\n    output.textContent = text;      // live token-by-token render\n  } else if (frame.event === 'complete') {\n    console.log(frame.model, frame.usage, frame._meta?.quotaConsumed);\n  }\n}",
       "limitations": [
         "Requires the worker fleet — in `anna-app dev` the harness bridges to `POST /api/v1/copilot/app/complete/stream` (SSE) instead; behavior matches but latency profile differs.",
-        "Stop-sequence / provider-specific stop reasons are not surfaced per-frame; only the terminal frame carries `usage`.",
+        "Output ceiling is 65 536 tokens (vs 8 192 on `llm.complete`) — the effective cap is still `min(requested, model output cap, ceiling)` and is echoed in the terminal frame's `_meta.maxTokens`.",
+        "Terminal frames with more than ~48 KB of accumulated text omit `content.text` (`_meta.textOmitted`) — always accumulate `model_token` frames rather than reading the terminal frame's text.",
+        "Stop-sequence hits are not distinguishable from natural completion (`stopReason: 'endTurn'`); only the terminal frame carries `usage`.",
         "Frames share the window's `rpc.stream` event channel — iterate promptly; an abandoned iterator keeps the stream buffered until timeout (`llm` namespace default 180 000 ms)."
       ]
     }

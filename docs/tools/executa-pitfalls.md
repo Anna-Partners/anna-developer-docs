@@ -337,11 +337,11 @@ A reasonable sampling request fails with `-32007 MAX_TOKENS_EXCEEDED` even thoug
 
 **Cause**
 
-The cap is **cumulative across the same `invoke_id`**, not per call. Default total is 32 000 tokens.
+The cap is **cumulative across the same `invoke_id`**, not per call. The total is a platform constant: 32 000 tokens per invoke.
 
 **Fix**
 
-Send fewer / smaller sampling calls per tool invocation, or ask the user to raise `sampling_grant.maxTokensTotal` in their Anna Admin panel (host caps it at 32 000 in v1).
+Send fewer / smaller sampling calls per tool invocation. The cap is fixed platform-side (no longer adjustable in the user's Anna Admin panel) — shrink the workload or split it across invokes.
 
 ---
 

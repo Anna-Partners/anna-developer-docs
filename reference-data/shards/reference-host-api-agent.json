@@ -52,12 +52,12 @@
         },
         {
           "name": "quotaCaps",
-          "type": "{max_tokens_per_call?, max_runs_per_day?, max_concurrent_runs?}",
+          "type": "{allowed_tools?, inherit_host_tools?, …}",
           "required": false,
-          "summary": "Caller-requested ceiling. Intersected (`min`) with the user's `llm_grant.quota_caps` via `_intersect_quota_caps`; the result is stored on `session.quota_caps` and consulted by every subsequent `run`.",
+          "summary": "Capability bounds for the session. `allowed_tools` is intersected with the user grant; `inherit_host_tools` opts into the host's full tool surface. The numeric keys (`max_tokens_per_call`, `max_runs_per_day`, `max_concurrent_runs`) are **deprecated and ignored** — output caps are now resolved per call as platform constants ∩ model capability (see `llm.complete` `maxTokens`).",
           "notes": [
-            "Defaults fall back to grant value; if neither side declares a field, `max_tokens_per_call` defaults to **4096**.",
-            "Requesting *more* than the grant has no effect — silently clamped down."
+            "Deprecated numeric keys are accepted-and-ignored (server logs a warning; never a 400) — existing apps keep working unchanged.",
+            "There is no per-session token ceiling any more; the spend guardrail is the user's CU pool plus the per-call worst-case quota precheck."
           ]
         }
       ],

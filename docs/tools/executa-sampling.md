@@ -34,7 +34,7 @@ End-to-end sampling needs **all** of the following:
 
 1. **v2 negotiation.** The host sends `initialize`; the plugin replies with the same `protocolVersion: "2.0"` and lists `capabilities.sampling = {}`. See [Lifecycle](/developers/tools/executa-lifecycle#v2-capability-handshake).
 2. **Manifest declaration.** The plugin's `describe` manifest includes `host_capabilities: ["llm.sample"]`. The Anna App publish validator rejects unknown capability strings.
-3. **User grant.** The end user enabled sampling for this Executa in their Anna Admin panel. The grant carries `maxCalls` and `maxTokensTotal` per-invoke caps.
+3. **User grant.** The end user enabled sampling for this Executa in their Anna Admin panel (a single on/off switch). Per-invoke limits are platform constants — they are no longer user-adjustable.
 
 If any condition is missing, the host returns `-32008 SAMPLING_NOT_NEGOTIATED` and your reverse RPC is rejected before reaching a model.
 
@@ -225,11 +225,11 @@ anna-app executa dev --dir ./my-plugin --mock-sampling ./sampling-fixture.jsonl
 
 ## Per-invoke caps
 
-| Cap | Default | Where enforced |
+| Cap | Value | Where enforced |
 |---|---|---|
-| `maxTokens` per call | **8 192** | `DEFAULT_SAMPLING_MAX_TOKENS_PER_CALL` (host) |
-| Calls per `invoke_id` | **8** | `sampling_grant.maxCalls`, host-capped at 8 |
-| Total tokens per `invoke_id` | **32 000** | `sampling_grant.maxTokensTotal`, host-capped at 32 000 |
+| `maxTokens` per call | **8 192** | `DEFAULT_SAMPLING_MAX_TOKENS_PER_CALL` (host pre-check) — the platform additionally clamps to `min(requested, model output cap, 8 192)` and echoes the result in `_meta.maxTokens` |
+| Calls per `invoke_id` | **8** | Platform constant (fixed; not user-adjustable) |
+| Total tokens per `invoke_id` | **32 000** | Platform constant (fixed; not user-adjustable) |
 | `sampling_token` TTL | **600 s** | JWT `aud=executa-sampling` |
 | `includeContext` values | only `"none"` | host rejects others as `-32004 SAMPLING_INVALID_REQUEST` |
 

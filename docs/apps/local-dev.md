@@ -4,10 +4,10 @@ description: "Run an Anna App locally with `anna-app dev` — in-process dispatc
 section: apps
 slug: local-dev
 order: 16
-updated: 2026-09-10
+updated: 2026-09-24
 estimated_minutes: 5
 category: "Local Development & Testing"
-verified_cli: "0.1.49"
+verified_cli: "0.1.54"
 ---
 
 # Local Development with `anna-app dev`
@@ -127,6 +127,31 @@ fail in production until the declaration lands.
 > in-memory backend does not enforce `storage_token` scopes the way
 > production does (missing `host_capabilities` declarations are now caught
 > by the strict caps gate above even in local runs).
+
+## Size limits (production parity)
+
+Requires CLI ≥ **0.1.54** (`anna-app-runtime-local` ≥ 0.2.0a24). The harness
+enforces the platform's transport contracts locally so size bugs surface on
+your laptop instead of in production:
+
+| Boundary | Limit | Local behavior |
+| --- | --- | --- |
+| Sync `tools.invoke` result (payload + envelopes) | **~4 MiB** — same as production's NATS `max_payload` | Rejects with `result_too_large`, `details: {size, max, retriable: false}` — identical wire error to production |
+| `tools.invokeAsync` result / args | **256 KB** / **64 KB** | Job fails with `result_too_large` / call rejects with `invalid_arg` |
+| Any single stdio JSON-RPC frame (either direction) | **16 MiB** — same as the production Agent's readline ceiling; sized for inline `host/uploadFile` reverse-RPC frames | Structured `frame_too_large` error (`data: {frame_bytes, max_frame_bytes}`); the bridge and the plugin process keep serving subsequent calls |
+
+Everything under these caps passes through **verbatim** — no per-string-field
+truncation (see [Result size and integrity](/developers/apps/app-ui-host-api#result-size-and-integrity)).
+Content above them must travel by reference: `host/uploadFile` or APS
+`files/*`.
+
+> [!WARNING]
+> Harness versions before 0.1.54 crashed on frames over **64 KiB**: an
+> oversized request killed the Python bridge (`python bridge exited (code=1)`,
+> then `python bridge not running` for every later call), and an oversized
+> plugin response was misreported as `tool_failed / executa process exited`
+> while leaking the still-running plugin process (forum #338). If you see
+> those errors, upgrade the CLI.
 
 ## `executas/` discovery requirements
 

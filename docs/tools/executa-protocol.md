@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 over stdio — the wire format an Executa plugin must
 section: tools
 slug: executa-protocol
 order: 5
-updated: 2026-04-24
+updated: 2026-09-24
 estimated_minutes: 9
 ---
 
@@ -32,7 +32,7 @@ Protocol version: **1.1**.
 2. **stderr is for logs.** The Agent captures it and surfaces it in the trace view.
 3. **One message per line**, terminated by `\n`. No `Content-Length` headers.
 4. **UTF-8** encoding.
-5. **Single-line per response ≤ 2 MiB.** Beyond ~512 KiB use the [file transport](#file-transport-large-responses) escape hatch.
+5. **Single-line per frame ≤ 16 MiB** — the runtime's stdio readline ceiling, sized so an inline `host/uploadFile` reverse-RPC frame (base64 of the 8 MiB inline cap ≈ 10.7 MiB) fits in one line. Note that App-facing `tools.invoke` **results** hit the ~4 MiB transport contract first (`result_too_large` — see [Result size and integrity](/developers/apps/app-ui-host-api#result-size-and-integrity)). Beyond ~512 KiB consider the [file transport](#file-transport-large-responses) escape hatch.
 6. **The plugin process is long-running.** It MUST keep reading stdin in a loop and only exit on stdin EOF (the Agent closes stdin to request shutdown) or on an explicit signal. A process that exits after sending a single response is a protocol violation — the Agent will mark it as **Stopped** and pay a fresh cold-start on every subsequent invocation. After writing each response, **flush stdout** before looping back to read the next request.
 
 ## Methods
@@ -160,7 +160,7 @@ Invoke a tool. **Note the param shape uses `tool`, not `name`.**
 }
 ```
 
-The Agent decodes `result` as `{success, data, error, duration_ms}`. Whatever you put under `data` is what the LLM will see. `duration_ms` is optional; the Agent measures wall-clock time on its end as well.
+The Agent decodes `result` as `{success, data, error, duration_ms}`. Whatever you put under `data` is what the LLM will see — with one exception: a reserved top-level `_display` key inside `data` is rendered verbatim by the chat UI instead of being paraphrased by the model, see [Display Blocks](/developers/tools/executa-display-blocks). `duration_ms` is optional; the Agent measures wall-clock time on its end as well.
 
 **Tool-level failure** (a recoverable error — the LLM should be told about it):
 
@@ -241,6 +241,7 @@ The wire details, error codes, and worked examples live in dedicated pages:
 
 - [Lifecycle & Capability Negotiation](/developers/tools/executa-lifecycle) — `initialize` handshake, per-invoke context injection.
 - [Sampling](/developers/tools/executa-sampling) — `sampling/createMessage` reverse RPC.
+- [Display Blocks](/developers/tools/executa-display-blocks) — verbatim, host-rendered tool output (`_display`).
 - [Persistent Storage](/developers/tools/executa-storage) — `storage/*` and `files/*` reverse RPCs (scope-parameterised: `user` / `app` / `tool`).
 
 ### Reverse-RPC ↔ parent-invoke correlation
@@ -284,7 +285,7 @@ For results larger than ~512 KiB you can write the full JSON-RPC response to a t
 }
 ```
 
-The Agent reads the file, decodes the response inside it, then deletes the file. Use this when you would otherwise blow past the 2 MiB readline ceiling. See the Python sample's `send_response()` for a reference implementation: [`examples/python/example_plugin.py`](https://github.com/whtcjdtc2007/anna-executa-examples/blob/main/examples/python/example_plugin.py).
+The Agent reads the file, decodes the response inside it, then deletes the file. Use this when you would otherwise blow past the 16 MiB readline ceiling (App `tools.invoke` results are additionally bound by the ~4 MiB transport contract regardless of how the frame travels). See the Python sample's `send_response()` for a reference implementation: [`examples/python/example_plugin.py`](https://github.com/whtcjdtc2007/anna-executa-examples/blob/main/examples/python/example_plugin.py).
 
 ## Reference
 

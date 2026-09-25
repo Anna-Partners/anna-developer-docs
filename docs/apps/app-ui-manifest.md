@@ -69,7 +69,7 @@ When `schema` ≥ 2 (current maximum: 3), an Anna App manifest gains a `ui` sect
 | `views` | array | yes | 1–16 entries; at most one `default: true`. See [`views[]`](#views) |
 | `form_factors` | array of string | no | Containers the app supports: `"desktop"` / `"mobile"`. Defaults to `["desktop"]` — declare `"mobile"` to appear in the Anna mobile launcher. See [Mobile Support](/developers/apps/app-mobile) |
 | `host_api` | object | no | RPC ACL. See [`host_api`](#host_api). Defaults to all empty (only the always-allowed `window` scope) |
-| `csp_overrides` | object | no | Map of CSP directive → list of values. Only the directives below are accepted; `style-src` accepts only `'self'`, `'sha256-...'`, `'nonce-...'`; `script-src` additionally accepts `'wasm-unsafe-eval'` (see [WebAssembly](#webassembly)) |
+| `csp_overrides` | object | no | Map of CSP directive → list of values. Only the directives below are accepted; `style-src` accepts only `'self'`, `'sha256-...'`, `'nonce-...'`; `script-src` additionally accepts `'wasm-unsafe-eval'` (see [WebAssembly](#webassembly)); `frame-src` accepts only explicit `https://` origins (see [Embedding third-party content](#embedding-third-party-content-frame-src)) |
 | `state_merge` | string | no | Reserved. Default `"last_writer_wins"` |
 
 ### `bundle`
@@ -152,6 +152,7 @@ media-src
 font-src
 style-src     ('self' | 'sha256-...' | 'nonce-...' only)
 script-src    ('self' | 'wasm-unsafe-eval' | 'sha256-...' | 'nonce-...' only)
+frame-src     (explicit https://host[:port] origins only — no '*', no path, no CSP keywords; max 8)
 ```
 
 Anything else is rejected. The base CSP is always:
@@ -171,6 +172,37 @@ form-action 'self'
 ```
 
 `external_origins` from `ui.bundle` are automatically added to `connect-src` and `img-src` — you do **not** need to repeat them in `csp_overrides`.
+
+### Embedding third-party content (frame-src)
+
+By default the bundle CSP has no `frame-src`, so nested iframes fall back to `default-src 'none'` and **every embed is blocked**. To embed third-party content (a YouTube player, a map, a docs viewer…), declare the exact origins:
+
+```jsonc
+"csp_overrides": {
+  "frame-src": ["https://www.youtube-nocookie.com"]
+}
+```
+
+Rules: explicit `https://host[:port]` origins only — no `*` or wildcard subdomains, no paths, no CSP keywords (`'self'`, `'none'`, …), at most 8 origins. The declared origins are disclosed on the App's install/review surface, like `external_origins`.
+
+Declaring `frame-src` also unlocks the **playback permission chain**: the platform scopes `autoplay`, `encrypted-media`, `fullscreen` and `picture-in-picture` to your declared origins (both in the bundle's `Permissions-Policy` response header and in the host window's iframe `allow` attribute). All other features (camera, microphone, geolocation, …) stay denied.
+
+Your own `<iframe>` inside the bundle **must still forward those features** — the delegation chain is per-frame:
+
+```html
+<iframe
+  src="https://www.youtube-nocookie.com/embed/VIDEO_ID?start=90"
+  allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+></iframe>
+```
+
+Without the `allow` attribute the player renders but fullscreen / autoplay-on-seek silently fail.
+
+Tips:
+
+- Prefer `https://www.youtube-nocookie.com` over `https://www.youtube.com` — same player, fewer ambient cookies sent to Google.
+- **Local harness parity**: `anna-app dev` serves your bundle without CSP or Permissions-Policy headers, so embeds work locally even *without* the declaration. Always verify with `anna-app validate` and an online working draft before relying on local behaviour.
+- The embedded page is a normal cross-origin iframe: it inherits the app sandbox, cannot reach the Anna host bridge, and cannot call Host APIs.
 
 ### WebAssembly
 
@@ -210,6 +242,8 @@ Both raise `ManifestValidationError` with a Chinese-language reason string. Comm
 - `csp_overrides 含不允许的 directive: [...]`
 - `csp_overrides[script-src] 仅允许 'self' / 'wasm-unsafe-eval' / 'sha256-...' / 'nonce-...'`
 - `csp_overrides[style-src] 仅允许 'self' / 'sha256-...' / 'nonce-...'`
+- `csp_overrides[frame-src] only allows explicit https:// origins (no '*', no path, no CSP keywords)`
+- `csp_overrides[frame-src] allows at most 8 origins`
 - `ui.bundle.entry '<path>' 未在上传的 file_map 中` *(at finalize)*
 
 Next: [App UI Bundle Pipeline](/developers/apps/app-ui-bundle).

@@ -665,7 +665,7 @@
       "id": "executa-sampling",
       "kicker": "Executa · reverse RPC (v2+) · Sampling",
       "title": "Sampling — borrow the host's LLM",
-      "sub": "Let a long-running Executa plugin ask its host (Anna) to perform an LLM completion **on the user's behalf** — no API key, no model selection, no quota tracking in the plugin. Modelled on MCP `sampling/createMessage`.\n\n**Pre-requisites** (all three required):\n1. **v2 protocol negotiation.** The host's `initialize` advertises `protocolVersion: 2.0`; the plugin must respond with the same version and `client_capabilities.sampling = {}`.\n2. **Manifest declaration.** `host_capabilities: [\"llm.sample\"]`. Missing this → `-32008 SAMPLING_NOT_NEGOTIATED`.\n3. **User grant.** The user enables sampling for this Executa in Anna Admin (`UserExecuta.custom_config.sampling_grant.enabled = true`, with `maxCalls` and `maxTokensTotal` caps). Missing this → `-32001 SAMPLING_NOT_GRANTED`.\n\n**Per-invoke caps (v1 limits):** `maxTokens` per call defaults to **8,192** (`DEFAULT_SAMPLING_MAX_TOKENS_PER_CALL`); calls per `invoke_id` cap at **8** (`DEFAULT_SAMPLING_MAX_CALLS_PER_INVOKE`); cumulative tokens per invoke cap at **32,000**; `sampling_token` TTL **600s**; only `includeContext: \"none\"` is supported in v1.\n\n**Model selection precedence:** `modelPreferences.hints[*].name` (case-insensitive substring; cheapest wins when `costPriority > 0`) → user's saved `preferred_model` → default provider's cheapest active model. Plugins should normally omit `modelPreferences` so user-level preferences apply.\n\n**Common pitfalls:** the same stdin reader receives both agent-initiated requests AND host responses to reverse RPCs (use the SDK's `dispatch_response` helper); never `exit()` after a single invoke (sampling is async); always echo `invoke_id` in `metadata` so Nexus can attribute spend.",
+      "sub": "Let a long-running Executa plugin ask its host (Anna) to perform an LLM completion **on the user's behalf** — no API key, no model selection, no quota tracking in the plugin. Modelled on MCP `sampling/createMessage`.\n\n**Pre-requisites** (all three required):\n1. **v2 protocol negotiation.** The host's `initialize` advertises `protocolVersion: 2.0`; the plugin must respond with the same version and `client_capabilities.sampling = {}`.\n2. **Manifest declaration.** `host_capabilities: [\"llm.sample\"]`. Missing this → `-32008 SAMPLING_NOT_NEGOTIATED`.\n3. **User grant.** The user enables sampling for this Executa in Anna Admin (`UserExecuta.custom_config.sampling_grant.enabled = true` — a single on/off switch; per-invoke limits are platform constants, no longer user-adjustable). Missing this → `-32001 SAMPLING_NOT_GRANTED`.\n\n**Per-invoke caps (platform constants):** `maxTokens` per call caps at **8,192** (`DEFAULT_SAMPLING_MAX_TOKENS_PER_CALL`; the platform additionally clamps to the selected model's output cap and echoes the result in `_meta.maxTokens`); calls per `invoke_id` cap at **8**; cumulative tokens per invoke cap at **32,000**; `sampling_token` TTL **600s**; only `includeContext: \"none\"` is supported in v1.\n\n**Model selection precedence:** `modelPreferences.hints[*].name` (case-insensitive substring; cheapest wins when `costPriority > 0`) → user's saved `preferred_model` → default provider's cheapest active model. Plugins should normally omit `modelPreferences` so user-level preferences apply.\n\n**Common pitfalls:** the same stdin reader receives both agent-initiated requests AND host responses to reverse RPCs (use the SDK's `dispatch_response` helper); never `exit()` after a single invoke (sampling is async); always echo `invoke_id` in `metadata` so Nexus can attribute spend.",
       "detail_source": "/static/data/reference-executa-sampling.json",
       "groups": [
         {
@@ -1886,7 +1886,7 @@
             },
             {
               "name": "`-32007 max_tokens_exceeded` on a single small call",
-              "desc": "The cap is **cumulative across the same `invoke_id`**, not per-call (default 32 000 tokens; host max also 32 000 in v1, mirrored in the Sampling authorization UI's `maxTokensTotal` field). Send fewer / smaller sampling calls per tool invocation, or have the user raise `sampling_grant.maxTokensTotal` in Anna Admin.",
+              "desc": "The cap is **cumulative across the same `invoke_id`**, not per-call — a fixed platform constant of 32 000 tokens per invoke (no longer adjustable in Anna Admin). Send fewer / smaller sampling calls per tool invocation, or split the workload across invokes.",
               "tags": [
                 {
                   "label": "-32007"
@@ -2239,7 +2239,7 @@
           "items": [
             {
               "name": "csp_overrides",
-              "desc": "Per-directive CSP additions (object of directive → string[]). `script-src` additionally accepts `'wasm-unsafe-eval'` to run WebAssembly packaged in the bundle (single-threaded only — no SharedArrayBuffer).",
+              "desc": "Per-directive CSP additions (object of directive → string[]). `script-src` additionally accepts `'wasm-unsafe-eval'` to run WebAssembly packaged in the bundle (single-threaded only — no SharedArrayBuffer). `frame-src` accepts explicit `https://` origins (no `'*'`/path/keywords, max 8) to embed third-party iframes — declaring it also scopes autoplay/fullscreen/PiP/encrypted-media delegation to those origins.",
               "tags": [
                 {
                   "label": "object"
@@ -2751,13 +2751,13 @@
       "id": "host-api-agent",
       "kicker": "Host API · agent.*",
       "title": "agent.* — agent sessions",
-      "sub": "Spin up, drive, and inspect **LangGraph-backed agent runs** from your bundle. `session.create` mints an `AnnaAppSession` (kind=`agent`) and caches the underlying `app_session_token` in `_aps_token_cache[uuid]` — the iframe never holds capability credentials; it threads the `app_session_uuid` (`aps_…`) through every subsequent call.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_agent_session_*` (dispatcher) → `SqlAlchemyWindowStore.agent_session_*` (store) → `app_llm_facade.agent_session_*` → LangGraph runner via `src.services.app_runner._copilot_unified`.\n\n**Two-layer ACL (the dispatcher checks ui.host_api, NOT permissions):**\n1. The dispatcher gate `host_api_allows` for the `agent` namespace reads ONLY `manifest.ui.host_api.agent` — `manifest.permissions[]` is display/audit metadata and is NEVER consulted.\n2. `manifest.ui.host_api.agent.session.{auto, fixed: {client_ids: []}}` is **submode-aware**: each submode is `false` until explicitly enabled. Fixed mode further validates `fixed_client_id` against the allow-list (empty list = any user-owned Executa).\n3. `manifest.ui.host_api.agent.tools` advisory-restricts the tool surface for the session; the facade re-resolves at run time so newly-installed Executas appear without re-creating the session.\n\n**Submodes**\n• `auto` — LangGraph runner picks any tool the user's Executa exposes (intersected with `agent.tools`).\n• `fixed` — pin the run to one Executa by `client_id`. Use this for deterministic flows or scoped access (e.g. read-only tools).\n\n**Streaming model.** `agent.session.run` returns SYNCHRONOUSLY with `{stream_id, run_id}`; the dispatcher allocates `stream_id`, enqueues the run, and the agent worker publishes each frame directly to a per-stream NATS subject, delivered to the iframe over the `rpc.stream` event topic — `{stream_id, window_uuid, seq, payload, done}`. The SDK's `AgentRunStream` reassembles by `seq` (out-of-order frames are buffered until the missing seq arrives) into an `AsyncIterable`. The pump ALWAYS emits a terminal `{event:'end', run_id}` with `done:true`, even on cancellation or crash.\n\n**Session lifecycle.** `create` → cached uuid for `expires_in` seconds (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early) → many `run` calls → optional `cancel(run_id)` / `history(limit)` → `delete` revokes + pops cache. After `delete` or TTL eviction, subsequent calls fail `session_expired` / `APP_SESSION_NOT_FOUND`.\n\n**Quotas + caps.** Per-call `quotaCaps` requested on `create` are intersected (`min`) with `UserAnnaApp.custom_config.llm_grant.quota_caps`; defaults to `max_tokens_per_call=4096` if neither side declares one. `APP_QUOTA_EXCEEDED` may be raised pre-stream (synchronously) OR mid-stream as an in-band `{event:'error'}` frame.\n\n**SDK ergonomics.** Prefer the high-level helper `await anna.agent.session({submode, ...})` — it returns an `AgentSession` instance with `.run({content})` / `.cancel(runId)` / `.history({limit})` / `.delete()` methods bound to the new uuid, so apps never thread `app_session_uuid` manually. Per-namespace timeout default is **300 000 ms** (ack-only — long streams keep the iterator alive until `done`).",
+      "sub": "Spin up, drive, and inspect **LangGraph-backed agent runs** from your bundle. `session.create` mints an `AnnaAppSession` (kind=`agent`) and caches the underlying `app_session_token` in `_aps_token_cache[uuid]` — the iframe never holds capability credentials; it threads the `app_session_uuid` (`aps_…`) through every subsequent call.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_agent_session_*` (dispatcher) → `SqlAlchemyWindowStore.agent_session_*` (store) → `app_llm_facade.agent_session_*` → LangGraph runner via `src.services.app_runner._copilot_unified`.\n\n**Two-layer ACL (the dispatcher checks ui.host_api, NOT permissions):**\n1. The dispatcher gate `host_api_allows` for the `agent` namespace reads ONLY `manifest.ui.host_api.agent` — `manifest.permissions[]` is display/audit metadata and is NEVER consulted.\n2. `manifest.ui.host_api.agent.session.{auto, fixed: {client_ids: []}}` is **submode-aware**: each submode is `false` until explicitly enabled. Fixed mode further validates `fixed_client_id` against the allow-list (empty list = any user-owned Executa).\n3. `manifest.ui.host_api.agent.tools` advisory-restricts the tool surface for the session; the facade re-resolves at run time so newly-installed Executas appear without re-creating the session.\n\n**Submodes**\n• `auto` — LangGraph runner picks any tool the user's Executa exposes (intersected with `agent.tools`).\n• `fixed` — pin the run to one Executa by `client_id`. Use this for deterministic flows or scoped access (e.g. read-only tools).\n\n**Streaming model.** `agent.session.run` returns SYNCHRONOUSLY with `{stream_id, run_id}`; the dispatcher allocates `stream_id`, enqueues the run, and the agent worker publishes each frame directly to a per-stream NATS subject, delivered to the iframe over the `rpc.stream` event topic — `{stream_id, window_uuid, seq, payload, done}`. The SDK's `AgentRunStream` reassembles by `seq` (out-of-order frames are buffered until the missing seq arrives) into an `AsyncIterable`. The pump ALWAYS emits a terminal `{event:'end', run_id}` with `done:true`, even on cancellation or crash.\n\n**Session lifecycle.** `create` → cached uuid for `expires_in` seconds (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early) → many `run` calls → optional `cancel(run_id)` / `history(limit)` → `delete` revokes + pops cache. After `delete` or TTL eviction, subsequent calls fail `session_expired` / `APP_SESSION_NOT_FOUND`.\n\n**Quotas + caps.** `quotaCaps` on `create` keeps only capability bounds (`allowed_tools` ∩ user grant, `inherit_host_tools`); the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored — output caps are resolved per call as platform constants ∩ model capability. `APP_QUOTA_EXCEEDED` may be raised pre-stream (synchronously) OR mid-stream as an in-band `{event:'error'}` frame.\n\n**SDK ergonomics.** Prefer the high-level helper `await anna.agent.session({submode, ...})` — it returns an `AgentSession` instance with `.run({content})` / `.cancel(runId)` / `.history({limit})` / `.delete()` methods bound to the new uuid, so apps never thread `app_session_uuid` manually. Per-namespace timeout default is **300 000 ms** (ack-only — long streams keep the iterator alive until `done`).",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-agent.json",
       "items": [
         {
           "name": "agent.session.create",
-          "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Validates `submode` against the manifest grant and `fixed_client_id` against the allow-list; optional `systemPrompt` overrides the agent's system prompt. Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is runtime-resolved via `effective_granted_tool_names`, NOT a raw manifest echo).",
+          "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Validates `submode` against the manifest grant and `fixed_client_id` against the allow-list; optional `systemPrompt` overrides the agent's system prompt. `quotaCaps` keeps only capability bounds (`allowed_tools` ∩ grant, `inherit_host_tools`) — the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (accepted, never 400). Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is runtime-resolved via `effective_granted_tool_names`, NOT a raw manifest echo).",
           "tags": [
             {
               "label": "submode"
@@ -2769,7 +2769,7 @@
               "label": "systemPrompt"
             },
             {
-              "label": "quotaCaps∩grant"
+              "label": "allowed_tools∩grant"
             }
           ]
         },
@@ -2914,7 +2914,7 @@
       "items": [
         {
           "name": "llm.complete",
-          "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). `maxTokens` silently clamped to `session.quota_caps.max_tokens_per_call` (default 4096). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED`, `APP_PROVIDER_ERROR`.",
+          "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ 8192, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
           "tags": [
             {
               "label": "MCP-shaped"
@@ -2926,19 +2926,22 @@
               "label": "non-streaming"
             },
             {
-              "label": "maxTokens clamped"
+              "label": "sync cap 8192"
             }
           ]
         },
         {
           "name": "llm.stream",
-          "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
+          "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
           "tags": [
             {
               "label": "MCP-shaped"
             },
             {
               "label": "streaming"
+            },
+            {
+              "label": "cap 65536"
             }
           ]
         }

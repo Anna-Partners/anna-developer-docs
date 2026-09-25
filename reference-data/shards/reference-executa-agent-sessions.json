@@ -528,7 +528,7 @@
           "summary": "Non-empty array of MCP-shaped messages (`{role, content}`).",
           "notes": [
             "Validated bridge-side: must be a list with at least one entry.",
-            "Anna server applies the same schema constraints as the `anna-app` SDK; multimodal content blocks are accepted verbatim."
+            "`content` accepts a string, a single MCP block, or a block array — same contract as the iframe `llm.complete`: `{type:'text', text}` and `{type:'image', data:'<raw base64 or data: URI>', mimeType}` / `{type:'image', url}` blocks are supported. Images require a vision-capable resolved model (`APP_MODEL_NOT_VISION_CAPABLE` otherwise) and are only allowed in `user` messages."
           ]
         },
         {

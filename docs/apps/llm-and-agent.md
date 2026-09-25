@@ -4,7 +4,7 @@ description: "Call llm.complete and run a multi-turn agent session from inside y
 section: apps
 slug: llm-and-agent
 order: 16
-updated: 2026-06-07
+updated: 2026-09-24
 estimated_minutes: 8
 category: "App UI"
 ---
@@ -77,10 +77,42 @@ Response shape:
   role: "assistant",
   content: { type: "text", text: string },
   model: string,
-  stopReason: "endTurn" | "stopSequence" | "maxTokens",
+  stopReason: "endTurn" | "maxTokens" | "contentFilter" | "toolUse",
   usage: { inputTokens: number, outputTokens: number, totalTokens: number },
+  _meta: {
+    provider: string | null,
+    latencyMs: number,
+    quotaConsumed: number,
+    // effective output cap actually applied to this call:
+    maxTokens: { requested: number | null, effective: number,
+                 limitedBy: "request" | "model" | "transport" | "default" },
+  },
 }
 ```
+
+`stopReason` maps the provider's real `finish_reason`: `"maxTokens"` means
+the output was **truncated** at the effective cap — detect it and continue
+programmatically instead of shipping half a document. Unknown provider
+reasons fall back to `"endTurn"`.
+
+### 2.0 Output caps — sync 8 192 / stream 65 536
+
+There is no per-app "max tokens" grant to configure. The effective output
+cap is resolved per call:
+
+```
+effective = min(maxTokens ?? 8192, model output cap, path ceiling)
+```
+
+- **`llm.complete`** rides a held HTTP request → path ceiling **8 192**.
+- **`llm.stream`** delivers frames over the push channel → ceiling **65 536**.
+- The resolved cap is echoed in `_meta.maxTokens` (`limitedBy` tells you
+  which constraint won), so clamping is never silent.
+
+**Long outputs belong on `llm.stream`.** With `@anna-ai/app-runtime`
+≥ 0.17.0 you don't even need to switch calls: `llm.complete` with
+`maxTokens > 8192` is transparently delivered over the streaming channel
+and resolves with the identical single-result shape.
 
 **Errors** are thrown as `HostRpcError`:
 
@@ -90,6 +122,48 @@ Response shape:
 | `not_implemented` | Host runtime didn't wire this method (e.g. local harness with `--no-llm`) |
 | `quota_exceeded` | User has hit their daily/per-app cap |
 | `invalid_arg` | Missing/empty `messages`, bad role, etc. |
+
+### 2.0a Image inputs (MCP image blocks)
+
+`messages[].content` also accepts MCP **image blocks**, so the model can
+see an image in the same stateless completion — no session required:
+
+```js
+// FileReader.readAsDataURL(file) → "data:image/png;base64,AAAA…"
+const b64 = dataUrl.split(",")[1];         // raw base64 (or send the data: URI whole)
+
+const reply = await window.anna.llm.complete({
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text",  text: "What is in this image?" },
+        { type: "image", data: b64, mimeType: "image/png" },
+      ],
+    },
+  ],
+  maxTokens: 512,
+});
+```
+
+Rules and semantics:
+
+- Block shapes: `{ type: "image", data: "<raw base64>", mimeType: "image/png" }`,
+  `data` as a full `data:` URI (`mimeType` optional), or
+  `{ type: "image", url: "https://…" }` (public HTTPS only — SSRF guard).
+- Same media rules as session attachments: `image/jpeg|png|gif|webp|bmp|svg+xml`,
+  ≤ 20 MB per image.
+- Text and images may share one content array (as above) **or** sit in
+  separate consecutive `user` messages — both work. Image blocks are only
+  allowed in `user` messages.
+- The resolved model must be vision-capable, or the call fails fast with
+  `errorCode: "APP_MODEL_NOT_VISION_CAPABLE"` — pick a vision model via
+  `modelPreferences` (e.g. `{ hints: [{ name: "gemini" }] }`). Images are
+  **never** silently dropped; unknown block types are rejected as invalid.
+- Works identically on `anna.llm.stream` and on the plugin-side
+  `agent/complete` reverse RPC. The plugin-side `sampling/createMessage`
+  remains **text-only** and rejects image blocks — use `agent/complete`
+  there instead.
 
 ---
 

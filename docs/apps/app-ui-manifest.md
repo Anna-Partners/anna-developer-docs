@@ -201,6 +201,7 @@ Without the `allow` attribute the player renders but fullscreen / autoplay-on-se
 Tips:
 
 - Prefer `https://www.youtube-nocookie.com` over `https://www.youtube.com` — same player, fewer ambient cookies sent to Google.
+- **Don't strip the referrer on your embed iframe.** Declaring `frame-src` also relaxes the bundle's `Referrer-Policy` from `no-referrer` to `strict-origin-when-cross-origin` (cross-origin requests carry the origin only, never the path) — YouTube requires a Referer on embed requests and shows **error 153** ("video player configuration error") without one. Adding `referrerpolicy="no-referrer"` to your `<iframe>` re-breaks it.
 - **Local harness parity**: `anna-app dev` serves your bundle without CSP or Permissions-Policy headers, so embeds work locally even *without* the declaration. Always verify with `anna-app validate` and an online working draft before relying on local behaviour.
 - The embedded page is a normal cross-origin iframe: it inherits the app sandbox, cannot reach the Anna host bridge, and cannot call Host APIs.
 

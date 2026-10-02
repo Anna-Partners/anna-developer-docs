@@ -1,0 +1,6 @@
+# Machine-checkable claims for docs/apps/llm-and-agent.md.
+# Run-recovery pull surface ships in @anna-ai/app-schema >= 0.24.0
+# (forum #341 P3 — push pairs with pull).
+host_api_methods:
+  - agent.session.run.status
+  - agent.session.frames

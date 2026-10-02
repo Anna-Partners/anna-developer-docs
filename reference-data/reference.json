@@ -2112,6 +2112,18 @@
               "kind": "warm"
             }
           ]
+        },
+        {
+          "name": "storage",
+          "desc": "Structured APS storage declaration (schema 3, design aps-authorization-simplification §6.1): `{kv?: bool, files?: bool, scopes?: {…}}`. Replaces the legacy `aps.*` capability strings in `host_capabilities` — the two forms are mutually exclusive (validator-enforced). Normalization lives in `storage_decl.py`.",
+          "tags": [
+            {
+              "label": "schema 3"
+            },
+            {
+              "label": "StorageManifestSection"
+            }
+          ]
         }
       ]
     },
@@ -2400,7 +2412,7 @@
       "id": "platform-tools",
       "kicker": "Anna App · agent tools",
       "title": "Platform tools — the agent-session tool universe",
-      "sub": "What can an App agent session actually call? Two distinct regimes, selected at `agent.session.create` time:\n\n**Sandbox (default when `quotaCaps.inherit_host_tools` is false/absent for your grant).** The resolved surface is a pure intersection — `AppToolRegistry.public_set ∩ manifest.ui.host_api.agent.tools (→ user grant) ∩ quotaCaps.allowed_tools [∩ dev_safe on harness PAT sessions]`. Every built-in below is INDIVIDUALLY grantable — e.g. `allowed_tools: [\"fs_read_file\"]` yields a read-only-filesystem agent that cannot write or exec (forum #192). Host-kit tools (fs / exec / browser) execute on the session's platform-pinned agent client: `fixed` submode targets `fixed_client_id`, `auto` targets the user's default agent — the pinned `client_id` always overrides anything the model supplies, so an App can never aim side effects at an arbitrary machine. Any name outside the registry is **silently dropped** (no error); an empty result means a TEXT-ONLY agent — side-effect claims in its output would be hallucinated (the run emits a `NO_TOOLS_AVAILABLE` warning frame). Use `agent.session.catalog()` to see the registry universe and per-tool `blocked_by` diagnostics BEFORE creating a session. Per-run `allowed_tools` further narrows a sandbox session's surface for that run.\n\n**Inherit (`quotaCaps.inherit_host_tools: true`, requires the user grant).** The session gets the SAME tool kit as the user's main copilot — the platform built-ins plus every Executa the user has installed. This surface is user-specific and dynamic (can be hundreds of tools ≈ 100K prompt tokens — slower + costlier runs); `granted_tools` echoes `[\"*\"]`, and the per-run `run_meta` frame is the authoritative record. Per-run `allowed_tools` does NOT narrow inherit sessions — prefer a sandbox session with an explicit allowlist when you need a policy like read-but-never-write.\n\nThe sandbox registry below is drift-checked against `src/services/app_tool_registry.py` in CI — registering a tool without updating this section fails the build.",
+      "sub": "What can an App agent session actually call? Declaration is consent — the resolved surface is a pure intersection, identical for every user of the same app version:\n\n`AppToolRegistry.public_set ∩ manifest.ui.host_api.agent.tools ∩ quotaCaps.allowed_tools [∩ dev_safe on harness PAT sessions]`.\n\nEvery built-in below is INDIVIDUALLY declarable — e.g. declaring `[\"fs_read_file\"]` yields a read-only-filesystem agent that cannot write or exec (forum #192); declaring `[\"*\"]` (sole element, validator-enforced) expands to the full registry at create time. There is NO per-tool user grant: the user's single Agent consent on the permission gate covers the declared list (host-kit tools are flagged ⚠ there). Host-kit tools (fs / exec / browser) execute on the session's platform-pinned agent client: `fixed` submode targets `fixed_client_id`, `auto` targets the user's default agent — the pinned `client_id` always overrides anything the model supplies, so an App can never aim side effects at an arbitrary machine. Any name outside the registry or the declaration is **silently dropped** (no error); an empty result means a TEXT-ONLY agent — side-effect claims in its output would be hallucinated (the run emits a `NO_TOOLS_AVAILABLE` warning frame). Use `agent.session.catalog()` to see the registry universe and per-tool `blocked_by` / `risk_group` diagnostics BEFORE creating a session. Per-run `allowed_tools` further narrows a sandbox session's surface for that run.\n\n**`inherit_host_tools` is retired for app sessions** (requests are accepted-and-ignored with an `INHERIT_IGNORED` run warning; `granted_tools: [\"*\"]` can no longer occur for apps). The inherit regime — the user's full copilot kit including every installed Executa — remains available only to Executa (plugin) sessions, where it is the default.\n\nThe sandbox registry below is drift-checked against `src/services/app_tool_registry.py` in CI — registering a tool without updating this section fails the build.",
       "source": "platform_tools",
       "groups": [
         {
@@ -2751,13 +2763,13 @@
       "id": "host-api-agent",
       "kicker": "Host API · agent.*",
       "title": "agent.* — agent sessions",
-      "sub": "Spin up, drive, and inspect **LangGraph-backed agent runs** from your bundle. `session.create` mints an `AnnaAppSession` (kind=`agent`) and caches the underlying `app_session_token` in `_aps_token_cache[uuid]` — the iframe never holds capability credentials; it threads the `app_session_uuid` (`aps_…`) through every subsequent call.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_agent_session_*` (dispatcher) → `SqlAlchemyWindowStore.agent_session_*` (store) → `app_llm_facade.agent_session_*` → LangGraph runner via `src.services.app_runner._copilot_unified`.\n\n**Two-layer ACL (the dispatcher checks ui.host_api, NOT permissions):**\n1. The dispatcher gate `host_api_allows` for the `agent` namespace reads ONLY `manifest.ui.host_api.agent` — `manifest.permissions[]` is display/audit metadata and is NEVER consulted.\n2. `manifest.ui.host_api.agent.session.{auto, fixed: {client_ids: []}}` is **submode-aware**: each submode is `false` until explicitly enabled. Fixed mode further validates `fixed_client_id` against the allow-list (empty list = any user-owned Executa).\n3. `manifest.ui.host_api.agent.tools` advisory-restricts the tool surface for the session; the facade re-resolves at run time so newly-installed Executas appear without re-creating the session.\n\n**Submodes**\n• `auto` — LangGraph runner picks any tool the user's Executa exposes (intersected with `agent.tools`).\n• `fixed` — pin the run to one Executa by `client_id`. Use this for deterministic flows or scoped access (e.g. read-only tools).\n\n**Streaming model.** `agent.session.run` returns SYNCHRONOUSLY with `{stream_id, run_id}`; the dispatcher allocates `stream_id`, enqueues the run, and the agent worker publishes each frame directly to a per-stream NATS subject, delivered to the iframe over the `rpc.stream` event topic — `{stream_id, window_uuid, seq, payload, done}`. The SDK's `AgentRunStream` reassembles by `seq` (out-of-order frames are buffered until the missing seq arrives) into an `AsyncIterable`. The pump ALWAYS emits a terminal `{event:'end', run_id}` with `done:true`, even on cancellation or crash.\n\n**Session lifecycle.** `create` → cached uuid for `expires_in` seconds (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early) → many `run` calls → optional `cancel(run_id)` / `history(limit)` → `delete` revokes + pops cache. After `delete` or TTL eviction, subsequent calls fail `session_expired` / `APP_SESSION_NOT_FOUND`.\n\n**Quotas + caps.** `quotaCaps` on `create` keeps only capability bounds (`allowed_tools` ∩ user grant, `inherit_host_tools`); the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored — output caps are resolved per call as platform constants ∩ model capability. `APP_QUOTA_EXCEEDED` may be raised pre-stream (synchronously) OR mid-stream as an in-band `{event:'error'}` frame.\n\n**SDK ergonomics.** Prefer the high-level helper `await anna.agent.session({submode, ...})` — it returns an `AgentSession` instance with `.run({content})` / `.cancel(runId)` / `.history({limit})` / `.delete()` methods bound to the new uuid, so apps never thread `app_session_uuid` manually. Per-namespace timeout default is **300 000 ms** (ack-only — long streams keep the iterator alive until `done`).",
+      "sub": "Spin up, drive, and inspect **LangGraph-backed agent runs** from your bundle. `session.create` mints an `AnnaAppSession` (kind=`agent`) and caches the underlying `app_session_token` in `_aps_token_cache[uuid]` — the iframe never holds capability credentials; it threads the `app_session_uuid` (`aps_…`) through every subsequent call.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_agent_session_*` (dispatcher) → `SqlAlchemyWindowStore.agent_session_*` (store) → `app_llm_facade.agent_session_*` → LangGraph runner via `src.services.app_runner._copilot_unified`.\n\n**Two-layer ACL (the dispatcher checks ui.host_api, NOT permissions):**\n1. The dispatcher gate `host_api_allows` for the `agent` namespace reads ONLY `manifest.ui.host_api.agent` — `manifest.permissions[]` is display/audit metadata and is NEVER consulted.\n2. `manifest.ui.host_api.agent.session.{auto, fixed: {client_ids: []}}` is **submode-aware**: each submode is `false` until explicitly enabled. Fixed mode further validates `fixed_client_id` against the allow-list (empty list = any user-owned Executa).\n3. `manifest.ui.host_api.agent.tools` is the AUTHORIZATION face (declaration-is-consent): the session's sandbox surface is `platform registry ∩ agent.tools ([\"*\"] = full registry) ∩ quotaCaps.allowed_tools` — there is no per-tool user grant.\n\n**Submodes**\n• `auto` — LangGraph runner uses the declared platform-tool surface; host-kit tools target the user's default agent.\n• `fixed` — pin the run to one Executa by `client_id`. Use this for deterministic flows or scoped access (e.g. read-only tools).\n\n**Streaming model.** `agent.session.run` returns SYNCHRONOUSLY with `{stream_id, run_id}`; the dispatcher allocates `stream_id`, enqueues the run, and the agent worker publishes each frame directly to a per-stream NATS subject, delivered to the iframe over the `rpc.stream` event topic — `{stream_id, window_uuid, seq, payload, done}`. The SDK's `AgentRunStream` reassembles by `seq` (out-of-order frames are buffered until the missing seq arrives) into an `AsyncIterable`. The pump ALWAYS emits a terminal `{event:'end', run_id}` with `done:true`, even on cancellation or crash.\n\n**Session lifecycle.** `create` → cached uuid for `expires_in` seconds (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early) → many `run` calls → optional `cancel(run_id)` / `history(limit)` → `delete` revokes + pops cache. After `delete` or TTL eviction, subsequent calls fail `session_expired` / `APP_SESSION_NOT_FOUND`.\n\n**Quotas + caps.** `quotaCaps.allowed_tools` on `create` narrows within the manifest-declared set; `inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (inherit requests emit an `INHERIT_IGNORED` run warning) — output caps are resolved per call as platform constants ∩ model capability. `APP_QUOTA_EXCEEDED` may be raised pre-stream (synchronously) OR mid-stream as an in-band `{event:'error'}` frame.\n\n**SDK ergonomics.** Prefer the high-level helper `await anna.agent.session({submode, ...})` — it returns an `AgentSession` instance with `.run({content})` / `.cancel(runId)` / `.history({limit})` / `.delete()` methods bound to the new uuid, so apps never thread `app_session_uuid` manually. Per-namespace timeout default is **300 000 ms** (ack-only — long streams keep the iterator alive until `done`).",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-agent.json",
       "items": [
         {
           "name": "agent.session.create",
-          "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Validates `submode` against the manifest grant and `fixed_client_id` against the allow-list; optional `systemPrompt` overrides the agent's system prompt. `quotaCaps` keeps only capability bounds (`allowed_tools` ∩ grant, `inherit_host_tools`) — the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (accepted, never 400). Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is runtime-resolved via `effective_granted_tool_names`, NOT a raw manifest echo).",
+          "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Validates `submode` against the manifest grant and `fixed_client_id` against the allow-list; optional `systemPrompt` overrides the agent's system prompt. Tool surface is declaration-is-consent: `AppToolRegistry ∩ manifest ui.host_api.agent.tools (`[\"*\"]` = full registry) ∩ quotaCaps.allowed_tools` — no per-tool user grant exists. `quotaCaps.inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (accepted, never 400; inherit requests emit an `INHERIT_IGNORED` run warning). Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is the resolved intersection; `inherit_host_tools` is always `false` for app sessions).",
           "tags": [
             {
               "label": "submode"
@@ -2769,13 +2781,13 @@
               "label": "systemPrompt"
             },
             {
-              "label": "allowed_tools∩grant"
+              "label": "declaration-is-consent"
             }
           ]
         },
         {
           "name": "agent.session.catalog",
-          "desc": "Pre-create discovery of the platform-tool universe: which names are legal in create-time `quotaCaps.allowed_tools` / per-run `allowed_tools`, and whether they would resolve for THIS app. Returns `{platform_tools: [{name, description, dev_safe, declared_in_manifest, user_granted, eligible, blocked_by?}], inherit_host_tools_granted, manifest_declared, user_granted}`. `blocked_by` pinpoints WHY a tool is unavailable (`manifest` = not declared in `ui.host_api.agent.tools`; `user_grant` = not authorized in the Permissions modal). Read-only — mints no session, consumes no quota. Previously the resolved surface was only visible after-the-fact via the create response's `granted_tools` echo.",
+          "desc": "Pre-create discovery of the platform-tool universe: which names are legal in create-time `quotaCaps.allowed_tools` / per-run `allowed_tools`, and whether they would resolve for THIS app. Returns `{platform_tools: [{name, description, dev_safe, risk_group, declared_in_manifest, user_granted, eligible, blocked_by?}], inherit_host_tools_granted, manifest_declared, declared_wildcard, user_granted}`. Declaration-is-consent: the only `blocked_by` value is `manifest` (= not declared in `ui.host_api.agent.tools` — declare it, or declare `[\"*\"]`, and republish); `risk_group` separates server-side tools from host-kit tools (⚠ local side effects). `user_granted` / `inherit_host_tools_granted` are deprecated echoes kept one release. Read-only — mints no session, consumes no quota.",
           "tags": [
             {
               "label": "discovery"
@@ -2863,6 +2875,36 @@
             },
             {
               "label": "since v0.8.0"
+            }
+          ]
+        },
+        {
+          "name": "agent.session.run.status",
+          "desc": "Point-in-time status of ONE run: `{app_session_uuid, run_id}` → `{status: 'queued'|'running'|'completed'|'failed'|'cancelled', run_id, task_id, stream_id, started_at?, finished_at?, model?, error?}`. Answers \"did my run actually execute (and get charged) even though I received no frames?\" — check it BEFORE re-running after a silent stream; `completed` means the run executed and was billed, so recover its output via `agent.session.frames` instead of re-running. Status is queryable for ~1h after enqueue; unknown / foreign / aged-out runs return `not_found` (existence is not leaked). Read-only, no quota.",
+          "tags": [
+            {
+              "label": "read-only"
+            },
+            {
+              "label": "since v0.18.0"
+            },
+            {
+              "label": "push↔pull"
+            }
+          ]
+        },
+        {
+          "name": "agent.session.frames",
+          "desc": "Replay a run's archived `rpc.stream` frames by `seq`: `{stream_id, after_seq?=0, limit?≤500}` → `{frames: [{seq≥1, payload, done}], complete}`. Pull-based recovery when the realtime push leg is unavailable — poll (`after_seq` = last seen seq) until a frame carries `done: true`. SDK ≥ 0.18.0 arms this automatically: `AgentSession.run()` with no frame within `firstFrameTimeoutMs` (default 20s) self-recovers by polling. Ownership is user-scoped via `stream_meta` (parity with the dashboard backfill REST endpoint); rate limit 30/min/user is SHARED with that endpoint; archive window ~1h. Errors: `not_found`, `rate_limited`, `backfill_unavailable`.",
+          "tags": [
+            {
+              "label": "read-only"
+            },
+            {
+              "label": "since v0.18.0"
+            },
+            {
+              "label": "rate limit 30/min shared"
             }
           ]
         }
@@ -3359,6 +3401,67 @@
         {
           "name": "apps.deck.reorder",
           "desc": "Persist a new deck order (full list of app ids)."
+        },
+        {
+          "name": "apps.update",
+          "desc": "Kick off an in-place update of an installed app to its latest published version (design app-update-in-place-phase1). Server-side: install job with rollback to the prior installed version on failure. Draft/dev projections (`0.0.0-*`) never see updates. Dispatcher base table ships a stub (`not_implemented`) — production nexus wires the real handler via `deck_service.update_app`.",
+          "tags": [
+            {
+              "label": "in-place update"
+            }
+          ]
+        },
+        {
+          "name": "apps.update_status",
+          "desc": "Poll an in-flight update: returns the same three-state `deploy_status` as the REST surface (`ready` / `deploying` / `degraded`, plus `agent_asleep`). `degraded` after an update attempt means the install job failed and rolled back. Stub in the base dispatcher; wired in production nexus.",
+          "tags": [
+            {
+              "label": "read-only"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "group": "Host API",
+      "id": "host-api-mobile",
+      "kicker": "Host API · mobile.*",
+      "title": "mobile.* — anna-mobile native bridge",
+      "sub": "Native capabilities exposed to apps running inside the anna-mobile shell (SDK ≥ 0.16.0 / dispatcher ≥ 0.22.0). Grant via `manifest.ui.host_api.mobile`. Granted envelopes are intercepted client-side by the shell and executed by the native layer — they never reach `/runtime/rpc`. Desktop containers reject with `unsupported_container` (distinct from `permission_denied` = grant missing) so apps can degrade cleanly.",
+      "source": "host_api",
+      "items": [
+        {
+          "name": "mobile.share",
+          "desc": "System share sheet (anna-mobile shell only). At least one of `text` / `url` / `data_url` (data: URL ≤ 2MB decoded, written to a short-lived native temp file). User cancel resolves with `{shared: false}` — NOT an error. Requires manifest `ui.host_api.mobile`; desktop containers reject with `unsupported_container` (distinct from `permission_denied` = grant missing) so apps can render a clean degradation notice.",
+          "tags": [
+            {
+              "label": "mobile shell only"
+            },
+            {
+              "label": "since v0.16.0"
+            }
+          ]
+        },
+        {
+          "name": "mobile.haptics",
+          "desc": "Native haptic feedback: `{type: 'impact'|'notification'|'selection', style?}` → `{ok}`. `style` refines the type (impact → light|medium|heavy; notification → success|warning|error; selection ignores it). Desktop containers reject with `unsupported_container`.",
+          "tags": [
+            {
+              "label": "mobile shell only"
+            }
+          ]
+        },
+        {
+          "name": "mobile.camera_capture",
+          "desc": "Native camera capture: `{camera?: 'back'|'front', quality?: 0..1, max_bytes?}` → `{data_url, mime, width, height, byte_size}`. `max_bytes` caps the returned data URL (default 4MB, hard cap 8MB — bounded by the postMessage transport; oversized captures are re-compressed once, then reject with `too_large`). Persistence is the app's job (`upload` / `files` grants). Structured non-error rejections: `permission_denied_by_user` / `cancelled` / `too_large`.",
+          "tags": [
+            {
+              "label": "mobile shell only"
+            },
+            {
+              "label": "≤8MB"
+            }
+          ]
         }
       ]
     },

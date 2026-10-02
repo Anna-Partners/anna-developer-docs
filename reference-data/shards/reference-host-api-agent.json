@@ -14,7 +14,7 @@
         "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
         "streaming": false
       },
-      "signature": "anna.agent.session.create(args: {submode: 'auto'|'fixed', fixed_client_id?: string, label?: string, systemPrompt?: string, quotaCaps?: {max_tokens_per_call?: number, max_runs_per_day?: number, max_concurrent_runs?: number}}, opts?: {timeoutMs?: number}) => Promise<{app_session_uuid: string, expires_in: number, submode: 'auto'|'fixed', fixed_client_id: string|null, system_prompt: string|null, granted_tools: string[], inherit_host_tools: boolean}>",
+      "signature": "anna.agent.session.create(args: {submode: 'auto'|'fixed', fixed_client_id?: string, label?: string, systemPrompt?: string, quotaCaps?: {allowed_tools?: string[], inherit_host_tools?: boolean}}, opts?: {timeoutMs?: number}) => Promise<{app_session_uuid: string, expires_in: number, submode: 'auto'|'fixed', fixed_client_id: string|null, system_prompt: string|null, granted_tools: string[], inherit_host_tools: boolean}>",
       "params": [
         {
           "name": "submode",
@@ -54,16 +54,17 @@
           "name": "quotaCaps",
           "type": "{allowed_tools?, inherit_host_tools?, …}",
           "required": false,
-          "summary": "Capability bounds for the session. `allowed_tools` is intersected with the user grant; `inherit_host_tools` opts into the host's full tool surface. The numeric keys (`max_tokens_per_call`, `max_runs_per_day`, `max_concurrent_runs`) are **deprecated and ignored** — output caps are now resolved per call as platform constants ∩ model capability (see `llm.complete` `maxTokens`).",
+          "summary": "Capability bounds for the session. `allowed_tools` narrows within the manifest-declared set — the effective surface is `AppToolRegistry ∩ ui.host_api.agent.tools ∩ allowed_tools` (declaration-is-consent: no per-tool user grant exists). `inherit_host_tools` is **deprecated-ignored for app sessions** (accepted, never 400; the run emits an `INHERIT_IGNORED` warning frame) — declare the tools you need instead, or declare `[\"*\"]` for the full platform registry. The numeric keys (`max_tokens_per_call`, `max_runs_per_day`, `max_concurrent_runs`) are likewise deprecated and ignored.",
           "notes": [
-            "Deprecated numeric keys are accepted-and-ignored (server logs a warning; never a 400) — existing apps keep working unchanged.",
+            "Deprecated keys are accepted-and-ignored (server logs a warning; never a 400) — existing apps keep working unchanged.",
+            "Requesting a tool name the manifest does not declare silently intersects it away — use `agent.session.catalog()` to check `blocked_by` before creating the session.",
             "There is no per-session token ceiling any more; the spend guardrail is the user's CU pool plus the per-call worst-case quota precheck."
           ]
         }
       ],
       "returns": {
         "type": "{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}",
-        "desc": "• `app_session_uuid`: `aps_`-prefixed uuid; thread through every subsequent agent call.\n• `expires_in`: TTL in seconds for the cached capability token (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early). For absolute deadlines (`expires_at` / `max_lifetime_at` / `session_expires_in`) call `agent.session.refresh`.\n• `submode` / `fixed_client_id`: echoed back so the SDK can stash them on the `AgentSession` wrapper.\n• `system_prompt`: the validated per-session system prompt persisted on the row (or `null`).\n• `granted_tools`: the tool surface resolved for this session at creation time via `effective_granted_tool_names(session)` — runtime-accurate, NOT a raw manifest echo. The facade re-resolves on each `run`, so a freshly-installed Executa appears without re-creating the session.\n• `inherit_host_tools`: when `true` the session inherits the host's full tool surface and `granted_tools` is reported as `[\"*\"]` at run time; when `false` and `granted_tools` is empty the agent is text-only (watch for the `run_meta` `NO_TOOLS_AVAILABLE` warning frame)."
+        "desc": "• `app_session_uuid`: `aps_`-prefixed uuid; thread through every subsequent agent call.\n• `expires_in`: TTL in seconds for the cached capability token (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early). For absolute deadlines (`expires_at` / `max_lifetime_at` / `session_expires_in`) call `agent.session.refresh`.\n• `submode` / `fixed_client_id`: echoed back so the SDK can stash them on the `AgentSession` wrapper.\n• `system_prompt`: the validated per-session system prompt persisted on the row (or `null`).\n• `granted_tools`: the tool surface resolved for this session at creation time — `AppToolRegistry ∩ manifest ui.host_api.agent.tools (\"*\" expands to the full registry) ∩ quotaCaps.allowed_tools`. Runtime-accurate, NOT a raw manifest echo; identical for every user of the same app version.\n• `inherit_host_tools`: always `false` for app sessions (the inherit request semantics were removed — declaration-is-consent). When `granted_tools` is empty the agent is text-only (watch for the `run_meta` `NO_TOOLS_AVAILABLE` warning frame): declare the tools in `ui.host_api.agent.tools`."
       },
       "errors": [
         {
@@ -102,11 +103,11 @@
           "desc": "Local-dev harness without an agent bridge."
         }
       ],
-      "example": "// Auto-submode: pick any user Executa.\nconst sess = await anna.agent.session.create({\n  submode: \"auto\",\n  label: \"daily-summary\",\n  quotaCaps: { max_tokens_per_call: 2000 },\n});\n// → { app_session_uuid: \"aps_…\", expires_in: 3600, submode: \"auto\",\n//     fixed_client_id: null, granted_tools: [\"executa-fetch:*\", …] }\n\n// Fixed-submode: pin to one Executa.\nconst pinned = await anna.agent.session.create({\n  submode: \"fixed\",\n  fixed_client_id: \"executa-write-notes-abc123\",\n});\n",
+      "example": "// Auto-submode: lean sandbox scoped to the manifest-declared tools.\nconst sess = await anna.agent.session.create({\n  submode: \"auto\",\n  label: \"daily-summary\",\n  quotaCaps: { allowed_tools: [\"doc_read\"] },  // narrows within ui.host_api.agent.tools\n});\n// → { app_session_uuid: \"aps_…\", expires_in: 3600, submode: \"auto\",\n//     fixed_client_id: null, granted_tools: [\"doc_read\"], inherit_host_tools: false }\n\n// Fixed-submode: pin to one Executa.\nconst pinned = await anna.agent.session.create({\n  submode: \"fixed\",\n  fixed_client_id: \"executa-write-notes-abc123\",\n});\n",
       "limitations": [
         "`AnnaAppSession` rows accumulate — call `agent.session.delete` (or rely on `expires_in`) to avoid leaking entries in admin views.",
-        "`granted_tools` is runtime-resolved at creation (`effective_granted_tool_names`), not a raw manifest snapshot; the facade re-resolves the user's actual tool surface on every `run` (so a freshly-installed Executa appears immediately, no need to re-create the session). Pair it with `inherit_host_tools` to know whether the session can use tools at all.",
-        "`quotaCaps` cannot raise the grant's ceiling — `_intersect_quota_caps` always takes `min(requested, grant)`.",
+        "`granted_tools` is resolved at creation from the platform registry ∩ the installed version's manifest declaration — declaration-is-consent: there is NO per-tool user grant, so the surface is identical for every user. Host-kit tools (fs / exec / browser) still need the user's agent online to actually execute.",
+        "`quotaCaps.allowed_tools` cannot exceed the manifest declaration — undeclared names are silently intersected away (declare them in `ui.host_api.agent.tools`, or declare `[\"*\"]`, and republish).",
         "The high-level SDK helper `await anna.agent.session({...})` (note: callable, no `.create`) returns a JS `AgentSession` instance with `.run()` / `.cancel()` / `.history()` / `.delete()` methods bound to the new uuid — prefer it over manual uuid threading."
       ]
     },
@@ -116,7 +117,7 @@
       "kind": "Host API method · iframe surface",
       "group": "Agent",
       "since": "Introduced anna-app-runtime v0.14.0 / dispatcher 0.18.0",
-      "direction": "Bundle (iframe) → Host RPC → SqlAlchemyWindowStore.agent_session_catalog → AppToolRegistry + UserAnnaApp.custom_config.llm_grant",
+      "direction": "Bundle (iframe) → Host RPC → SqlAlchemyWindowStore.agent_session_catalog → AppToolRegistry + manifest ui.host_api.agent.tools",
       "summary": "Discover the platform-tool universe for agent sessions BEFORE creating one. Answers two questions that were previously unanswerable from an app: (1) what is the full set of legal `allowed_tools` names (the AppToolRegistry), and (2) which of them would actually resolve for THIS app — with a `blocked_by` diagnostic for each unavailable tool. Read-only: mints no session, consumes no quota, touches no LangGraph state.",
       "wire": {
         "json_rpc_method": "agent.session.catalog",
@@ -127,8 +128,8 @@
       "signature": "anna.agent.session.catalog() → Promise<CatalogResult>",
       "params": [],
       "returns": {
-        "type": "{platform_tools: {name, description, dev_safe, declared_in_manifest, user_granted, eligible, blocked_by?: 'manifest'|'user_grant'}[], inherit_host_tools_granted: boolean, manifest_declared: string[], user_granted: string[]}",
-        "desc": "`platform_tools` enumerates the ENTIRE sandbox registry (not just your eligible subset) so developers can see what exists and what to request. `eligible` = `declared_in_manifest && user_granted`; `blocked_by` names the first failing gate: `manifest` → add the tool to `ui.host_api.agent.tools` and republish; `user_grant` → the user must enable it in the Permissions modal. `inherit_host_tools_granted` tells you whether `quotaCaps.inherit_host_tools: true` would be honored at create time."
+        "type": "{platform_tools: {name, description, dev_safe, risk_group: 'server-side'|'host-kit', declared_in_manifest, user_granted, eligible, blocked_by?: 'manifest'}[], inherit_host_tools_granted: boolean, manifest_declared: string[], declared_wildcard: boolean, user_granted: string[]}",
+        "desc": "`platform_tools` enumerates the ENTIRE sandbox registry (not just your eligible subset) so developers can see what exists and what to request. Declaration-is-consent: `eligible` = `declared_in_manifest`; the only `blocked_by` value is `manifest` → add the tool to `ui.host_api.agent.tools` (or declare `[\"*\"]`) and republish. `risk_group` distinguishes server-side tools (doc_read / sheet_read / web_search) from host-kit tools (fs / exec / browser — real side effects on the user's machine, flagged ⚠ in the permission gate). `declared_wildcard` reports whether the manifest declares `[\"*\"]`; `manifest_declared` echoes the RESOLVED name list (wildcard expanded). Deprecated fields kept one release for SDK compatibility: `user_granted` (now an `eligible` echo) and `inherit_host_tools_granted` (always `false` — app-session inherit was removed)."
       },
       "errors": [
         {
@@ -144,10 +145,10 @@
           "when": "Host runtime predates dispatcher 0.18.0 (or the local harness, which does not wire a catalog store)."
         }
       ],
-      "example": "const cat = await anna.agent.session.catalog();\nconst usable = cat.platform_tools.filter(t => t.eligible).map(t => t.name);\n// e.g. [\"fs_read_file\", \"web_search\"] — legal values for quotaCaps.allowed_tools\nconst sess = await anna.agent.session({\n  submode: \"auto\",\n  quotaCaps: { inherit_host_tools: false, allowed_tools: [\"fs_read_file\"] },\n});\n// lean read-only sandbox session — the agent can read files but has no\n// fs_write_file / exec_run, and hundreds of inherited host tools (≈100K\n// prompt tokens) are avoided",
+      "example": "const cat = await anna.agent.session.catalog();\nconst usable = cat.platform_tools.filter(t => t.eligible).map(t => t.name);\n// e.g. [\"fs_read_file\", \"web_search\"] — legal values for quotaCaps.allowed_tools\nconst sess = await anna.agent.session({\n  submode: \"auto\",\n  quotaCaps: { allowed_tools: [\"fs_read_file\"] },\n});\n// lean read-only sandbox session — the agent can read files but has no\n// fs_write_file / exec_run; the surface equals the manifest declaration\n// narrowed by allowed_tools, identical for every user",
       "limitations": [
-        "Enumerates the SANDBOX registry only. The inherit-host-tools surface is user-specific and dynamic (built-ins + every installed Executa) — inspect it after the fact via the create response's `granted_tools` / the run's `run_meta` frame.",
-        "Eligibility reflects the grant at call time; the user can change Permissions between calls."
+        "Enumerates the SANDBOX platform registry only — user-installed Executa tools are not reachable from app sessions (that channel was retired together with inherit_host_tools).",
+        "Eligibility is per app VERSION (manifest declaration), not per user — it can only change when the app republishes with a different `ui.host_api.agent.tools`."
       ]
     },
     {

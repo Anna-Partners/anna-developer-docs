@@ -36,7 +36,7 @@ The host enforces ACL by `manifest.ui.host_api`. Two independent grants:
       "llm": ["complete"],
       "agent": {
         "session": { "auto": true, "fixed": null },
-        "tools":   ["tool-yourhandle-search-..."]
+        "tools":   ["doc_read", "fs_read_file"]
       }
     }
   }
@@ -48,10 +48,41 @@ The host enforces ACL by `manifest.ui.host_api`. Two independent grants:
 | `llm: ["complete"]` | Allows `anna.llm.complete(...)` from the iframe |
 | `agent.session.auto: true` | Allows `anna.agent.session({ submode: "auto" })` |
 | `agent.session.fixed: { client_ids: ["..."] }` | Allows `submode: "fixed"` with a pinned executa client_id |
-| `agent.tools` | Subset of executa tool ids the agent may invoke |
+| `agent.tools` | Platform tools the agent session may use (`["*"]` = all platform tools) |
 
 If neither `auto` nor `fixed` is set, **all** `agent.session.*` calls
 return `permission_denied` regardless of namespace.
+
+### 1.1 Tool surface — declaration is consent
+
+The effective tool set of a sandbox agent session is a pure intersection,
+identical for every user of the same app version:
+
+```
+effective = platform registry ∩ ui.host_api.agent.tools ∩ quotaCaps/per-run allowed_tools
+```
+
+- **Declared is enough.** There is no per-tool user grant: once the user
+  approves the single **Agent** item on the app's permission gate (which
+  displays your declared tool list, host-kit tools flagged ⚠), every
+  declared tool resolves. You never have to ask users to toggle
+  individual tools.
+- **`["*"]` wildcard.** Declaring `"tools": ["*"]` (must be the sole
+  element) expands to the full platform registry at session-create time —
+  new platform tools are included automatically. Prefer enumerating the
+  tools you actually use: a minimal declaration means a smaller consent
+  surface and more precise `agent.session.catalog` diagnostics.
+- **Risk groups.** Server-side tools (`doc_read`, `sheet_read`,
+  `web_search` — the latter also requires the user's Web permission) have
+  no local side effects. Host-kit tools (`fs_*`, `exec_run*`,
+  `browser_*`) execute on the user's own machine and are flagged ⚠ in the
+  permission gate; they also need the user's agent to be online.
+- **`inherit_host_tools` is retired for app sessions.** Requests carrying
+  it are accepted and ignored (the run emits an `INHERIT_IGNORED` warning
+  frame). Declare the tools you need instead.
+- **Debugging `granted_tools: []`.** If a session resolves zero tools,
+  check the manifest declaration (`agent.session.catalog()` shows
+  `blocked_by: "manifest"` per tool) — the user grant is *not* the cause.
 
 ---
 
@@ -327,6 +358,62 @@ sessions as your workflow needs. Usage is bounded by your account's quota
 (`quota_caps` on each session) rather than a hard count. **Expired sessions
 do not count** toward usage: the idle reaper (§4) revokes them, so a session
 you forgot to `delete()` frees its slot once it crosses the idle deadline.
+
+### 3.4 Stream recovery & timeouts (push pairs with pull)
+
+`run()` frames arrive over a realtime push channel. Push channels can fail
+silently (a suspended background tab, a network blip) — and when they do,
+**the run keeps executing and billing server-side** even though your app
+sees zero frames. Never treat a silent stream as "the run failed": blindly
+re-running a run that actually completed double-charges you.
+
+Two read-only methods (SDK ≥ 0.18.0 / dispatcher ≥ 0.24.0) make recovery
+deterministic:
+
+```js
+// 1. Did the run actually execute?
+const st = await window.anna.agent.session.runStatus({
+  app_session_uuid: sess.app_session_uuid,
+  run_id: myRunId,
+});
+// st.status: "queued" | "running" | "completed" | "failed" | "cancelled"
+// plus task_id, stream_id, started_at/finished_at, model, error
+
+// 2. Recover its output without re-running (poll until done: true)
+let after = 0;
+for (;;) {
+  const { frames, complete } = await window.anna.agent.session.frames({
+    stream_id: st.stream_id, after_seq: after,
+  });
+  for (const f of frames) { handle(f.payload); after = f.seq; }
+  if (frames.some((f) => f.done)) break;
+  await new Promise((r) => setTimeout(r, 3000));
+}
+```
+
+Wire methods: `agent.session.run.status` and `agent.session.frames`. Both
+are read-only and consume no quota. Status is queryable for ~1h after
+enqueue; frame archive window is ~1h. `agent.session.frames` shares a
+30/min/user rate limit with the host's own recovery machinery — back off on
+`rate_limited`.
+
+**The SDK already does the common case for you**: `sess.run()` arms a
+first-frame fallback — if no frame arrives within `firstFrameTimeoutMs`
+(default 20 s, pass it in the `run()` opts to tune) the stream transparently
+self-recovers by polling `agent.session.frames` until `done`. Your
+`for await` loop just sees slightly late frames.
+
+Recommended client timeouts on top of that:
+
+- **first frame ≥ 60 s** — queue wait alone can legitimately take up to
+  120 s under load (the platform's own queue watchdog fires at 120 s and
+  delivers a terminal `queue_timeout` frame);
+- **inter-frame ≥ 120 s** — long tool calls produce no tokens while they
+  run; keepalive frames cover most (not all) of these gaps.
+
+And when a timeout DOES fire: check `runStatus` first, then either resume
+via `frames` (status `completed`/`running`) or re-run (status
+`failed`/`cancelled`) — never re-run blind.
 
 
 ---

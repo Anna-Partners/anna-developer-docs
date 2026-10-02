@@ -65,8 +65,8 @@
           "summary": "Per-session quota / tool-scope override.",
           "notes": [
             "**Default when omitted**: Anna server injects `inherit_host_tools=True`, so the agent session inherits the host Copilot's full tool kit (`granted_tools` returns `['*']`).",
-            "To restrict tools, pass an explicit dict, e.g. `{\"inherit_host_tools\": False, \"allowed_tools\": [\"tool_a\", \"tool_b\"]}`.",
-            "Anna server intersects the result with the user's grant and may clamp further; the effective value is reflected back in `granted_tools` on the response."
+            "To restrict tools (lean sandbox session), pass an explicit dict, e.g. `{\"inherit_host_tools\": False, \"allowed_tools\": [\"tool_a\", \"tool_b\"]}`. Declaration-is-consent: the effective surface is `platform registry ∩ the executa manifest's agent_tools declaration (`[\"*\"]` = full registry) ∩ allowed_tools` — an executa with no `agent_tools` declaration resolves ZERO sandbox tools.",
+            "The effective value is reflected back in `granted_tools` on the response."
           ]
         },
         {

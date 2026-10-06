@@ -68,6 +68,10 @@ interface AnnaAppRuntime {
   windowUuid: string;
   appId:      string;
   versionId:  string;
+  /** The app's own identity from the `hello` handshake (host >= dispatcher
+   *  0.25.0; `null` on older hosts). `app.id` is the numeric AnnaApp.id —
+   *  the exact value `open_app_view` prompts need. */
+  app:        { id: number; slug?: string; name?: string } | null;
   viewMeta:   { name: string; title: string; default_size: {w,h}; … };
   capabilities: { tools: string[]; chat: string[]; storage: string[]; … };
 

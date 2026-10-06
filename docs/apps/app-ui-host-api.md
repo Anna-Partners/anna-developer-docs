@@ -279,7 +279,7 @@ for (const job of jobs) {
 
 | method | status | args | result |
 |---|---|---|---|
-| `append_artifact` | ✅ | `{ kind: "app_event"\|"text"\|"image"\|…, summary?, payload?, payload_ref? }` | `{ artifact_id }` — attaches a card to the current conversation |
+| `append_artifact` | ✅ | `{ artifact: { kind: "app_event"\|"text"\|"image"\|…, summary?, data?, payload_ref?, app_slug? } }` — note the **nested `artifact` wrapper** and the `data` field (inline JSON); a flat arg object or a `payload` field is silently dropped | `{ artifact_id }` — attaches a transient card to the current conversation (realtime-only: not persisted, not part of the assistant turn / LLM context yet — thread persistence is a later phase) |
 | `read_history` | ⏳ | `{ limit?, before? }` | future |
 | `write_message` | ⏳ | `{ role, content }` | future |
 
@@ -367,6 +367,16 @@ What actually gates a call, in order:
 The top-level manifest `permissions` list is **not** part of this chain — it has zero enforcement sites, is display-only on `schema ≤ 2`, and is rejected at `schema: 3` (permission display is derived from `ui.host_api` + the storage declaration instead).
 
 Anything not declared is rejected with `permission_denied` before reaching the handler.
+
+**Which manifest supplies the ACL?** The one projected onto the window's
+bound version row. For published installs that is the installed (frozen)
+version. For **working-draft installs** (`0.0.0-draft`) the manifest is
+re-projected on every `anna-app apps push` — newly declared `ui.host_api`
+methods take effect immediately for already-open draft windows, no
+reinstall or refresh needed. Per-app **grants** (llm / image / upload /
+executa installs) are still written only at `apps install`, so a brand-new
+grant-backed namespace needs one install even though the ACL gate already
+passes.
 
 ## Error codes
 

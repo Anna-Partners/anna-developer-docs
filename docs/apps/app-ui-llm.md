@@ -29,7 +29,7 @@ When the user mentions an app with UI views, the system prompt grows a block:
     <tagline>Plan, capture, and summarise web research.</tagline>
     <system_prompt_addendum>
       When the user asks to research, summon the workspace via
-      open_app_view('research-suite').
+      open_app_view with this app's numeric app_id.
     </system_prompt_addendum>
     <bundled_executas>
       <executa tool_id="tool-yourhandle-browser-…" />
@@ -51,15 +51,17 @@ The `<ui_views>` block tells the model exactly which `view` names are valid argu
 
 ```python
 open_app_view(
-    app_id="research-suite",
+    app_id=254,                        # numeric AnnaApp.id — string slugs are rejected
     view="main",                       # omitted → default view
     payload={"topic": "ECM-related immune evasion"}
 )
 ```
 
+- `app_id` is the **numeric** `AnnaApp.id` (the live tool validates `Input
+  should be a valid integer` — slugs don't work).
 - Resolves the user's installed version of the app.
 - If the version's UI bundle is not `bundle_ready`, returns `bundle_not_ready`.
-- If `single_instance: true` and a window already exists, focuses it and merges `payload` into `entry_payload`.
+- If `single_instance: true` and a window already exists, focuses it, merges `payload` into `entry_payload`, **and pushes an `entry_payload` event into the running iframe** (the full merged payload — subscribe with `anna.on("entry_payload", …)`; SDK ≥ 0.19.0 also auto-refreshes `anna.entryPayload`). A re-invocation without a payload only focuses — no event is pushed.
 - Otherwise creates a new `AnnaAppWindowSession`, mints a JWT, and broadcasts SSE `open_view`.
 - Returns `{ window_uuid, status: "active", entry_payload, geometry }`.
 
@@ -92,12 +94,12 @@ close_app_view(window_uuid="…", reason="task_done")
 ```
 User:    @research-suite please dig into ECM-related immune evasion.
 
-LLM →    open_app_view(app_id="research-suite", payload={"topic": "ECM"})
+LLM →    open_app_view(app_id=254, payload={"topic": "ECM"})
          (Window appears.)
 
 LLM →    chat.append_artifact (from inside the iframe, NOT a tool the LLM calls)
-         {"kind": "app_event", "summary": "Started research on ECM",
-          "payload_ref": "windows/<wid>/runtime_state"}
+         {"artifact": {"kind": "app_event", "summary": "Started research on ECM",
+                       "payload_ref": "windows/<wid>/runtime_state"}}
 
 iframe → tools.invoke(tool_id=browser, args={"url": "…"})
 iframe → storage.set({key: "findings", value: [...]})
@@ -108,7 +110,7 @@ LLM →    update_app_view(window_uuid="…",
 LLM:     "I summarised five papers in the workspace — open it to read."
 ```
 
-The iframe should **always** post a chat artifact when it produces something the user might want to refer back to (a finding, a chart, a draft). The `chat.append_artifact` call goes through the host RPC; the artifact card appears in the chat scrollback even after the window is closed.
+The iframe should **always** post a chat artifact when it produces something the user might want to refer back to (a finding, a chart, a draft). The `chat.append_artifact` call goes through the host RPC; the artifact card appears in the active chat in realtime (note: cards are not yet persisted — they disappear on refresh; thread persistence is a later phase).
 
 ## Full SSE event stream
 

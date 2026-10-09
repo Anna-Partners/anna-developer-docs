@@ -4,7 +4,7 @@ description: "The `ui` section of a schema ≥ 2 manifest: bundle, views, host_a
 section: apps
 slug: app-ui-manifest
 order: 10
-updated: 2026-09-11
+updated: 2026-10-08
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -125,7 +125,7 @@ The ACL that gates host RPC calls from your iframe. Each namespace key is a list
 | `tools` | `required:*` &#124; `optional:*` &#124; `required:<tool_id>` &#124; `optional:<tool_id>` &#124; `<tool_id>` | Calls to [`tools.invoke`](/developers/apps/app-ui-host-api#tools) on the listed Executas. Bare `<tool_id>`s must appear in `required_executas` or `optional_executas`. **Optional narrowing**: empty/omitted ⇒ every declared executa is callable |
 | `chat` | `append_artifact`, `write_message` ⏳, `read_history` ⏳ | Attach artifact cards; post messages / read history (stubs today) |
 | `artifact` | `create`, `update`, `delete` | Manipulate chat artifacts *(stub, Phase 3)* |
-| `llm` | `complete`, `stream`, `embed` | Host-side LLM calls bound to the user's quota — see [LLM & Agent](/developers/apps/llm-and-agent) |
+| `llm` | `complete`, `stream`, `embed`, `catalog` | Host-side LLM calls bound to the user's quota — see [LLM & Agent](/developers/apps/llm-and-agent); `catalog` adds media capability/CU-pricing discovery (`anna.llm.catalog({serviceType})`) |
 | `agent` | object, not a list: `{ "session": { "auto": true, "fixed": false }, "tools": […] }` | Multi-turn agent sessions (`agent.session.*`); at least one submode must be `true`. `tools` optionally narrows the session's tool surface |
 | `fs` | `read`, `write` | Anna Agent filesystem access *(stub, Phase 3)* |
 | `storage` | `get`, `set`, `delete`, `list` | Per-window `runtime_state` (≤256 KB); with a schema-3 [`storage`](/developers/apps/app-manifest#storage-schema-3) declaration the same methods are APS-backed (`anna.storage.*`) |
@@ -133,6 +133,8 @@ The ACL that gates host RPC calls from your iframe. Each namespace key is a list
 | `prefs` | `get` | Read user preferences *(stub)* |
 | `image` | `generate`, `edit` | Host-mediated image generation/editing — also gated by the per-app `image_grant` |
 | `upload` | `inline`, `negotiate`, `confirm` | User-artifact uploads to host storage — also gated by the per-app `upload_grant` |
+| `video` | `generate`, `getJob`, `cancelJob`, `listJobs` | Host-mediated async video generation jobs (`anna.video.*`; CU pre-charge + refund) — also gated by the per-app `media_grant` |
+| `audio` | `speak`, `transcribe` | Host-mediated TTS / STT (`anna.audio.*`) — also gated by the per-app `media_grant` |
 | `web` | `search`, `fetch`, `image_search`, `image_fetch` | Host-managed web search/fetch (provider keys, SSRF guard, billing stay host-side) — also gated by the per-app `web_grant` |
 | `apps` | `list`, `search`, `get`, `launch`, `deck.list`, `deck.add`, `deck.remove`, `deck.reorder` | Apps launcher: browse/launch the user's installed apps, curate the "我的 Apps" deck |
 | `credentials` | **provider ids** (e.g. `google`), not method names | `credentials.list_accounts` / `credentials.get_token` for the listed providers — also gated by the per-app `credentials_grant` |

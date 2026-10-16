@@ -1,0 +1,392 @@
+{
+  "section_id": "executa-media",
+  "items": [
+    {
+      "slug": "video-generate",
+      "name": "video/generate",
+      "kind": "Reverse RPC method · Video",
+      "group": "Video · LLM video generation",
+      "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ media reverse-RPC release (2026-10-08)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/media/video/generate` → executa_media_gate → app_media_facade (origin=executa) → fal queue → R2",
+      "summary": "Submit an async text-to-video / image-to-video job from a plugin. Same parameter space, state machine, pre-charge/refund billing and 30-min URL rule as the App Host API `video.generate`; gated by `host_capabilities: [\"llm.video\"]`, the user's `media_grant.video`, the `media_token` claim `allow_video` and a per-invoke job counter (`max_video_jobs`).",
+      "wire": {
+        "json_rpc_method": "video/generate",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/media/video/generate",
+        "default_timeout_s": 60,
+        "context": "Agent injects `params.context = {invoke_id, media_token}` automatically — plugins never fill it."
+      },
+      "signature": "python: host.video.generate(*, prompt: str, image_url: str | None = None, duration_sec: int | None = None, resolution: str | None = None, aspect_ratio: str | None = None, generate_audio: bool | None = None, model: str | None = None, client_tag: str | None = None) -> dict  ·  host.video.generate_await(..., poll_interval_s=5, timeout_s=600) -> dict\nnode: host.video.generate({...}) / generateAwait(...)  ·  go: media.Client.Generate / GenerateAwait",
+      "params": [
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": true,
+          "summary": "Clip description.",
+          "notes": []
+        },
+        {
+          "name": "imageUrl",
+          "type": "string",
+          "required": false,
+          "summary": "`https` first frame → image-to-video.",
+          "notes": []
+        },
+        {
+          "name": "durationSec / resolution / aspectRatio / generateAudio / model / clientTag",
+          "type": "various",
+          "required": false,
+          "summary": "Identical semantics and catalogue validation to the App surface (see `video.generate`).",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobId, state: 'queued', estimatedCostCU, deadlineAt }",
+        "desc": "Poll with `video/get_job` (plugins have no event channel) — the SDK `generate_await` helper does adaptive polling for you."
+      },
+      "errors": [
+        {
+          "name": "VIDEO_NOT_GRANTED",
+          "code": -32120,
+          "desc": "manifest `host_capabilities` lacks `llm.video`, `media_grant.video.enabled` is off, token claim `allow_video` false, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_QUOTA_EXCEEDED",
+          "code": -32121,
+          "desc": "CU pre-charge failed (user plan quota).",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_CONCURRENCY_EXCEEDED",
+          "code": -32127,
+          "desc": "Per-invoke Redis counter exhausted (`media_token` claim `max_video_jobs`, default **2**) — too many video jobs inside one tool invocation. Reservation is rolled back.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_INVALID_REQUEST",
+          "code": -32122,
+          "desc": "Parameter outside the model's catalogue space; `data.allowed` echoes it.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_PROVIDER_ERROR",
+          "code": -32123,
+          "desc": "fal submit failed; hold refunded.",
+          "retryable": true
+        },
+        {
+          "name": "VIDEO_MODEL_UNAVAILABLE",
+          "code": -32124,
+          "desc": "No routable video model / bad hint.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_CONTENT_REJECTED",
+          "code": -32128,
+          "desc": "Moderation rejected the request; not billed.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "EXECUTA_VIDEO_GEN",
+        "model": "pre-charge → settle / refund (same as App surface); per-invoke cap `max_video_jobs` (default 2) tracked in Redis `media:invoke:{tool_invoke_id}` for 30 min → `VIDEO_CONCURRENCY_EXCEEDED`"
+      },
+      "example": "# python executa_sdk\nresult = host.video.generate_await(\n    prompt=\"Slow dolly-in on a rain-soaked neon street\",\n    duration_sec=5, resolution=\"768p\", aspect_ratio=\"16:9\",\n    metadata={\"executa_invoke_id\": ctx.invoke_id},\n)\nurl = result[\"result\"][\"url\"]        # ~30 min TTL — host/uploadFile for durable storage",
+      "limitations": [
+        "No push events on the plugin side — poll `video/get_job`.",
+        "Result URL ~30 min; re-`get_job` re-signs. Per-invoke job cap (`VIDEO_CONCURRENCY_EXCEEDED`) is separate from (and in addition to) the user's CU quota."
+      ]
+    },
+    {
+      "slug": "video-get-job",
+      "name": "video/get_job",
+      "kind": "Reverse RPC method · Video",
+      "group": "Video · LLM video generation",
+      "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ media reverse-RPC release (2026-10-08)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/media/video/get_job`",
+      "summary": "Authoritative job view (same `JobView` shape as the App surface). Re-signs an expired `result.url`.",
+      "wire": {
+        "json_rpc_method": "video/get_job",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/media/video/get_job",
+        "default_timeout_s": 30,
+        "context": "Agent injects `params.context = {invoke_id, media_token}` automatically — plugins never fill it."
+      },
+      "signature": "host.video.get_job(job_id: str) -> dict",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "summary": "`vjob_…` handle.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "JobView",
+        "desc": "See App `video.getJob`."
+      },
+      "errors": [
+        {
+          "name": "VIDEO_NOT_GRANTED",
+          "code": -32120,
+          "desc": "manifest `host_capabilities` lacks `llm.video`, `media_grant.video.enabled` is off, token claim `allow_video` false, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_JOB_NOT_FOUND",
+          "code": -32125,
+          "desc": "Unknown or not owned by this user / plugin.",
+          "retryable": false
+        }
+      ],
+      "example": "view = host.video.get_job(job_id)\nif view[\"state\"] == \"succeeded\": print(view[\"result\"][\"url\"])",
+      "limitations": [
+        "Poll adaptively (SDK default 5s); avoid tight loops — each call is a reverse RPC round trip."
+      ]
+    },
+    {
+      "slug": "video-cancel-job",
+      "name": "video/cancel_job",
+      "kind": "Reverse RPC method · Video",
+      "group": "Video · LLM video generation",
+      "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ media reverse-RPC release (2026-10-08)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/media/video/cancel_job`",
+      "summary": "Cancel a queued job (full refund) or attempt to cancel a running one (no refund if already rendering).",
+      "wire": {
+        "json_rpc_method": "video/cancel_job",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/media/video/cancel_job",
+        "default_timeout_s": 30,
+        "context": "Agent injects `params.context = {invoke_id, media_token}` automatically — plugins never fill it."
+      },
+      "signature": "host.video.cancel_job(job_id: str) -> dict",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "summary": "`vjob_…` handle.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobId, state: 'cancelled', refunded: true } | { jobId, state: 'running', cancelPending: false }",
+        "desc": "Same semantics as App `video.cancelJob`."
+      },
+      "errors": [
+        {
+          "name": "VIDEO_NOT_GRANTED",
+          "code": -32120,
+          "desc": "manifest `host_capabilities` lacks `llm.video`, `media_grant.video.enabled` is off, token claim `allow_video` false, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_JOB_NOT_FOUND",
+          "code": -32125,
+          "desc": "Unknown job.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_JOB_NOT_CANCELLABLE",
+          "code": -32126,
+          "desc": "Already terminal.",
+          "retryable": false
+        }
+      ],
+      "example": "host.video.cancel_job(job_id)",
+      "limitations": [
+        "Refund only while `queued`."
+      ]
+    },
+    {
+      "slug": "audio-speak",
+      "name": "audio/speak",
+      "kind": "Reverse RPC method · Audio",
+      "group": "Audio · LLM speech synthesis",
+      "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ media reverse-RPC release (2026-10-08)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/media/audio/speak` → executa_media_gate → app_media_facade.audio_speak (origin=executa) → TTS provider → R2 / inline",
+      "summary": "Synchronous TTS from a plugin — same parameters, voice/length validation and model resolution as the App `audio.speak`; gated by `host_capabilities: [\"llm.audio.speak\"]`, `media_grant.audio.{enabled, speak}`, token claim `allow_audio_speak` and a per-invoke character budget (`max_audio_chars`, default 8000).",
+      "wire": {
+        "json_rpc_method": "audio/speak",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/media/audio/speak",
+        "default_timeout_s": 120,
+        "context": "Agent injects `params.context = {invoke_id, media_token}` automatically — plugins never fill it."
+      },
+      "signature": "host.audio.speak(*, text: str, voice: str | None = None, language: str | None = None, speed: float | None = None, format: str = 'mp3', timestamps: bool = False, delivery: str = 'url', model: str | None = None, timeout: int = 120) -> dict",
+      "params": [
+        {
+          "name": "text",
+          "type": "string",
+          "required": true,
+          "summary": "≤ model `maxCharsPerCall`; also counted against the per-invoke `max_audio_chars` budget.",
+          "notes": []
+        },
+        {
+          "name": "voice / language / speed / format / timestamps / delivery / model",
+          "type": "various",
+          "required": false,
+          "summary": "Identical to App `audio.speak`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ url?, expiresIn?, audioBase64?, mimeType, charCount, billedCostCU, model }",
+        "desc": "See App `audio.speak`."
+      },
+      "errors": [
+        {
+          "name": "AUDIO_NOT_GRANTED",
+          "code": -32140,
+          "desc": "Missing `llm.audio.speak` capability / grant / token claim, or Executa disabled.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_QUOTA_EXCEEDED",
+          "code": -32141,
+          "desc": "User CU quota exhausted.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_TEXT_TOO_LONG",
+          "code": -32142,
+          "desc": "Over the model cap (`data.allowed.maxCharsPerCall`), **or** the per-invoke `max_audio_chars` budget (default 8000) is exhausted — message says `per-invoke audio chars exceeded: {n}/{cap}` and the reservation is rolled back.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_VOICE_INVALID",
+          "code": -32145,
+          "desc": "Unknown voice (`data.allowed` lists valid ids).",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_MODEL_UNAVAILABLE",
+          "code": -32146,
+          "desc": "No TTS model routable.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_PROVIDER_ERROR",
+          "code": -32144,
+          "desc": "Provider failure.",
+          "retryable": true
+        }
+      ],
+      "billing": {
+        "request_type": "EXECUTA_TTS",
+        "model": "per character after success; per-invoke reservation in Redis `media:invoke:{tool_invoke_id}.audio_chars` (claim `max_audio_chars`, default 8000) → `AUDIO_TEXT_TOO_LONG`"
+      },
+      "example": "out = host.audio.speak(text=\"Rendering complete.\", format=\"mp3\",  # voice omitted → model default\n                       metadata={\"executa_invoke_id\": ctx.invoke_id})\nplay(out[\"url\"])",
+      "limitations": [
+        "Non-streaming only; realtime ASR/TTS for Apps is the `anna.audio.session` design (PB2+), not a plugin surface."
+      ]
+    },
+    {
+      "slug": "audio-transcribe",
+      "name": "audio/transcribe",
+      "kind": "Reverse RPC method · Audio",
+      "group": "Audio · LLM speech recognition",
+      "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ 2026-10-12 (`METHOD_AUDIO_TRANSCRIBE`) · nexus 1.1.0-beta.189",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/media/audio/transcribe` → executa_media_gate._gate_audio_transcribe → app_media_facade.audio_transcribe (request_type=EXECUTA_STT) → STT provider",
+      "summary": "Synchronous STT (≤ 10 min) from a plugin — 1:1 mirror of the App `audio.transcribe` contract under `audio/speak`'s security model; gated by `host_capabilities: [\"llm.audio.transcribe\"]`, `media_grant.audio.{enabled, transcribe}`, token claim `allow_audio_transcribe` and a per-invoke seconds budget (`max_audio_seconds`, default 600).",
+      "wire": {
+        "json_rpc_method": "audio/transcribe",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/media/audio/transcribe",
+        "default_timeout_s": 90,
+        "context": "Agent injects `params.context = {invoke_id, media_token}` automatically — plugins never fill it."
+      },
+      "signature": "host.audio.transcribe(*, audio_bytes: bytes | None = None, audio_url: str | None = None, format: str = 'wav', language: str | None = None, model: str | None = None, timeout: int = 90) -> dict",
+      "params": [
+        {
+          "name": "audioBase64",
+          "type": "string",
+          "required": false,
+          "summary": "Inline audio, base64, ≤ 10 MB decoded. Exactly one of `audioBase64` / `audioUrl`. SDKs base64-encode `audio_bytes` for you.",
+          "notes": []
+        },
+        {
+          "name": "audioUrl",
+          "type": "string",
+          "required": false,
+          "summary": "Public `https://` URL, ≤ 25 MB, SSRF-guarded; format taken from Content-Type.",
+          "notes": []
+        },
+        {
+          "name": "format",
+          "type": "string",
+          "required": false,
+          "summary": "Required with `audioBase64`: `wav` | `mp3` | `webm` | `ogg` | `flac` | `m4a`.",
+          "notes": []
+        },
+        {
+          "name": "language / model",
+          "type": "string",
+          "required": false,
+          "summary": "Language hint (echoed back; default auto) and optional STT model hint.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ text, durationSec, durationExact, language, billedCostCU, model }",
+        "desc": "`durationSec` is exact for `wav` (header) and a byte-based estimate otherwise (`durationExact=false`). `model` echoes the resolved STT model."
+      },
+      "errors": [
+        {
+          "name": "AUDIO_NOT_GRANTED",
+          "code": -32140,
+          "desc": "Missing `llm.audio.transcribe` capability / `media_grant.audio.transcribe` / token claim, Executa disabled — or host too old (`method_not_found` mapped by SDKs).",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_QUOTA_EXCEEDED",
+          "code": -32141,
+          "desc": "User CU quota exhausted.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_TOO_LONG",
+          "code": -32143,
+          "desc": "> 10 MB inline, > 25 MB URL, or > 600 s (`wav`, exact). `data.allowed` carries the cap.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_PROVIDER_ERROR",
+          "code": -32144,
+          "desc": "STT provider failure or `audioUrl` fetch failure.",
+          "retryable": true
+        },
+        {
+          "name": "AUDIO_MODEL_UNAVAILABLE",
+          "code": -32146,
+          "desc": "No STT model routable.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_INVOKE_BUDGET_EXCEEDED",
+          "code": -32148,
+          "desc": "Per-invoke seconds budget exhausted — message `per-invoke audio seconds exceeded: {n}/{cap}`; the reservation is rolled back.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_INVALID_REQUEST",
+          "code": -32122,
+          "desc": "Neither / both of `audioBase64` + `audioUrl`, bad base64, or missing / unknown `format` for inline audio.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "EXECUTA_STT",
+        "model": "per audio second after success; per-invoke reservation in Redis `media:invoke:{tool_invoke_id}.audio_seconds` (claim `max_audio_seconds`, default 600; wav estimated exactly, other formats 25 s/MB, settled to real `durationSec`) → `AUDIO_INVOKE_BUDGET_EXCEEDED`"
+      },
+      "example": "stt = host.audio.transcribe(audio_bytes=wav_16k_mono, format=\"wav\", language=\"zh\")\nquestion = stt[\"text\"]",
+      "limitations": [
+        "Non-streaming only — stdio has no audio-stream semantics; realtime ASR is the App-side `anna.audio.session` design.",
+        "Inline cap 10 MB (~5 min of 16 kHz mono wav); use `audioUrl` or chunk for longer recordings.",
+        "Duration is exact only for `wav`; the 600 s cap is enforced exactly for `wav` and by byte caps otherwise."
+      ]
+    }
+  ]
+}

@@ -4,7 +4,7 @@ description: "Declare `form_factors`, adapt your bundle for the Anna mobile laun
 section: apps
 slug: app-mobile
 order: 16
-updated: 2026-08-26
+updated: 2026-10-14
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -54,6 +54,7 @@ Apps that declare `"mobile"` are checked against every row of this table during 
 | **Touch targets ≥ 44×44 pt** | Spot-check the primary action buttons and list-row controls |
 | **No hover-only interactions** | Grep the bundle for `:hover`; every hover-revealed action needs a touch-reachable equivalent (visible button, long-press, or menu) |
 | **No dependence on multi-window / window-geometry host APIs** | The mobile shell is a single-window stack. `window.open_view` works (it pushes onto the stack), but layouts that assume side-by-side windows or call geometry methods (move/resize) must degrade gracefully — geometry calls are no-ops on mobile |
+| **Realtime voice sessions are foreground-only** — if you use [`anna.audio.session()`](/developers/apps/app-ui-audio-session), handle the shell's `host.app_state {state}` event (`active` / `inactive` / `background`, mirrored from React-Native `AppState`) and release push-to-talk / `end()` on anything but `active` | Grep the bundle for `host.app_state`; background the app mid-session on a device — WKWebView suspends `getUserMedia`, so a session that keeps running is a bug, not a feature |
 | **Do not override the shell-injected `viewport` meta** | Grep the bundle HTML for `<meta name="viewport"` — remove your own; the mobile shell injects the correct one |
 
 ## Testing without a device

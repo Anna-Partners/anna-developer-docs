@@ -4,7 +4,7 @@ description: "Call llm.complete and run a multi-turn agent session from inside y
 section: apps
 slug: llm-and-agent
 order: 16
-updated: 2026-09-24
+updated: 2026-10-14
 estimated_minutes: 8
 category: "App UI"
 ---
@@ -477,6 +477,7 @@ Branch on `error.name` (the stable string), not the numeric code.
 | Iframe call | Host endpoint | Manifest grant required |
 |---|---|---|
 | `anna.llm.complete(req)` | `POST /api/v1/copilot/app/complete` | `llm: ["complete"]` |
+| `anna.llm.catalog({serviceType?})` | `/runtime/rpc` only (dispatcher `llm.catalog`, no standalone HTTP route) — see [App UI Media](/developers/apps/app-ui-media#discover-before-you-call) | `llm: ["catalog"]` |
 | `anna.agent.session({...})` | `POST /api/v1/copilot/app/sessions` | `agent.session.auto` or `.fixed` |
 | `sess.run({content})` | `POST /api/v1/copilot/app/agent` (SSE) | (covered by session grant) |
 | `sess.cancel(runId)` | `POST /api/v1/copilot/app/agent/cancel` | (covered) |

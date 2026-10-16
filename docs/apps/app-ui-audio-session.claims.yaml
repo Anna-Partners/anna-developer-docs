@@ -1,0 +1,8 @@
+# Machine-checkable claims for docs/apps/app-ui-audio-session.md.
+# `audio.session` itself is host-bridge-local (not in host_api/methods.json);
+# the sync siblings the article contrasts it with must keep existing.
+host_api_methods:
+  - audio.speak
+  - audio.transcribe
+ui_manifest_fields:
+  - host_api

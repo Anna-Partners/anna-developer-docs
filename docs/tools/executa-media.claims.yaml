@@ -1,0 +1,7 @@
+# Machine-checkable claims for docs/tools/executa-media.md.
+# llm.video / llm.audio.speak ship in @anna-ai/app-schema >= 0.26.0;
+# llm.audio.transcribe in >= 0.27.0 (audio/transcribe reverse-RPC).
+capabilities:
+  - llm.video
+  - llm.audio.speak
+  - llm.audio.transcribe

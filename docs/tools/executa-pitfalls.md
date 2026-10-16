@@ -4,7 +4,7 @@ description: "The bugs that show up most often when authors build Executa plugin
 section: tools
 slug: executa-pitfalls
 order: 14
-updated: 2026-09-10
+updated: 2026-10-12
 estimated_minutes: 8
 ---
 
@@ -444,6 +444,55 @@ Also remember:
   event being delivered.
 
 See the official demo `anna-executa-examples/examples/anna-app-long-task-demo`.
+
+---
+
+## 14 · Media — `audio/transcribe` recording format & inline cap
+
+**Symptom**
+
+`media.transcribe(...)` fails with `VIDEO_INVALID_REQUEST (-32122)` ("format is
+required for inline audio"), `AUDIO_TOO_LONG (-32143)`, or — after a few calls
+in the same invoke — `AUDIO_INVOKE_BUDGET_EXCEEDED (-32148)`. Or it simply
+returns `AUDIO_NOT_GRANTED (-32140)` even though the user granted audio.
+
+**Cause**
+
+1. **Inline audio needs an explicit `format`** (`wav|mp3|webm|ogg|flac|m4a`).
+   The host cannot sniff a base64 blob; the SDKs default to `wav` but will
+   send whatever you pass — a stray `"aac"` or `None` is rejected.
+2. **Inline is capped at 10 MB decoded** (and `audioUrl` at 25 MB / 600 s).
+   16 kHz mono PCM16 wav is 32 KB per second, so ~5 min already hits the
+   inline cap.
+3. **Per-invoke seconds budget.** Each call reserves its estimated duration
+   against `max_audio_seconds` (default 600 per `tool_invoke_id`). Compressed
+   formats are estimated conservatively (25 s/MB) before the provider runs,
+   then settled to the real duration — a 4 MB mp3 pre-reserves 100 s even if
+   it is only 60 s long.
+4. **Separate capability.** `audio/transcribe` is gated by
+   `host_capabilities ∋ "llm.audio.transcribe"` **and** the user's
+   `media_grant.audio.transcribe` sub-toggle. Declaring `llm.audio.speak`
+   alone does not unlock it. An old host (pre 2026-10-12) answers
+   `method_not_found`, which the SDKs map to `-32140` as well.
+
+**Fix**
+
+```python
+# Push-to-talk: record 16 kHz mono PCM16, keep clips short, always pass format.
+stt = await media.transcribe(audio_bytes=wav_bytes, format="wav", language="zh")
+
+# Long recordings: upload once (host/uploadFile or your own bucket) and pass the URL
+stt = await media.transcribe(audio_url=public_https_url)
+```
+
+- Prefer `wav` for short clips: duration is measured exactly from the header,
+  so both the 600 s cap and the invoke budget are precise.
+- Chunk by sentence/pause instead of sending one long buffer — it also gives
+  the user earlier feedback.
+- Declare `"llm.audio.transcribe"` in `host_capabilities` and tell users to
+  enable the **transcribe** toggle in the media permission dialog.
+
+See [Media](/developers/tools/executa-media#audiotranscribe).
 
 ---
 

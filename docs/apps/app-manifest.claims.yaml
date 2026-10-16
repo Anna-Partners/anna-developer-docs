@@ -35,6 +35,9 @@ capabilities:
   - llm.agent.fixed
   - llm.image
   - llm.image.edit
+  - llm.video
+  - llm.audio.speak
+  - llm.audio.transcribe
   - web.search
   - web.fetch
   - web.image_search

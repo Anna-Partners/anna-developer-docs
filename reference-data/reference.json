@@ -1059,6 +1059,15 @@
     },
     {
       "group": "Executa",
+      "id": "executa-media",
+      "kicker": "Executa · reverse RPC (v2+) · LLM video & audio",
+      "title": "LLM video generation & speech synthesis",
+      "sub": "Let an Executa plugin **generate video, synthesize speech and transcribe audio through the host** — no provider key, no R2 credentials, no per-plugin billing — mirroring the LLM image gate 1:1. Methods: `video/generate`, `video/get_job`, `video/cancel_job`, `audio/speak`, `audio/transcribe` (both non-streaming; `audio/transcribe` since matrix 2026-10-12 / nexus 1.1.0-beta.189).\n\n**Pre-requisites** (all three required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.video = {}` / `client_capabilities.audio = {}` (`audio.speak` / `audio.transcribe`) on `initialize`.\n2. **Manifest declaration.** `host_capabilities: [\"llm.video\"]` and/or `[\"llm.audio.speak\"]` / `[\"llm.audio.transcribe\"]` (each audio method has its own capability). Missing → `VIDEO_NOT_GRANTED` (`-32120`) / `AUDIO_NOT_GRANTED` (`-32140`) at first call.\n3. **User grant.** End user enables `media_grant.video.enabled` / `media_grant.audio.{enabled, speak, transcribe}` for the plugin in Anna Admin.\n\n**Token.** The Agent attaches a short-lived `media_token` (aud `executa-media`, TTL 10 min, auto-renewed as kind `\"media\"`) to `params.context`; claims `allow_video / allow_audio_speak / allow_audio_transcribe / max_video_jobs / max_audio_chars / max_audio_seconds` are evaluated per call (the two transcribe claims are optional on older tokens). A Redis per-invoke counter (`media:invoke:{tool_invoke_id}`, 30 min TTL) caps video jobs, TTS characters and STT seconds **within one tool invocation** — this is an anti-abuse gate, not a daily quota.\n\n**Billing.** `EXECUTA_VIDEO_GEN` (pre-charge → settle / refund, same state machine as the App surface) `EXECUTA_TTS` (per character) and `EXECUTA_STT` (per audio second). Result URLs are presigned R2 GETs (~30 min); re-`get_job` to re-sign, or `host/uploadFile` for durable storage.\n\n**Errors.** Video `-32120…-32128`, audio `-32140…-32148` (same table as the App surface plus `AUDIO_INVOKE_BUDGET_EXCEEDED` `-32148`). Per-invoke counter exhaustion surfaces as `VIDEO_CONCURRENCY_EXCEEDED` (`-32127`, claim `max_video_jobs` default 2) `AUDIO_TEXT_TOO_LONG` (`-32142`, claim `max_audio_chars` default 8000) and `AUDIO_INVOKE_BUDGET_EXCEEDED` (`-32148`, claim `max_audio_seconds` default 600). SDK helpers: python / node / go `host.video.generate_await()`, `host.audio.speak()` and `host.audio.transcribe()`. Full wire protocol and examples: [Executa media](/docs/tools/executa-media).",
+      "detail_source": "/static/data/reference-executa-media.json",
+      "items": []
+    },
+    {
+      "group": "Executa",
       "id": "executa-host-upload",
       "kicker": "Executa · reverse RPC (v2+) · Host upload",
       "title": "Host-managed file upload",
@@ -2360,6 +2369,14 @@
           ]
         },
         {
+          "name": "host_api.video",
+          "desc": "`string[]` of `video.*` methods the bundle may call: `generate`, `getJob`, `cancelJob`, `listJobs`. Pair with the user's `media_grant.video.enabled`. Async jobs, CU pre-charged on submit."
+        },
+        {
+          "name": "host_api.audio",
+          "desc": "`string[]` of `audio.*` surfaces: `speak` (sync TTS), `transcribe` (sync STT) and `session` (realtime voice session relayed by the host bridge — `anna.audio.session()`; declaring it also gives the iframe `allow=\"microphone\"`). Pair with the user's `media_grant.audio.{enabled, speak, transcribe}` — each sync operation needs its own flag; `session` needs **both**. `session` with `llm:'agent'` additionally requires `host_api.agent.session`."
+        },
+        {
           "name": "host_api.upload",
           "desc": "Host-mediated user-artifact uploads: `inline`, `negotiate`, `confirm`. Additionally gated by the per-app `upload_grant`.",
           "tags": [
@@ -2729,8 +2746,8 @@
               ]
             },
             {
-              "name": "generate_image / edit_image / analyze_image / upload_local_file",
-              "desc": "Multimodal built-ins. With a vision-capable model, images attached via `run({attachments})` or uploaded mid-run are presented to the model DIRECTLY — `analyze_image` is the fallback for non-vision models. Bound to the session's model configuration, therefore inherit-only today.",
+              "name": "generate_image / edit_image / analyze_image / generate_video / upload_local_file",
+              "desc": "Multimodal built-ins. With a vision-capable model, images attached via `run({attachments})` or uploaded mid-run are presented to the model DIRECTLY — `analyze_image` is the fallback for non-vision models. Bound to the session's model configuration, therefore inherit-only today. `generate_video` submits an async fal-queue video job (text-to-video / image-to-video), streams queue position back to the model and returns the result URL or a `jobId` on timeout; billed as `VIDEO_GEN`.",
               "tags": [
                 {
                   "label": "vision"
@@ -2986,6 +3003,10 @@
               "label": "cap 65536"
             }
           ]
+        },
+        {
+          "name": "llm.catalog",
+          "desc": "Capability discovery: `{serviceType?: 'video_gen'|'image_gen'|'image_edit'|'tts'|'stt'}` → `{models:[{modelName, displayName, serviceTypes, isUserPreferred, capabilities, pricing}], quota:{remainingCU}}`. Only service types the App is **granted** are returned (ungranted → empty list, never an error) so you can feature-detect and degrade. Prices are in CU; TTS entries carry `voices`/`defaultVoice`/`options`/`maxCharsPerCall`, video entries carry `duration`/`resolutions`/`aspectRatios`/`imageToVideo`/`audio`."
         }
       ]
     },
@@ -3008,6 +3029,70 @@
           "tags": [
             {
               "label": "edit grant"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "group": "Host API",
+      "id": "host-api-video",
+      "kicker": "Host API · video.*",
+      "title": "video.* — host-managed async video generation",
+      "sub": "Generate short videos (text-to-video / image-to-video) from the **anna-app bundle** through the host's fal-hosted catalogue (Kling v3 Pro, MiniMax H3 Max / Turbo, Seedance 2.5) without provider keys or storage credentials. Video is **asynchronous**: `generate` returns a `jobId` in ~1s, progress arrives as `media_job` SSE events, and `getJob` is the single source of truth.\n\n**Auth chain.** Bundle calls `anna.video.*` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_video_*` → `app_media_facade.video_*` → fal queue (webhook + poller) → R2. Equivalent HTTP: `POST /api/v1/copilot/app/video/generate`, `GET …/video/jobs[/{job_id}]`, `POST …/video/jobs/{job_id}/cancel` (app_session_token).\n\n**ACL is two-layer.** (a) manifest `ui.host_api.video` must list the methods you call (`generate`, `getJob`, `cancelJob`, `listJobs`); (b) the user's `media_grant.video.enabled` for your App. Missing either → `APP_NOT_GRANTED`.\n\n**Billing is pre-charge → settle → refund.** `estimatedCostCU` is held on submit (from the catalogue's per-second / per-resolution pricing, min-billed seconds apply); on `succeeded` the hold is settled to `billedCostCU`; on `failed` / cancelled-while-queued the hold is **fully refunded**; cancelling a `running` job does not refund. There is no platform-side daily / concurrency cap — the CU quota pool is the only gate (`APP_QUOTA_EXCEEDED`, HTTP 429).\n\n**URL lifetime.** `result.url` is a presigned R2 GET with a ~30 min TTL (`MEDIA_RESULT_PRESIGN_EXPIRY`, `expiresIn` in the response). Re-calling `getJob` re-signs it; for permanent storage fetch the bytes and go through `upload.negotiate`/`confirm` (counts toward App storage). Terminal objects are cleaned up after 7 days; job rows are kept 30 days for billing.\n\n**Discover before you call.** `llm.catalog({serviceType:'video_gen'})` returns each model's `duration` / `resolutions` / `aspectRatios` / `imageToVideo` / `audio` and CU pricing — parameters outside that space fail with `VIDEO_INVALID_REQUEST` (`data.allowed` echoes the space).\n\n**Errors.** `-32122 VIDEO_INVALID_REQUEST` · `-32123 VIDEO_PROVIDER_ERROR` (retryable) · `-32124 VIDEO_MODEL_UNAVAILABLE` · `-32125 VIDEO_JOB_NOT_FOUND` · `-32126 VIDEO_JOB_NOT_CANCELLABLE` · `-32128 VIDEO_CONTENT_REJECTED`; grant / quota failures surface as the generic `APP_NOT_GRANTED` / `APP_QUOTA_EXCEEDED`. Every error's `data` carries `{errorName, retryable, docs}`.",
+      "source": "host_api",
+      "detail_source": "/static/data/reference-host-api-video.json",
+      "items": [
+        {
+          "name": "video.generate",
+          "desc": "Submit an **async** text-to-video / image-to-video job: `{prompt, imageUrl?, durationSec?, resolution?, aspectRatio?, generateAudio?, model?, clientTag?}` → `{jobId:'vjob_…', state:'queued', estimatedCostCU, deadlineAt}` within ~1s. CU is **pre-charged** on submit and settled/refunded at the terminal state. Parameters are validated against the model catalogue (`llm.catalog`) — invalid → `VIDEO_INVALID_REQUEST` with `data.allowed` echoing the full parameter space.",
+          "tags": [
+            {
+              "label": "async job"
+            },
+            {
+              "label": "pre-charge"
+            }
+          ]
+        },
+        {
+          "name": "video.getJob",
+          "desc": "Authoritative job state: `{jobId}` → `{jobId, state, progress:{seq, phase, queuePosition}, request, result?, billedCostCU?, createdAt, deadlineAt}`. On `succeeded`, `result.url` is a presigned R2 GET (~30 min TTL, `expiresIn`); calling `getJob` again **re-signs** an expired URL. Events are an accelerator — the truth is always here."
+        },
+        {
+          "name": "video.cancelJob",
+          "desc": "`{jobId}` → `queued` jobs are cancelled with a **full refund** (`{state:'cancelled', refunded:true}`); `running` jobs attempt a provider cancel — if the provider is already rendering you get `{state:'running', cancelPending:false}` and no refund. Terminal jobs → `VIDEO_JOB_NOT_CANCELLABLE`."
+        },
+        {
+          "name": "video.listJobs",
+          "desc": "Cursor-paginated job history for this App: `{state?, clientTag?, limit?≤50, cursor?}` → `{jobs:[…getJob views…], nextCursor?}`. Use `clientTag` (≤120 chars, set on `generate`) to correlate jobs with your own entities (scenes, timeline clips)."
+        }
+      ]
+    },
+    {
+      "group": "Host API",
+      "id": "host-api-audio",
+      "kicker": "Host API · audio.*",
+      "title": "audio.* — host-managed TTS, STT & realtime voice session",
+      "sub": "Synchronous text-to-speech and speech-to-text from the **anna-app bundle**. The host owns provider credentials (DashScope Qwen TTS, fal-hosted ElevenLabs / MiniMax / xAI TTS; Gemini-class STT), the user's model preferences, storage and quota.\n\n**Auth chain.** `anna.audio.{speak,transcribe}` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` → `_h_audio_*` → `app_media_facade.audio_*`. Equivalent HTTP: `POST /api/v1/copilot/app/audio/speak`, `POST /api/v1/copilot/app/audio/transcribe` (app_session_token).\n\n**ACL is two-layer.** (a) manifest `ui.host_api.audio` lists `speak` and/or `transcribe`; (b) the user's `media_grant.audio = {enabled, speak, transcribe}` for your App — `enabled` alone is not enough, the per-operation flag must also be on. Missing either → `APP_NOT_GRANTED`.\n\n**Models and voices are catalogue-driven.** The user's preferred TTS / STT model (Model Settings → Specialized Models) is used unless you pass a `model` hint that the user is allowed to use. Voices, `speed`/`format` options and `maxCharsPerCall` differ per model — read them from `llm.catalog({serviceType:'tts'})` instead of hard-coding. Knobs a model does not support (e.g. `speed` on ElevenLabs) are ignored, never surcharged.\n\n**Billing.** `speak` is billed per character (`APP_TTS`, min 1 CU); `transcribe` per audio second (`APP_STT`). Both are synchronous (HTTP timeout 120s) — long narration should be split into sentences; there is no job API for audio (a future `audio.speakAsync` would be additive; `speak` will never change to return a `jobId`).\n\n**Realtime voice session (`anna.audio.session`).** Streaming ASR → LLM → streaming TTS with barge-in, the same full-duplex pipeline as the main-chat voice mode, opened from the bundle via `await anna.audio.session({llm:'agent'|'none', context?, system?, voice?, language?, speed?, maxDurationSec?})`. It is **not** a dispatcher RPC: the host page's bridge owns the `wss://…/api/v1/anna-apps/runtime/voice?window_uuid=` socket and relays `audio.session.{open,send,flush,context,say,interrupt,close}` locally — the iframe never holds a token or opens a network connection. Gate: manifest `ui.host_api.audio ∋ \"session\"` (which also grants the iframe `allow=\"microphone\"`) **plus** `media_grant.audio.{enabled, speak, transcribe}` (both flags); `llm:'agent'` additionally requires `host_api.agent.session.{auto|fixed}`. Billing is the same `APP_STT` per recognised second / `APP_TTS` per synthesised character — only audio you `sendAudio()` is billed, so gate the microphone behind push-to-talk. Guide: [App UI Audio Session](/developers/apps/app-ui-audio-session).\n\n**Errors.** `-32142 AUDIO_TEXT_TOO_LONG` (echoes `maxCharsPerCall`) · `-32143 AUDIO_TOO_LONG` (>10 min / >25 MB) · `-32144 AUDIO_PROVIDER_ERROR` (retryable) · `-32145 AUDIO_VOICE_INVALID` (echoes valid voices) · `-32146 AUDIO_MODEL_UNAVAILABLE` · `-32147 AUDIO_CONTENT_REJECTED`; invalid shapes → `-32122 VIDEO_INVALID_REQUEST` (shared validation code).",
+      "source": "host_api",
+      "detail_source": "/static/data/reference-host-api-audio.json",
+      "items": [
+        {
+          "name": "audio.speak",
+          "desc": "**Synchronous** TTS: `{text, voice?, language?, speed?(0.5–2.0), format?:'mp3'|'wav', timestamps?, delivery?:'url'|'inline', model?}` → `{url|audioBase64, mimeType, charCount, billedCostCU, model, expiresIn?}`. Text is capped by the model's `maxCharsPerCall` (`AUDIO_TEXT_TOO_LONG` echoes the cap); `voice` must be in the model's voice table (`AUDIO_VOICE_INVALID` echoes valid voices — read them from `llm.catalog`). `delivery:'inline'` returns base64 only for products ≤1 MB. Billed per character as `APP_TTS`.",
+          "tags": [
+            {
+              "label": "sync ≤120s"
+            }
+          ]
+        },
+        {
+          "name": "audio.transcribe",
+          "desc": "**Synchronous** STT: `{audioUrl | audioBase64 (+format), language?, model?}` → `{text, language, billedCostCU}`. Inline audio ≤10 MB, URL fetch ≤25 MB, duration ≤10 min (`AUDIO_TOO_LONG`). Routed to the user's preferred speech-to-text model; billed as `APP_STT`. For **live** recognition with partial results use the realtime `anna.audio.session()` surface instead (manifest `host_api.audio ∋ \"session\"`, same `media_grant` flags).",
+          "tags": [
+            {
+              "label": "sync ≤120s"
             }
           ]
         }
@@ -3664,6 +3749,10 @@
         {
           "name": "executa_readiness",
           "desc": "Window-open probe found required executas not yet ready on the agent — render a preparing/degraded mask until `anna_app_tools_changed` arrives."
+        },
+        {
+          "name": "media_job",
+          "desc": "Progress / terminal update for a `video.generate` job: `payload = {jobId, seq, state, progress?:{phase, queuePosition}, result?, billedCostCU?}`. `seq` is strictly monotonic — drop out-of-order frames. Terminal `result.url` has the same ~30 min TTL as `getJob`; on 403 call `getJob` to re-sign. `anna.video.generateAwait` already subscribes to this and falls back to adaptive polling."
         }
       ]
     },

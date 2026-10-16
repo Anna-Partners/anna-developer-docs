@@ -1,0 +1,317 @@
+{
+  "section_id": "host-api-video",
+  "items": [
+    {
+      "slug": "video-generate",
+      "name": "video.generate",
+      "kind": "Host API method · iframe surface",
+      "group": "Video",
+      "since": "Introduced anna-app-runtime v0.20.0 / dispatcher 0.26.0 / schema 0.26.0 (2026-10-08)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.video_generate → quota hold → fal queue (webhook + poller) → R2",
+      "summary": "Submit an asynchronous text-to-video or image-to-video job. The host validates parameters against the model catalogue, **pre-charges** the estimated CU, submits to the fal queue with a webhook, persists an `anna_media_jobs` row and returns a `jobId` within ~1s. Progress and the terminal result arrive as `media_job` SSE events; `video.getJob` is the authoritative state. Most apps should use the SDK sugar `anna.video.generateAwait()` which combines all of this.",
+      "wire": {
+        "json_rpc_method": "video.generate",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "POST /api/v1/copilot/app/video/generate"
+      },
+      "signature": "anna.video.generate(args: {prompt: string, imageUrl?: string, durationSec?: number, resolution?: string, aspectRatio?: string, generateAudio?: boolean, model?: string, clientTag?: string}, opts?: {timeoutMs?: number}) => Promise<{jobId: string, state: 'queued', estimatedCostCU: number, deadlineAt: string}>\n\nanna.video.generateAwait(args, {onProgress?, signal?, timeoutMs?}) => Promise<JobView & {result: {url, refreshUrl(): Promise<string>, …}}>",
+      "params": [
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "Natural-language description of the clip. Trimmed; empty → `VIDEO_INVALID_REQUEST`. Forwarded verbatim to the provider — provider / platform content moderation applies (`VIDEO_CONTENT_REJECTED`, not billed).",
+          "notes": []
+        },
+        {
+          "name": "imageUrl",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Non-empty → **image-to-video** using this frame as the first frame. Must be `https` (R2 presigned URLs and `web.image_fetch` products are accepted); SSRF guard applies. `aspectRatio` is ignored in i2v (follows the image). Only models with `capabilities.imageToVideo` accept it.",
+          "notes": []
+        },
+        {
+          "name": "durationSec",
+          "type": "integer",
+          "required": false,
+          "default": "model default",
+          "summary": "Clip length in seconds. Must satisfy the model's `capabilities.duration` (an enum `values[]` or a `{min,max}` range) — read it from `llm.catalog`. Billing uses `max(durationSec, pricing.minBilledSeconds)`.",
+          "notes": []
+        },
+        {
+          "name": "resolution",
+          "type": "string",
+          "required": false,
+          "default": "model default",
+          "summary": "Must be in `capabilities.resolutions` (lower-case, e.g. `480p` / `768p` / `1080p`). Models without a resolution knob (Kling) require this to be **omitted**.",
+          "notes": []
+        },
+        {
+          "name": "aspectRatio",
+          "type": "string",
+          "required": false,
+          "default": "model default",
+          "summary": "Must be in `capabilities.aspectRatios` (e.g. `16:9`, `9:16`, `1:1`). Ignored for image-to-video.",
+          "notes": []
+        },
+        {
+          "name": "generateAudio",
+          "type": "boolean",
+          "required": false,
+          "default": "false",
+          "summary": "Ask the model to synthesize a soundtrack. Only accepted when `capabilities.audio` is true; may change the per-second price (Kling `cuPerSecondAudioOn`).",
+          "notes": []
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "required": false,
+          "default": "user preference → catalogue default",
+          "summary": "Optional model hint (`modelName` from `llm.catalog`). Defaults to the user's `modelPreferences.video_gen`, then the catalogue default. Unknown → `VIDEO_MODEL_UNAVAILABLE`.",
+          "notes": []
+        },
+        {
+          "name": "clientTag",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Free-form correlation tag (≤120 chars) echoed in `getJob` / `listJobs` / `media_job`; filter `listJobs` by it. Same semantics as `tools.invokeAsync` clientTag.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobId: string, state: 'queued', estimatedCostCU: number, deadlineAt: string }",
+        "desc": "`jobId` is the `vjob_…` handle for every other call. `estimatedCostCU` is the amount **held** from the user's quota (shown to the user; settled or refunded at the terminal state). `deadlineAt` is the server-side wall clock after which the job is failed and refunded."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.video` does not list this method, or the user's `media_grant.video.enabled` is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": -32015,
+          "desc": "CU pre-charge failed — the user's plan quota is exhausted (HTTP 429 on the HTTP surface). No platform-side daily or concurrency cap exists; this is the only gate.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_INVALID_REQUEST",
+          "code": -32122,
+          "desc": "Parameter outside the model's catalogue space (duration / resolution / aspectRatio / prompt too long / bad `imageUrl` / `clientTag` > 120 chars). `data.allowed` echoes the full allowed space for the resolved model.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_MODEL_UNAVAILABLE",
+          "code": -32124,
+          "desc": "No active text-to-video model is routable, or the `model` hint does not exist / is not allowed for the user.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_PROVIDER_ERROR",
+          "code": -32123,
+          "desc": "fal submit failed (message carries the first 200 chars of the provider error). The CU hold is refunded immediately.",
+          "retryable": true
+        },
+        {
+          "name": "VIDEO_CONTENT_REJECTED",
+          "code": -32128,
+          "desc": "Platform or provider content moderation rejected the prompt / image. Not billed.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "APP_VIDEO_GEN",
+        "model": "pre-charge on submit → settle on `succeeded` → full refund on `failed` / cancelled-while-queued; cancelling a `running` job does not refund",
+        "pricing": "catalogue `pricing`: per-second by resolution (MiniMax / Seedance, `minBilledSeconds`) or flat / audio-on (Kling); i2v may add a reference-image surcharge. Shown in CU via `llm.catalog`."
+      },
+      "example": "// Fire-and-forget + event-driven progress (recommended via generateAwait)\nconst job = await anna.video.generateAwait({\n  prompt: \"Aerial drone shot over a misty pine forest at sunrise\",\n  durationSec: 5, resolution: \"768p\", aspectRatio: \"16:9\",\n  clientTag: \"scene-3-broll\",\n}, {\n  onProgress: (p) => status.textContent = `${p.state} · queue ${p.progress?.queuePosition ?? '-'}`,\n  timeoutMs: 10 * 60 * 1000,\n});\nvideoEl.src = job.result.url;             // ~30 min TTL\nvideoEl.onerror = async () => { videoEl.src = await job.result.refreshUrl(); };\ncostEl.textContent = `${job.billedCostCU} CU`;",
+      "limitations": [
+        "Asynchronous only — there is no blocking `generate` on the wire; `generateAwait` is SDK-side sugar (events + adaptive `getJob` polling).",
+        "Result URLs expire in ~30 min (`expiresIn`). Re-`getJob` to re-sign; for durable storage fetch the bytes and use `upload.negotiate`/`confirm` (counts toward App storage). Terminal objects are deleted after 7 days.",
+        "Parameters are validated against the **resolved model's** catalogue entry — always read `llm.catalog({serviceType:'video_gen'})` first instead of hard-coding durations / resolutions.",
+        "CSP: `media-src` in your bundle must allow the host's R2 hostname (`https:`) to play `result.url` in a `<video>` element."
+      ]
+    },
+    {
+      "slug": "video-get-job",
+      "name": "video.getJob",
+      "kind": "Host API method · iframe surface",
+      "group": "Video",
+      "since": "Introduced anna-app-runtime v0.20.0 / dispatcher 0.26.0 / schema 0.26.0 (2026-10-08)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.video_get_job → anna_media_jobs (re-signs result URL)",
+      "summary": "Return the authoritative view of one job owned by this user + App. While running it carries `progress {seq, phase, queuePosition}`; on `succeeded` it carries `result {url, mimeType, durationSec, width, height, seed, expiresIn}` and `billedCostCU`. Calling `getJob` after the URL expired **re-signs** a fresh presigned URL — this is the recovery path for 403s on playback.",
+      "wire": {
+        "json_rpc_method": "video.getJob",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "GET /api/v1/copilot/app/video/jobs/{job_id}"
+      },
+      "signature": "anna.video.getJob(args: {jobId: string}, opts?: {timeoutMs?: number}) => Promise<JobView>",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "`vjob_…` returned by `generate`. Jobs belonging to another user / App → `VIDEO_JOB_NOT_FOUND`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "JobView = { jobId, state: 'queued'|'running'|'succeeded'|'failed'|'cancelled', clientTag?, progress?: {seq, phase, queuePosition}, request: {prompt, imageUrl?, durationSec, resolution?, aspectRatio?, generateAudio?, model}, result?: {url, mimeType, durationSec, width, height, seed, expiresIn}, error?: {code, message}, estimatedCostCU, billedCostCU?, createdAt, deadlineAt }",
+        "desc": "`progress.seq` is the same monotonic counter used by `media_job` events. `result` only on `succeeded`; `error` only on `failed`. Job rows are retained 30 days for billing even after the media object is cleaned up (then `result.url` is absent)."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.video` does not list this method, or the user's `media_grant.video.enabled` is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_JOB_NOT_FOUND",
+          "code": -32125,
+          "desc": "Unknown `jobId`, or the job belongs to a different user / App.",
+          "retryable": false
+        }
+      ],
+      "example": "const view = await anna.video.getJob({ jobId });\nif (view.state === 'succeeded') play(view.result.url);\nelse if (view.state === 'failed') showError(view.error?.message);",
+      "limitations": [
+        "Polling is a fallback, not the primary channel — subscribe to `media_job` events (or use `generateAwait`) and poll adaptively.",
+        "`result.url` from an older `getJob` or event may already be expired; always treat a 403 as 'call getJob again'."
+      ]
+    },
+    {
+      "slug": "video-cancel-job",
+      "name": "video.cancelJob",
+      "kind": "Host API method · iframe surface",
+      "group": "Video",
+      "since": "Introduced anna-app-runtime v0.20.0 / dispatcher 0.26.0 / schema 0.26.0 (2026-10-08)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.video_cancel_job → fal cancel → quota refund (queued only)",
+      "summary": "Cancel a non-terminal job. **Queued** jobs are cancelled with a **full refund** of the CU hold. **Running** jobs attempt a provider-side cancel; if the provider is already rendering, the call returns `{state:'running', cancelPending:false}` and nothing is refunded (compute was consumed).",
+      "wire": {
+        "json_rpc_method": "video.cancelJob",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "POST /api/v1/copilot/app/video/jobs/{job_id}/cancel"
+      },
+      "signature": "anna.video.cancelJob(args: {jobId: string}, opts?: {timeoutMs?: number}) => Promise<{jobId, state: 'cancelled', refunded: true} | {jobId, state: 'running', cancelPending: false}>",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "`vjob_…` handle.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobId, state: 'cancelled', refunded: true } | { jobId, state: 'running', cancelPending: false }",
+        "desc": "Check `state` — a `running` echo means the cancel did not take effect; the job will still reach a terminal state and bill normally."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.video` does not list this method, or the user's `media_grant.video.enabled` is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_JOB_NOT_FOUND",
+          "code": -32125,
+          "desc": "Unknown `jobId` or not owned by this user / App.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_JOB_NOT_CANCELLABLE",
+          "code": -32126,
+          "desc": "Job already terminal (`succeeded` / `failed` / `cancelled`).",
+          "retryable": false
+        }
+      ],
+      "example": "abortBtn.onclick = async () => {\n  const r = await anna.video.cancelJob({ jobId });\n  status.textContent = r.state === 'cancelled' ? 'Cancelled, CU refunded' : 'Too late — already rendering';\n};",
+      "limitations": [
+        "`generateAwait`'s `signal` (AbortSignal) calls this for you.",
+        "Refund is all-or-nothing: no partial refund for running jobs."
+      ]
+    },
+    {
+      "slug": "video-list-jobs",
+      "name": "video.listJobs",
+      "kind": "Host API method · iframe surface",
+      "group": "Video",
+      "since": "Introduced anna-app-runtime v0.20.0 / dispatcher 0.26.0 / schema 0.26.0 (2026-10-08)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.video_list_jobs → anna_media_jobs",
+      "summary": "Cursor-paginated history of this App's jobs for the current user — the reload-recovery entry point (after an iframe reload, list `running` / `queued` jobs and resubscribe). Filter by `state` and/or `clientTag`.",
+      "wire": {
+        "json_rpc_method": "video.listJobs",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "GET /api/v1/copilot/app/video/jobs?state=&clientTag=&limit=&cursor="
+      },
+      "signature": "anna.video.listJobs(args?: {state?: string, clientTag?: string, limit?: number, cursor?: string}, opts?: {timeoutMs?: number}) => Promise<{jobs: JobView[], nextCursor?: string}>",
+      "params": [
+        {
+          "name": "state",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Filter by job state (`queued` / `running` / `succeeded` / `failed` / `cancelled`).",
+          "notes": []
+        },
+        {
+          "name": "clientTag",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Exact-match filter on the tag set at `generate`.",
+          "notes": []
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "20",
+          "summary": "Page size, clamped to 1–50.",
+          "notes": []
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Opaque cursor from the previous page's `nextCursor`. Malformed → `VIDEO_INVALID_REQUEST`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobs: JobView[], nextCursor?: string }",
+        "desc": "Newest first. `JobView` is the same shape as `getJob` (URLs re-signed)."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.video` does not list this method, or the user's `media_grant.video.enabled` is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_INVALID_REQUEST",
+          "code": -32122,
+          "desc": "Parameter outside the model's catalogue space (duration / resolution / aspectRatio / prompt too long / bad `imageUrl` / `clientTag` > 120 chars). `data.allowed` echoes the full allowed space for the resolved model.",
+          "retryable": false
+        }
+      ],
+      "example": "// Reload recovery\nconst { jobs } = await anna.video.listJobs({ state: 'running' });\nfor (const j of jobs) resumeTracking(j.jobId, j.clientTag);",
+      "limitations": [
+        "Job rows are kept 30 days; media objects 7 days — older `succeeded` jobs may have no `result.url`."
+      ]
+    }
+  ]
+}

@@ -4,7 +4,7 @@ description: "RPC namespaces and methods your iframe can call on the host, with 
 section: apps
 slug: app-ui-host-api
 order: 14
-updated: 2026-09-24
+updated: 2026-10-14
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -13,7 +13,7 @@ Every call from your iframe goes through `postMessage → Host Bridge → POST /
 
 1. **Auth.** `decode_window_token(t)` against the JWT bound to `(window_uuid, user_id, app_id, version_id, scopes)` (TTL 120s, audience `anna-app-window`).
 2. **ACL.** `host_api_allows(manifest, ns, method)` checks `manifest.ui.host_api[ns]` (with `*` and `<id>` wildcards). `window.*` is always allowed. Top-level `permissions` is **never** consulted (display-only legacy; rejected at `schema: 3`).
-3. **Per-app grants.** Some namespaces are additionally gated by a user-controlled grant enforced inside the handler/facade: `image_grant`, `upload_grant`, `web_grant`, `credentials_grant`, and the install-time `storage_token` scopes for `storage`/`files`.
+3. **Per-app grants.** Some namespaces are additionally gated by a user-controlled grant enforced inside the handler/facade: `image_grant`, `media_grant` (`video.*` / `audio.*`), `upload_grant`, `web_grant`, `credentials_grant`, and the install-time `storage_token` scopes for `storage`/`files`.
 
 Then it dispatches to the namespace handler. Any failure returns `{ ok: false, error: { code, message, details? } }`.
 
@@ -336,6 +336,41 @@ Gated by `host_api.image` (method surface) **plus** the per-app
 | `generate` | ✅ | `{ prompt, n?, size?, model_hint? }` | `{ images: [{ url, … }] }` |
 | `edit` | ✅ | `{ prompt, image_ref, n?, size? }` | `{ images: [{ url, … }] }` |
 
+### `video`
+
+Host-mediated **async** video generation. Gated by `host_api.video` (method
+surface) **plus** the per-app `media_grant.video.enabled`. CU is pre-charged on
+submit and settled / refunded at the terminal state; progress arrives as
+`media_job` SSE events. Full guide: [App UI Media](/developers/apps/app-ui-media).
+
+| method | status | args | result |
+|---|---|---|---|
+| `generate` | ✅ | `{ prompt, durationSec?, resolution?, aspectRatio?, imageUrl?, modelHint?, clientTag? }` | `{ jobId, state: 'queued', estimatedCostCU, model, … }` |
+| `getJob` | ✅ | `{ jobId }` | `{ jobId, state, progress?, result?: { url, expiresIn, … }, billedCostCU? }` |
+| `cancelJob` | ✅ | `{ jobId }` | `{ jobId, state, cancelPending }` |
+| `listJobs` | ✅ | `{ state?, limit? }` | `{ jobs: [...] }` |
+
+### `audio`
+
+Host-mediated **synchronous** speech synthesis and transcription, plus the
+**realtime voice session**. Gated by `host_api.audio` **plus**
+`media_grant.audio.{enabled, speak, transcribe}` — each sync operation has its
+own user flag; `session` needs **both**. Full guides: [App UI Media](/developers/apps/app-ui-media)
+(sync) · [App UI Audio Session](/developers/apps/app-ui-audio-session) (realtime).
+
+| method | status | args | result |
+|---|---|---|---|
+| `speak` | ✅ | `{ text, voice?, format?, speed?, delivery?, modelHint? }` | `{ url \| audioBase64, durationSec, model, billedCostCU }` |
+| `transcribe` | ✅ | `{ audioBase64 \| audioUrl, format?, language?, modelHint? }` | `{ text, language, durationSec, model, billedCostCU }` |
+| `session` | ✅ **bridge-local** | `anna.audio.session({ llm: 'agent' \| 'none', system?, context?, voice?, language?, speed?, maxDurationSec? })` | `VoiceSession` — `sendAudio` / `flushAudio` / `setContext` / `say` / `interrupt` / `end`; events `asr_* llm_* tts_* say_* interrupted ended …` |
+
+`session` is not a dispatcher RPC: the SDK posts `audio.session.{open, send,
+flush, context, say, interrupt, close}` and the **host page's bridge** handles
+them locally over its own WebSocket to `/api/v1/anna-apps/runtime/voice`
+(nothing reaches `/runtime/rpc`). Declaring `session` also makes the host
+render the iframe with `allow="microphone"`; `llm: 'agent'` additionally
+requires a `host_api.agent.session` submode.
+
 ### `upload`
 
 Invoke-scoped, transient artifact upload to host R2. Gated by
@@ -355,14 +390,14 @@ Declared in the dispatcher but stubbed today (`not_implemented`). Plan for Phase
 - `fs.read` / `fs.write` (R2-backed workspace, mirrors the Anna Agent FS)
 - `prefs.get` (read user preference keys)
 
-`llm.complete` / `llm.stream` / `llm.embed` are **implemented** (host-side calls bound to the user's quota) — see [LLM & Agent](/developers/apps/llm-and-agent). `files.*` (APS object storage), `web.*` (host-managed search/fetch), `apps.*` (launcher) and `credentials.*` (platform accounts) are implemented nexus-side; `mobile.*` executes only inside the anna-mobile shell. See the namespace table in [App UI Manifest](/developers/apps/app-ui-manifest#host_api) for their method lists.
+`llm.complete` / `llm.stream` / `llm.embed` are **implemented** (host-side calls bound to the user's quota) — see [LLM & Agent](/developers/apps/llm-and-agent); `llm.catalog` (media capability / CU-pricing discovery, returns only the service types this App is granted) is covered in [App UI Media](/developers/apps/app-ui-media#discover-before-you-call). `files.*` (APS object storage), `web.*` (host-managed search/fetch), `apps.*` (launcher) and `credentials.*` (platform accounts) are implemented nexus-side; `mobile.*` executes only inside the anna-mobile shell. See the namespace table in [App UI Manifest](/developers/apps/app-ui-manifest#host_api) for their method lists.
 
 ## ACL & per-app grants
 
 What actually gates a call, in order:
 
 1. **`ui.host_api.<ns>`** must list the method name (or `*`); `window.*` is always allowed; `agent` uses an object spec (`session.auto` / `session.fixed`).
-2. **Per-app user grants** for some namespaces, enforced inside the facade: `image_grant` (`image.*`), `upload_grant` (`upload.*`), `web_grant` (`web.*`), `credentials_grant` (`credentials.*`), and the install-time `storage_token` `allowed_scopes` claim for non-default `storage`/`files` scopes.
+2. **Per-app user grants** for some namespaces, enforced inside the facade: `image_grant` (`image.*`), `media_grant` (`video.*` / `audio.*`), `upload_grant` (`upload.*`), `web_grant` (`web.*`), `credentials_grant` (`credentials.*`), and the install-time `storage_token` `allowed_scopes` claim for non-default `storage`/`files` scopes.
 
 The top-level manifest `permissions` list is **not** part of this chain — it has zero enforcement sites, is display-only on `schema ≤ 2`, and is rejected at `schema: 3` (permission display is derived from `ui.host_api` + the storage declaration instead).
 

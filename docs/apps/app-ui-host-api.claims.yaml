@@ -8,3 +8,4 @@ host_api_methods:
   - tools.invoke
   - tools.getJob
   - tools.listJobs
+  - llm.catalog

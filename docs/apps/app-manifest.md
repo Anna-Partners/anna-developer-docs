@@ -4,7 +4,7 @@ description: "The manifest JSON that declares which Executas an app bundles and 
 section: apps
 slug: app-manifest
 order: 4
-updated: 2026-09-11
+updated: 2026-10-14
 estimated_minutes: 6
 ---
 
@@ -83,6 +83,7 @@ Allowed `host_capabilities` values (`_ALLOWED_HOST_CAPABILITIES` — shared with
 llm.sample, llm.complete, llm.embed
 llm.agent.auto, llm.agent.fixed
 llm.image, llm.image.edit
+llm.video, llm.audio.speak, llm.audio.transcribe
 web.search, web.fetch, web.image_search, web.image_fetch
 host.upload
 aps.kv, aps.files

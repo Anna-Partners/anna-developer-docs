@@ -1,0 +1,506 @@
+{
+  "section_id": "host-api-audio",
+  "items": [
+    {
+      "slug": "audio-speak",
+      "name": "audio.speak",
+      "kind": "Host API method · iframe surface",
+      "group": "Audio",
+      "since": "Introduced anna-app-runtime v0.20.0 / dispatcher 0.26.0 / schema 0.26.0 (2026-10-08)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.audio_speak → tts_service (DashScope realtime / DashScope HTTP / fal TTS) → R2 or inline",
+      "summary": "Synchronous text-to-speech. The host resolves the user's preferred TTS model (or your `model` hint), validates `text` length and `voice` against that model's catalogue entry, synthesizes, bills per character and returns either a presigned R2 URL (default) or inline base64 (≤1 MB products). Three provider families are dispatched by the catalogue's `api_type`; knobs a model does not support are ignored, never surcharged.",
+      "wire": {
+        "json_rpc_method": "audio.speak",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "timeout_s": 120,
+        "http_equivalent": "POST /api/v1/copilot/app/audio/speak"
+      },
+      "signature": "anna.audio.speak(args: {text: string, voice?: string, language?: string, speed?: number, format?: 'mp3'|'wav', timestamps?: boolean, delivery?: 'url'|'inline', model?: string}, opts?: {timeoutMs?: number}) => Promise<{url?: string, expiresIn?: number, audioBase64?: string, mimeType: string, charCount: number, billedCostCU: number, model: string}>",
+      "params": [
+        {
+          "name": "text",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "Text to synthesize. Trimmed; empty → `VIDEO_INVALID_REQUEST` (shared validator). Capped by the resolved model's `maxCharsPerCall` (catalogue; e.g. 1000 for Qwen TTS Plus, 2000 for Flash) → `AUDIO_TEXT_TOO_LONG` echoes the cap. Platform content moderation applies (`AUDIO_CONTENT_REJECTED`, not billed).",
+          "notes": []
+        },
+        {
+          "name": "voice",
+          "type": "string",
+          "required": false,
+          "default": "model `defaultVoice`",
+          "summary": "Voice id from the model's voice table (`llm.catalog({serviceType:'tts'}).models[].capabilities.voices[].id`). Unknown → `AUDIO_VOICE_INVALID` with `data.allowed` = valid voices. Do **not** hard-code voices — they differ per model (Cherry/Serena… on Qwen, Rachel… on ElevenLabs, Wise_Woman… on MiniMax).",
+          "notes": []
+        },
+        {
+          "name": "language",
+          "type": "string",
+          "required": false,
+          "default": "auto",
+          "summary": "Language hint mapped per provider (`language_code` / `language_boost` / `language`); DashScope auto-detects.",
+          "notes": []
+        },
+        {
+          "name": "speed",
+          "type": "number",
+          "required": false,
+          "default": "1.0",
+          "summary": "Speaking rate 0.5–2.0 (outside → `VIDEO_INVALID_REQUEST`). Ignored by models without a speed knob (ElevenLabs, xAI).",
+          "notes": []
+        },
+        {
+          "name": "format",
+          "type": "string",
+          "required": false,
+          "default": "mp3",
+          "summary": "`mp3` (`audio/mpeg`) or `wav` (`audio/wav`).",
+          "notes": []
+        },
+        {
+          "name": "timestamps",
+          "type": "boolean",
+          "required": false,
+          "default": "false",
+          "summary": "Request word-level timestamps (subtitle alignment). Only ElevenLabs eleven-v3 honours it; others ignore.",
+          "notes": []
+        },
+        {
+          "name": "delivery",
+          "type": "string",
+          "required": false,
+          "default": "url",
+          "summary": "`url` → bytes stored on R2, presigned GET returned (`expiresIn` ~1800s). `inline` → `audioBase64` in the response when the product is ≤1 MB (larger products fall back to `url`).",
+          "notes": []
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "required": false,
+          "default": "user `modelPreferences.tts` → catalogue default",
+          "summary": "Optional TTS model hint (`modelName` from `llm.catalog`). Unknown / not routable → `AUDIO_MODEL_UNAVAILABLE`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ url?: string, expiresIn?: number, audioBase64?: string, mimeType: string, charCount: number, billedCostCU: number, model: string }",
+        "desc": "Either `url` (+`expiresIn`) or `audioBase64` depending on `delivery` and size. `model` tells you which catalogue model actually spoke (label it in your UI). `charCount` is the billed length."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.audio` does not list this operation, or the user's `media_grant.audio.enabled` / per-operation flag (`speak` or `transcribe`) is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": -32015,
+          "desc": "User plan CU quota exhausted (HTTP 429 on the HTTP surface).",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_INVALID_REQUEST",
+          "code": -32122,
+          "desc": "Empty `text`, bad `format` / `delivery`, `speed` outside 0.5–2.0 (validation code shared with the video surface).",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_TEXT_TOO_LONG",
+          "code": -32142,
+          "desc": "`text` exceeds the model's `maxCharsPerCall`; `data.allowed.maxCharsPerCall` echoes the cap.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_VOICE_INVALID",
+          "code": -32145,
+          "desc": "`voice` not in the resolved model's voice table; `data.allowed` lists valid voices.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_MODEL_UNAVAILABLE",
+          "code": -32146,
+          "desc": "No text-to-speech model routable or unknown `model` hint.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_PROVIDER_ERROR",
+          "code": -32144,
+          "desc": "Provider call failed (message carries the first 200 chars). HTTP 502 underneath.",
+          "retryable": true
+        },
+        {
+          "name": "AUDIO_CONTENT_REJECTED",
+          "code": -32147,
+          "desc": "Platform moderation rejected the text. Not billed.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "APP_TTS",
+        "model": "per character (`pricing.unit = per_10k_chars` → CU, minimum 1 CU), charged after a successful synthesis",
+        "pricing": "see `llm.catalog` `pricing.cuPer1kChars` per model"
+      },
+      "example": "const cat = await anna.llm.catalog({ serviceType: 'tts' });\nconst tts = cat.models.find(m => m.isUserPreferred) ?? cat.models[0];\nconst out = await anna.audio.speak({\n  text: 'Welcome to Timeline Studio.',\n  voice: tts.capabilities.defaultVoice,\n  format: 'mp3',\n});\nnew Audio(out.url).play();            // ~30 min TTL\ncost.textContent = `${out.billedCostCU} CU · ${out.model}`;",
+      "limitations": [
+        "Synchronous with a 120s HTTP timeout — split long narration into sentences; quality-tier models (Qwen TTS Plus) synthesize ~16 chars/s.",
+        "No streaming / sentence-level chunking on the sync surface. For streaming TTS with barge-in open a realtime `anna.audio.session()` and use `say()`.",
+        "Presigned URLs expire in ~30 min; persist via `upload.*` if needed.",
+        "`speak` will never change to return a `jobId` — a future long-form API would be a separate `audio.speakAsync`."
+      ]
+    },
+    {
+      "slug": "audio-transcribe",
+      "name": "audio.transcribe",
+      "kind": "Host API method · iframe surface",
+      "group": "Audio",
+      "since": "Introduced anna-app-runtime v0.20.0 / dispatcher 0.26.0 / schema 0.26.0 (2026-10-08)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.audio_transcribe → LLMRouter (ServiceType.STT) → OpenAI-compatible chat/completions with input_audio",
+      "summary": "Synchronous speech-to-text for a whole recording (≤10 min). Pass the audio inline (base64, ≤10 MB) or as a public `https` URL (≤25 MB). The host routes to the user's preferred speech-to-text model, returns the transcript and bills per audio second.",
+      "wire": {
+        "json_rpc_method": "audio.transcribe",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "timeout_s": 120,
+        "http_equivalent": "POST /api/v1/copilot/app/audio/transcribe"
+      },
+      "signature": "anna.audio.transcribe(args: {audioUrl?: string, audioBase64?: string, format?: 'wav'|'mp3'|'webm'|'ogg'|'flac'|'m4a', language?: string, model?: string}, opts?: {timeoutMs?: number}) => Promise<{text: string, language: string, billedCostCU: number}>",
+      "params": [
+        {
+          "name": "audioUrl",
+          "type": "string",
+          "required": "one of audioUrl / audioBase64",
+          "default": null,
+          "summary": "Public `https` URL of the recording (SSRF guard applies). Fetched server-side, ≤25 MB → `AUDIO_TOO_LONG`. Format inferred from content-type / extension.",
+          "notes": []
+        },
+        {
+          "name": "audioBase64",
+          "type": "string",
+          "required": "one of audioUrl / audioBase64",
+          "default": null,
+          "summary": "Inline recording, base64, decoded size ≤10 MB. Provide `format` when inline.",
+          "notes": []
+        },
+        {
+          "name": "format",
+          "type": "string",
+          "required": false,
+          "default": "mp3",
+          "summary": "Container of the inline audio: `wav` / `mp3` / `webm` / `ogg` / `flac` / `m4a` (`mpeg`/`mpga` → mp3). Browser `MediaRecorder` typically yields `webm`.",
+          "notes": []
+        },
+        {
+          "name": "language",
+          "type": "string",
+          "required": false,
+          "default": "auto",
+          "summary": "ISO 639-1 hint (`zh`, `en`, …). Echoed back in the response.",
+          "notes": []
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "required": false,
+          "default": "user `modelPreferences.stt` → first speech-to-text model",
+          "summary": "Optional STT model hint.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ text: string, language: string, billedCostCU: number }",
+        "desc": "`text` is the verbatim transcript (no diarization, no timestamps on this surface)."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.audio` does not list this operation, or the user's `media_grant.audio.enabled` / per-operation flag (`speak` or `transcribe`) is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": -32015,
+          "desc": "User plan CU quota exhausted (HTTP 429 on the HTTP surface).",
+          "retryable": false
+        },
+        {
+          "name": "VIDEO_INVALID_REQUEST",
+          "code": -32122,
+          "desc": "Neither / both of `audioUrl` and `audioBase64`, bad base64, bad URL, unsupported `format`.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_TOO_LONG",
+          "code": -32143,
+          "desc": "Recording longer than 10 min or larger than 25 MB (URL) / 10 MB (inline).",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_MODEL_UNAVAILABLE",
+          "code": -32146,
+          "desc": "No speech-to-text model routable.",
+          "retryable": false
+        },
+        {
+          "name": "AUDIO_PROVIDER_ERROR",
+          "code": -32144,
+          "desc": "STT provider failed (message carries the first 200 chars).",
+          "retryable": true
+        }
+      ],
+      "billing": {
+        "request_type": "APP_STT",
+        "model": "per audio second of the routed model (token-priced models are converted), charged after a successful transcription"
+      },
+      "example": "// MediaRecorder → base64 → transcript\nconst blob = new Blob(chunks, { type: 'audio/webm' });\nconst b64 = btoa(String.fromCharCode(...new Uint8Array(await blob.arrayBuffer())));\nconst { text } = await anna.audio.transcribe({ audioBase64: b64, format: 'webm', language: 'zh' });\ninput.value = text;",
+      "limitations": [
+        "Whole-file, synchronous recognition only. For live / streaming ASR (partial results, barge-in) open a realtime `anna.audio.session()`.",
+        "10 min / 25 MB / 10 MB caps are hard; split long recordings client-side.",
+        "Inline payloads travel through postMessage + JSON — prefer `audioUrl` (e.g. an `upload.*` product) for recordings over a few MB."
+      ]
+    },
+    {
+      "slug": "audio-session",
+      "name": "audio.session",
+      "kind": "Host API surface · iframe → host bridge relay (not a dispatcher RPC)",
+      "group": "Audio",
+      "since": "Introduced anna-app-runtime v0.21.0 / nexus 1.1.0-beta.189 (2026-10-12); documented with schema 0.27.0 (2026-10-14). Not part of `host_api/methods.json` — relayed locally by the host bridge.",
+      "direction": "Bundle (iframe) → postMessage `audio.session.*` → host bridge → WS /api/v1/anna-apps/runtime/voice → VoiceGateway (streaming ASR → LLMBackend[AppAgent | None] → streaming TTS) → WS events → bridge event `audio.session` → VoiceSession handle",
+      "summary": "Full-duplex realtime voice session for an App: stream 16 kHz PCM16 microphone audio up, receive streaming ASR partials/finals, the LLM's streaming reply (your App's agent session, or no LLM at all) and streaming TTS audio down, with barge-in. Two App-specific primitives: `setContext(text)` injects live App state (≤4 KB) into the **next** turn's system prompt (never into history), and `say(text)` speaks arbitrary text through the same streaming TTS without an LLM round-trip. The bundle never holds a token; the host page owns the socket.",
+      "wire": {
+        "json_rpc_method": "audio.session.open · audio.session.send · audio.session.flush · audio.session.context · audio.session.say · audio.session.interrupt · audio.session.close (bridge-local; never forwarded to /runtime/rpc)",
+        "auth": "Handled by the host page — the bundle never sees a token and opens no network connection. Unlike the other `audio.*` rows this is **not** a dispatcher RPC: `audio.session.*` requests are intercepted by the host bridge (`anna-app-host-bridge.js`, or the anna-mobile shell) which owns the WebSocket `wss://{host}/api/v1/anna-apps/runtime/voice?window_uuid=…` (cookie-authenticated — web session or the mobile shell's scoped `anna_mobile_rt`), checks the window slot, relays messages both ways and tears the socket down when the window closes or the iframe reloads. Hosts without the relay answer `unknown_method` / `not_supported`.",
+        "streaming": true,
+        "timeout_s": null,
+        "http_equivalent": "WS /api/v1/anna-apps/runtime/voice?window_uuid=<uuid> (host-bridge only; the main-chat equivalent is WS /api/v1/copilot/voice)"
+      },
+      "signature": "anna.audio.session(config: {llm?: 'agent'|'none', submode?: 'auto'|'fixed', fixed_client_id?: string, voice?: string, language?: string, speed?: number, context?: string, system?: string, maxDurationSec?: number}) => Promise<VoiceSession>\n\nVoiceSession {\n  sessionId: string; audioConfig: {format:'pcm', sample_rate:24000, channels:1, bits_per_sample:16}; models: {asr, tts, voice}; maxDurationSec: number; asrIdleTimeoutSec: number|null;\n  sendAudio(pcm16: Int16Array|ArrayBuffer|Uint8Array): number;   // 16 kHz mono; auto-chunked ≤32 KB; fire-and-forget\n  flushAudio(): void;                                           // push-to-talk released → finalize the pending sentence now\n  setContext(text: string): Promise<void>;                      // ≤4 KB, replace semantics, applies from the next utterance\n  say(text: string, opts?: {priority?: 'normal'|'high', interrupt?: boolean, sayId?: string}): Promise<{sayId: string}>;  // ≤1000 chars, TTS-only\n  interrupt(): Promise<void>;\n  end(): Promise<{duration, total_asr_seconds, total_tts_characters, reason}>;\n  on(event, handler): () => void;  off(event, handler): void;   // event '*' receives (event, payload)\n}",
+      "params": [
+        {
+          "name": "llm",
+          "type": "'agent' | 'none'",
+          "required": false,
+          "default": "agent",
+          "summary": "`agent` routes each final utterance through **this App's agent session** (`POST /copilot/app/agent`, server-minted token; tool surface = `ui.host_api.agent.tools`). `none` runs ASR + TTS only — you get `asr_*` events and can `say()` your own text.",
+          "notes": [
+            "`agent` requires manifest `host_api.agent.session.{auto|fixed}` matching `submode`; otherwise the open fails with `permission_denied`."
+          ]
+        },
+        {
+          "name": "submode",
+          "type": "'auto' | 'fixed'",
+          "required": false,
+          "default": "auto",
+          "summary": "Same semantics as `anna.agent.session()`; `fixed` needs `fixed_client_id`.",
+          "notes": []
+        },
+        {
+          "name": "voice",
+          "type": "string",
+          "required": false,
+          "default": "the TTS model's default voice",
+          "summary": "TTS voice id. Must belong to the resolved TTS model's voice table (see `llm.catalog({serviceType:'tts'})`); unknown voices fall back to the model default — the effective voice is echoed in `vs.models.voice`.",
+          "notes": [
+            "Apps cannot pick ASR/TTS **models** — the user's realtime-model preferences apply."
+          ]
+        },
+        {
+          "name": "language",
+          "type": "string",
+          "required": false,
+          "default": "zh",
+          "summary": "ASR language hint (`zh`, `en`, …).",
+          "notes": []
+        },
+        {
+          "name": "speed",
+          "type": "number",
+          "required": false,
+          "default": "1.0",
+          "summary": "TTS speed; ignored by models without a speed knob.",
+          "notes": []
+        },
+        {
+          "name": "context",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Initial live context (≤4 KB). Same semantics as `setContext()`.",
+          "notes": []
+        },
+        {
+          "name": "system",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "System prompt for `llm:'agent'` (≤8 KB). The live context is appended to it inside a `<live_context>` fence on every run; neither enters the conversation history.",
+          "notes": [
+            "Over the cap → `system_too_large` and the open fails."
+          ]
+        },
+        {
+          "name": "maxDurationSec",
+          "type": "number",
+          "required": false,
+          "default": "3 h (host cap)",
+          "summary": "Requested session lifetime; clamped to the host cap (3 h). The effective value is returned as `vs.maxDurationSec`. On expiry the host sends `error{code:'session_timeout'}` then `ended` — reopen if needed.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "VoiceSession",
+        "desc": "Resolves once the host's `session_started` arrives (`sessionId`, `audioConfig` = 24 kHz mono PCM16 for the player, `models` = resolved ASR/TTS/voice, `maxDurationSec`, `asrIdleTimeoutSec`). Events: `asr_partial{text}` · `asr_final{text}` · `llm_start{user_text}` · `llm_partial{text}` · `llm_done{text}` · `tts_audio{audio: base64 PCM}` · `tts_done` · `interrupted{source:'barge_in'|'say'}` (not emitted for your own `interrupt()` — stop the player yourself) · `say_start{say_id, chars}` · `say_done{say_id, status:'done'|'interrupted'|'replaced'|'error'}` · `context_updated{chars}` · `asr_paused{idle_sec | reason:'flushed'|'connection_ended'}` · `asr_resumed{reconnect_ms}` · `quota_warning{message}` · `error{code, message}` · `ended{duration, total_asr_seconds, total_tts_characters, reason}`. Unknown event types are dropped (forward-compatible)."
+      },
+      "errors": [
+        {
+          "name": "permission_denied",
+          "code": null,
+          "desc": "Window not yours / not active, manifest `ui.host_api.audio` lacks `session`, or `llm:'agent'` without a matching `host_api.agent.session` submode.",
+          "retryable": false
+        },
+        {
+          "name": "not_granted",
+          "code": null,
+          "desc": "User `media_grant.audio` is off, or one of the `speak` / `transcribe` flags is off — the session needs **both**.",
+          "retryable": false
+        },
+        {
+          "name": "concurrency_limit",
+          "code": null,
+          "desc": "A voice session is already open for this window (one per window, enforced in the bridge and server-side). No per-user cap.",
+          "retryable": true
+        },
+        {
+          "name": "not_supported",
+          "code": null,
+          "desc": "Host has the feature flag off (`ANNA_APP_VOICE_SESSION_ENABLED=false`) or the page has no WebSocket.",
+          "retryable": false
+        },
+        {
+          "name": "quota_exhausted",
+          "code": null,
+          "desc": "CU pool empty at open or during the 60 s periodic check (preceded by `quota_warning`).",
+          "retryable": false
+        },
+        {
+          "name": "asr_not_available / tts_not_available",
+          "code": null,
+          "desc": "No realtime ASR / TTS model routable for this user.",
+          "retryable": true
+        },
+        {
+          "name": "invalid_request",
+          "code": null,
+          "desc": "Bad `llm` value, empty `say.text`, or a message before `start_session`.",
+          "retryable": false
+        },
+        {
+          "name": "context_too_large / system_too_large / say_too_long",
+          "code": null,
+          "desc": "`context` >4 KB, `system` >8 KB, `say.text` >1000 chars. The SDK rejects `setContext` / `say` client-side with the same codes before sending.",
+          "retryable": false
+        },
+        {
+          "name": "session_timeout",
+          "code": null,
+          "desc": "`maxDurationSec` reached; the session ends right after this error.",
+          "retryable": true
+        },
+        {
+          "name": "asr_error / tts_error / tts_peer_closed / tts_upstream_error / llm_timeout / processing_error",
+          "code": null,
+          "desc": "Provider-side failures during a turn. The session usually stays open — the next utterance starts fresh.",
+          "retryable": true
+        },
+        {
+          "name": "internal_error",
+          "code": null,
+          "desc": "Unexpected server failure; the socket closes with 1011 and `ended` fires.",
+          "retryable": true
+        },
+        {
+          "name": "timeout / network / closed (bridge)",
+          "code": null,
+          "desc": "Bridge-level: no `session_started` within 15 s, socket error, or the window slot was torn down while opening.",
+          "retryable": true
+        }
+      ],
+      "billing": {
+        "request_type": "APP_STT (per recognised audio second) · APP_TTS (per synthesised character, replies and `say()` alike)",
+        "model": "The user's realtime ASR / TTS preferences; `llm:'agent'` turns are billed by the agent session itself (not double-counted).",
+        "pricing": "Only audio you actually `sendAudio()` is recognised and billed — an idle open session costs nothing. Gate the microphone behind push-to-talk or a wake word; `end()` returns `{total_asr_seconds, total_tts_characters}` for your own accounting."
+      },
+      "example": "const mic = anna.audio.mic({ sampleRate: 16000, onChunk: (pcm16) => { if (talking) vs.sendAudio(pcm16); } });\nawait mic.start();            // prompts for the microphone (iframe gets allow=\"microphone\" from host_api.audio ∋ 'session')\nmic.setMuted(true);           // push-to-talk gate\n\nconst vs = await anna.audio.session({ llm: 'agent', language: 'zh', system: 'Answer in one short sentence.', maxDurationSec: 1800 });\nconst player = anna.audio.player({ sampleRate: vs.audioConfig.sample_rate });\n\nvs.on('asr_final',  ({ text })  => transcript.append(text));\nvs.on('llm_partial',({ text })  => reply.textContent += text);\nvs.on('tts_audio',  ({ audio }) => player.enqueue(audio));\nvs.on('tts_done',   ()          => player.flush());\nvs.on('interrupted',()          => player.stop());          // barge-in\nvs.on('ended',      (usage)     => console.log(usage.total_asr_seconds, usage.total_tts_characters));\n\nptt.onpointerdown = () => { talking = true;  mic.setMuted(false); };\nptt.onpointerup   = () => { talking = false; mic.setMuted(true); vs.flushAudio(); };\n\nsetInterval(() => vs.setContext(JSON.stringify(gameState)), 1000);   // ≤4 KB, replaces, next turn\nawait vs.say('Careful, top lane.', { priority: 'high' });            // TTS-only, preempts\n\nanna.on('host.app_state', ({ state }) => { if (state !== 'active') vs.end(); });  // mobile: foreground-only\nawait vs.end();",
+      "limitations": [
+        "Not a dispatcher RPC — requires a host page with the bridge relay (nexus ≥ 1.1.0-beta.189; the local harness mocks it with `SpeechRecognition` / `speechSynthesis`). Hosts without it reply `unknown_method` / `not_supported`.",
+        "Upstream audio must be 16 kHz mono PCM16; chunks ≤32 KB (the SDK splits). `sendAudio` is fire-and-forget: when the host socket buffers >256 KB the bridge drops the newest chunks (counted in the bridge's `session.close` reply, not surfaced by `end()`).",
+        "ASR connections are paused after `asrIdleTimeoutSec` (15 s) without audio and rebuilt on the next frame (`asr_paused` / `asr_resumed`, ~0.3–0.6 s). Call `flushAudio()` when the user releases push-to-talk — streaming ASR only finalizes after trailing silence frames.",
+        "`setContext` is replace-only and applies from the **next** utterance. The composed per-run system prompt (your `system` + the `<live_context>` fence) is validated like any App system prompt — boundary-forging tokens (`<system>`, `<safety`, `<app_system_prompt>`, `system:`) fail the turn with `processing_error` — and html-escaped by the agent builder, so markup in your context is inert; never put instructions the user cannot see in it. `say` has a single pending slot server-side (`normal` queues one; a newer one replaces it → `say_done{status:'replaced'}`); any interruption drops the pending say.",
+        "One session per window; no per-user cap. Session lifetime ≤3 h. Apps cannot choose ASR/TTS models (user preferences apply); `vad.silenceMs` is not configurable.",
+        "Mobile (anna-mobile shell): foreground-only — WKWebView suspends `getUserMedia` in the background; listen to `host.app_state` and pause/end the session. Android requires a development build (Expo Go cannot grant the WebView microphone).",
+        "Agent-session idle TTL is 30 min: after a long silence the next turn transparently re-creates the agent session (history resets; `context` is unaffected)."
+      ]
+    },
+    {
+      "slug": "audio-mic",
+      "name": "audio.mic",
+      "kind": "SDK client helper · pure browser (no host round-trip)",
+      "group": "Audio",
+      "since": "Introduced anna-app-runtime v0.21.0 (2026-10-12)",
+      "direction": "Bundle (iframe) → `navigator.mediaDevices.getUserMedia` → AudioWorklet (16 kHz PCM16; ScriptProcessor fallback under the production CSP) → `onChunk`",
+      "summary": "Microphone capture tuned for `audio.session`: 16 kHz mono PCM16 frames of 4096 samples (~256 ms) delivered to `onChunk(pcm16, float32)`, with `onLevel(rms)` for a VU meter / cheap VAD, an `analyser` node for visualizers, `setMuted()` as the push-to-talk gate and `stop()` to release the device. Shares one source file with the main-chat voice call (`anna-voice-client-core.js`).",
+      "wire": {
+        "json_rpc_method": null,
+        "auth": "None — runs entirely inside the iframe. Needs a secure context and the outer iframe's `allow=\"microphone\"`, which the host emits iff manifest `host_api.audio ∋ \"session\"`.",
+        "streaming": false,
+        "timeout_s": null,
+        "http_equivalent": null
+      },
+      "signature": "anna.audio.mic(opts?: {sampleRate?: 16000, frameSize?: 4096, onChunk?: (pcm16: Int16Array, float32: Float32Array) => void, onLevel?: (rms: number) => void, onError?: (e) => void, preferWorklet?: boolean, constraints?: MediaTrackConstraints}) => MicCapture\n\nMicCapture { start(): Promise<MicCapture>; stop(): void; setMuted(bool): void; muted; active; mode: 'worklet'|'script'; analyser: AnalyserNode|null; sampleRate; frameSize }",
+      "params": [],
+      "returns": {
+        "type": "MicCapture",
+        "desc": "`start()` rejects with a descriptive error on `insecure context` (http://<lan-ip> dev builds — WebView `navigator.mediaDevices` is [SecureContext]-only), permission denied, or missing API; on failure it releases any stream it already acquired."
+      },
+      "errors": [],
+      "billing": {},
+      "example": "const mic = anna.audio.mic({ onChunk: (pcm16) => talking && vs.sendAudio(pcm16), onLevel: (rms) => vu.style.width = `${Math.min(100, rms * 400)}%` });\nawait mic.start();\nmic.setMuted(true);   // emit nothing until the user presses the button",
+      "limitations": [
+        "Default constraints enable echo cancellation / noise suppression / AGC — pass `constraints` to override.",
+        "AudioWorklet needs `blob:` worker scripts; the production bundle CSP (`script-src 'self'`) blocks it, so capture silently falls back to ScriptProcessor (same frame shape).",
+        "Open the mic **before** `anna.audio.session()` so a denied permission does not leave a billed-but-silent session open."
+      ]
+    },
+    {
+      "slug": "audio-player",
+      "name": "audio.player",
+      "kind": "SDK client helper · pure browser (no host round-trip)",
+      "group": "Audio",
+      "since": "Introduced anna-app-runtime v0.21.0 (2026-10-12)",
+      "direction": "`tts_audio{audio}` base64 PCM16 → jitter buffer (3 chunks) → Web Audio scheduled playback",
+      "summary": "Gapless player for the session's streamed TTS: `enqueue(base64)` on every `tts_audio`, `flush()` on `tts_done` (drain the jitter buffer), `stop()` on `interrupted` (barge-in), `onPlaybackEnd` when the queue runs dry. Same implementation as the main-chat voice call.",
+      "wire": {
+        "json_rpc_method": null,
+        "auth": "None — runs entirely inside the iframe.",
+        "streaming": false,
+        "timeout_s": null,
+        "http_equivalent": null
+      },
+      "signature": "anna.audio.player(opts?: {sampleRate?: 24000, channels?: 1, format?: 'pcm', jitterChunks?: 3, onPlaybackEnd?: () => void}) => VoiceAudioPlayer\n\nVoiceAudioPlayer { configure(audioConfig): void; enqueue(base64Audio: string): void; flush(): void; stop(): void; destroy(): void; playing; onPlaybackEnd }",
+      "params": [],
+      "returns": {
+        "type": "VoiceAudioPlayer",
+        "desc": "Construct it with `vs.audioConfig.sample_rate` (24 kHz today) or call `player.configure(vs.audioConfig)`."
+      },
+      "errors": [],
+      "billing": {},
+      "example": "const player = anna.audio.player({ sampleRate: vs.audioConfig.sample_rate });\nvs.on('tts_audio',   ({ audio }) => player.enqueue(audio));\nvs.on('tts_done',    () => player.flush());\nvs.on('interrupted', () => player.stop());\nvs.on('ended',       () => player.destroy());",
+      "limitations": [
+        "The AudioContext is created lazily on the first `enqueue`; on iOS Safari / WKWebView it must follow a user gesture — opening the session from a button click satisfies this.",
+        "`stop()` discards buffered audio and does not fire `onPlaybackEnd`; reset your own UI state when handling `interrupted`."
+      ]
+    }
+  ]
+}

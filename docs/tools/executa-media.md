@@ -1,39 +1,42 @@
 ---
-title: "Media Generation — Video Jobs & TTS Without an API Key"
-description: "Ask the host to generate short videos (async jobs) and synthesize speech on the user's behalf, with provider selection, CU billing, and storage handled by Anna."
+title: "Media — Video Jobs, TTS & STT Without an API Key"
+description: "Ask the host to generate short videos (async jobs), synthesize speech and transcribe audio on the user's behalf, with provider selection, CU billing, and storage handled by Anna."
 section: tools
 slug: executa-media
 order: 13
-updated: 2026-10-08
+updated: 2026-10-12
 estimated_minutes: 10
 ---
 
-Media generation lets your plugin produce **short videos** and **speech audio** on the user's behalf without shipping a provider API key, without holding S3 credentials, and without metering quota. The plugin describes the clip or narration in protocol-neutral terms; Anna routes the call through the platform's video/TTS providers, pre-charges the user's CU pool, uploads the result to host storage, and returns a presigned URL.
+Media lets your plugin produce **short videos** and **speech audio**, and **transcribe recorded audio**, on the user's behalf without shipping a provider API key, without holding S3 credentials, and without metering quota. The plugin describes the clip, narration or recording in protocol-neutral terms; Anna routes the call through the platform's video/TTS/STT providers, charges the user's CU pool, uploads any result bytes to host storage, and returns a presigned URL (or, for transcription, the text).
 
 Available from Executa protocol **v2** onward; companion to [Image Generation](/developers/tools/executa-image) and [Sampling](/developers/tools/executa-sampling).
 
 > [!NOTE]
-> **Video is asynchronous.** Unlike `image/generate` (seconds), video renders for minutes. `video/generate` returns a **job** immediately; you then poll `video/get_job` until a terminal state (or let the SDK's `generate_await` helper do it). `audio/speak` stays synchronous.
+> **Video is asynchronous.** Unlike `image/generate` (seconds), video renders for minutes. `video/generate` returns a **job** immediately; you then poll `video/get_job` until a terminal state (or let the SDK's `generate_await` helper do it). `audio/speak` and `audio/transcribe` stay synchronous.
 
 ## Three pre-conditions
 
 End-to-end media generation requires **all** of:
 
-1. **v2 negotiation.** The host sends `initialize`; the plugin replies with `protocolVersion: "2.0"` and lists `client_capabilities.video` (and `audio.speak` if you use `audio/speak`).
+1. **v2 negotiation.** The host sends `initialize`; the plugin replies with `protocolVersion: "2.0"` and lists `client_capabilities.video` (and `audio.speak` / `audio.transcribe` for the audio methods).
 2. **Manifest declaration.** Your published manifest declares the capabilities it intends to use:
    ```json
    {
-     "host_capabilities": ["llm.video", "llm.audio.speak"]
+     "host_capabilities": ["llm.video", "llm.audio.speak", "llm.audio.transcribe"]
    }
    ```
-   The publish validator rejects unknown capability strings.
-3. **User grant.** The end user enabled the **media grant** (`media_grant.enabled = true`, with `video` / `audio_speak` toggles) for this Executa in their Anna Admin panel.
+   The publish validator rejects unknown capability strings. Each audio method has its **own** capability — declaring `llm.audio.speak` does not unlock `audio/transcribe`.
+3. **User grant.** The end user enabled the **media grant** (`media_grant.audio.enabled = true`, with the `speak` / `transcribe` sub-toggles; `media_grant.video.enabled` for video) for this Executa in their Anna Admin panel.
 
-If any pre-condition is missing, the host returns `VIDEO_NOT_GRANTED (-32120)` / `AUDIO_NOT_GRANTED (-32140)` and the reverse-RPC never reaches a provider. There are **no per-feature rate caps** beyond that — the user's CU quota pool is the only gate.
+If any pre-condition is missing, the host returns `VIDEO_NOT_GRANTED (-32120)` / `AUDIO_NOT_GRANTED (-32140)` and the reverse-RPC never reaches a provider. There are **no per-feature rate caps** beyond that — the user's CU quota pool is the only user-level gate; a small **per-invoke budget** (video jobs, TTS characters, STT seconds) protects against a runaway single invoke.
+
+> [!NOTE]
+> `audio/transcribe` requires host **matrix ≥ 2026-10-12** (`METHOD_AUDIO_TRANSCRIBE`). On an older host the SDK call fails with `method_not_found`, which the SDKs surface as `AUDIO_NOT_GRANTED` — treat it as "feature unavailable", not as a user-permission problem.
 
 ## Billing: pre-charge + refund
 
-`video/generate` responds with `estimatedCostCU`, which is **charged immediately** from the user's CU pool. If the job later fails, expires, or is cancelled while queued, the hold is **fully refunded**. `audio/speak` bills synchronously by character count (`billedCostCU` in the response).
+`video/generate` responds with `estimatedCostCU`, which is **charged immediately** from the user's CU pool. If the job later fails, expires, or is cancelled while queued, the hold is **fully refunded**. `audio/speak` bills synchronously by character count and `audio/transcribe` by audio duration (`billedCostCU` in the response; ledger request types `EXECUTA_TTS` / `EXECUTA_STT`).
 
 ## Wire protocol
 
@@ -143,13 +146,57 @@ Cancelling a **queued** job is guaranteed and fully refunds the CU hold. Cancell
     "charCount": 30,
     "billedCostCU": 1,
     "model": "qwen-audio-3.0-tts-plus",
-    "voice": "Cherry",
+    "voice": "longanlingxin",
     "expiresIn": 1800
   }
 }
 ```
 
-`model` / `voice` echo what the host actually resolved (useful when you left them unset). With `delivery: "inline"` small artifacts come back as `audioBase64` instead of `url`. An invalid `voice` fails with `AUDIO_VOICE_INVALID (-32145)` whose `error.data.allowed` lists the model's valid voices.
+`model` / `voice` echo what the host actually resolved (useful when you left them unset). With `delivery: "inline"` small artifacts come back as `audioBase64` instead of `url`. An invalid `voice` fails with `AUDIO_VOICE_INVALID (-32145)` whose `error.data.allowed` lists the model's valid voices — **voice ids are model-specific** (e.g. `qwen-audio-3.0-tts-*` use `longanlingxin` / `longanfengyue` …, the realtime `qwen3-tts-*` family uses `Cherry` / `Serena`), so either omit `voice` to get the model's default or pick one from `anna.llm.catalog({serviceType:"tts"})`.
+
+### `audio/transcribe`
+
+Synchronous speech-to-text for a recording of **≤ 10 minutes**. Send the audio **inline** (`audioBase64`, ≤ 10 MB decoded — the usual case for push-to-talk / local recordings) **or** by public `https` URL (`audioUrl`, ≤ 25 MB, SSRF-guarded); exactly one of the two.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "stt-1",
+  "method": "audio/transcribe",
+  "params": {
+    "audioBase64": "<base64 wav/mp3/webm/ogg/flac/m4a>",
+    "format": "wav",
+    "language": "zh"
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "stt-1",
+  "result": {
+    "text": "我现在该出什么",
+    "durationSec": 2.8,
+    "durationExact": true,
+    "language": "zh",
+    "billedCostCU": 1,
+    "model": "qwen-audio-3.1-asr-flash"
+  }
+}
+```
+
+| Param | Required | Notes |
+| --- | --- | --- |
+| `audioBase64` | one of | Inline bytes, base64. ≤ 10 MB decoded. SDKs encode for you. |
+| `audioUrl` | one of | Public `https://` URL, ≤ 25 MB. Content-Type decides the format. |
+| `format` | with `audioBase64` | `wav` \| `mp3` \| `webm` \| `ogg` \| `flac` \| `m4a`. |
+| `language` | no | BCP-47-ish hint (`zh`, `en`); default auto. Echoed back. |
+| `model` | no | Catalogue hint; the host resolves an STT model otherwise. |
+
+`durationSec` is **exact** for `wav` (parsed from the header) and a byte-based **estimate** for compressed formats (`durationExact: false`). The 600 s cap is enforced exactly for `wav`; other formats are bounded by the byte caps. Billing is by audio duration (`EXECUTA_STT`).
+
+**Per-invoke seconds budget.** Like `audio/speak`'s character budget, the host reserves the estimated seconds against the `media_token` claim `max_audio_seconds` (default **600**, tracked per `tool_invoke_id` for 30 min) before calling the provider and settles to the real `durationSec` afterwards. Exceeding it fails fast with `AUDIO_INVOKE_BUDGET_EXCEEDED (-32148)` — split long recordings across invokes rather than retrying.
 
 ## SDK examples
 
@@ -171,6 +218,10 @@ try:
     video_url = view["result"]["url"]
 
     narration = await media.speak(text="Welcome to the clip.", delivery="url")
+
+    # Push-to-talk: 16 kHz mono PCM16 wav captured locally → text
+    stt = await media.transcribe(audio_bytes=wav_bytes, format="wav", language="zh")
+    question = stt["text"]
 except VideoJobTimeout as e:
     # Job still rendering server-side — recover later via video/get_job
     return _make_response(req_id, error={"code": e.code, "message": e.message, "data": e.data})
@@ -196,6 +247,8 @@ const view = await media.generateAwait({
 });
 
 const narration = await media.speak({ text: "Welcome to the clip.", delivery: "url" });
+
+const { text } = await media.transcribe({ audioBuffer: wavBuffer, format: "wav", language: "zh" });
 ```
 
 ### Go
@@ -214,6 +267,8 @@ out, err := c.Speak(mediaclient.SpeakRequest{
     Text:     "Welcome to the clip.",
     Delivery: "url",
 }, 120*time.Second)
+
+stt, err := c.TranscribeBytes(wavBytes, "wav", "zh", 90*time.Second)
 ```
 
 ## Error reference
@@ -227,16 +282,17 @@ out, err := c.Speak(mediaclient.SpeakRequest{
 | `-32124` | `VIDEO_MODEL_UNAVAILABLE`    | Hinted model is not active, or no video model is configured. |
 | `-32125` | `VIDEO_JOB_NOT_FOUND`        | Unknown `jobId` (or not owned by this user). |
 | `-32126` | `VIDEO_JOB_NOT_CANCELLABLE`  | Job already terminal. |
-| `-32127` | `VIDEO_CONCURRENCY_EXCEEDED` | Reserved — not currently enforced (CU pool is the only gate). |
+| `-32127` | `VIDEO_CONCURRENCY_EXCEEDED` | Per-invoke video job budget exhausted (`media_token` claim `max_video_jobs`, default **2**, tracked per `tool_invoke_id` for 30 min). There is no platform-wide concurrency cap — the CU pool is the only user-level gate. |
 | `-32128` | `VIDEO_CONTENT_REJECTED`     | Provider safety system rejected the prompt/image. |
-| `-32140` | `AUDIO_NOT_GRANTED`          | User has not enabled the media grant's audio toggle for this Executa. |
-| `-32141` | `AUDIO_QUOTA_EXCEEDED`       | CU pool cannot cover the character-count price. |
-| `-32142` | `AUDIO_TEXT_TOO_LONG`        | `text` exceeds the model's per-call character cap. |
-| `-32143` | `AUDIO_TOO_LONG`             | Input audio exceeds the transcription length cap. |
-| `-32144` | `AUDIO_PROVIDER_ERROR`       | Upstream TTS provider error. |
+| `-32140` | `AUDIO_NOT_GRANTED`          | Media token / manifest / user grant does not allow this audio method (`speak` and `transcribe` are gated separately). Also what SDKs report when the host is too old to know `audio/transcribe`. |
+| `-32141` | `AUDIO_QUOTA_EXCEEDED`       | CU pool cannot cover the character-count / duration price. |
+| `-32142` | `AUDIO_TEXT_TOO_LONG`        | `text` exceeds the model's per-call character cap, **or** the per-invoke character budget (`max_audio_chars`, default 8000) is exhausted — the message says which. |
+| `-32143` | `AUDIO_TOO_LONG`             | Input audio exceeds the transcription caps: > 10 MB inline, > 25 MB by URL, or > 600 s (`wav`). `error.data.allowed` carries the cap. |
+| `-32144` | `AUDIO_PROVIDER_ERROR`       | Upstream TTS/STT provider error, or the `audioUrl` could not be fetched. |
 | `-32145` | `AUDIO_VOICE_INVALID`        | Unknown `voice` — `error.data.allowed` lists valid voices. |
-| `-32146` | `AUDIO_MODEL_UNAVAILABLE`    | No active TTS model matches the request. |
+| `-32146` | `AUDIO_MODEL_UNAVAILABLE`    | No active TTS/STT model matches the request. |
 | `-32147` | `AUDIO_CONTENT_REJECTED`     | Provider safety system rejected the text. |
+| `-32148` | `AUDIO_INVOKE_BUDGET_EXCEEDED` | Per-invoke transcription seconds budget exhausted (`max_audio_seconds`, default 600, per `tool_invoke_id`). |
 
 ## Pitfalls
 
@@ -248,6 +304,9 @@ out, err := c.Speak(mediaclient.SpeakRequest{
 
 > [!TIP]
 > **Model-dependent parameter spaces.** Don't hardcode durations or resolutions. A `VIDEO_INVALID_REQUEST (-32122)` response carries the allowed values in `error.data`; omit optional params to let the model's defaults apply.
+
+> [!TIP]
+> **Recording format for `audio/transcribe`.** Prefer **16 kHz mono PCM16 `wav`** for short push-to-talk clips: the host measures duration exactly (so the 600 s cap and the per-invoke budget are precise) and no decoder is involved. 10 min of 16 kHz mono wav is ≈ 19 MB — above the 10 MB inline cap — so for long recordings either chunk by sentence or upload once and pass `audioUrl`. Always set `format` for inline audio; omitting it is a `VIDEO_INVALID_REQUEST (-32122)`.
 
 ## See also
 

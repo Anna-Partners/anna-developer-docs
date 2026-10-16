@@ -4,7 +4,7 @@ description: "The `ui` section of a schema ≥ 2 manifest: bundle, views, host_a
 section: apps
 slug: app-ui-manifest
 order: 10
-updated: 2026-10-08
+updated: 2026-10-14
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -134,7 +134,7 @@ The ACL that gates host RPC calls from your iframe. Each namespace key is a list
 | `image` | `generate`, `edit` | Host-mediated image generation/editing — also gated by the per-app `image_grant` |
 | `upload` | `inline`, `negotiate`, `confirm` | User-artifact uploads to host storage — also gated by the per-app `upload_grant` |
 | `video` | `generate`, `getJob`, `cancelJob`, `listJobs` | Host-mediated async video generation jobs (`anna.video.*`; CU pre-charge + refund) — also gated by the per-app `media_grant` |
-| `audio` | `speak`, `transcribe` | Host-mediated TTS / STT (`anna.audio.*`) — also gated by the per-app `media_grant` |
+| `audio` | `speak`, `transcribe`, `session` | Host-mediated TTS / STT (`anna.audio.*`) and the realtime voice session (`anna.audio.session()`, relayed by the host bridge — see [App UI Audio Session](/developers/apps/app-ui-audio-session)) — also gated by the per-app `media_grant`; `session` needs both `speak` and `transcribe` flags and makes the host grant the iframe `allow="microphone"` |
 | `web` | `search`, `fetch`, `image_search`, `image_fetch` | Host-managed web search/fetch (provider keys, SSRF guard, billing stay host-side) — also gated by the per-app `web_grant` |
 | `apps` | `list`, `search`, `get`, `launch`, `deck.list`, `deck.add`, `deck.remove`, `deck.reorder` | Apps launcher: browse/launch the user's installed apps, curate the "我的 Apps" deck |
 | `credentials` | **provider ids** (e.g. `google`), not method names | `credentials.list_accounts` / `credentials.get_token` for the listed providers — also gated by the per-app `credentials_grant` |
@@ -187,7 +187,7 @@ By default the bundle CSP has no `frame-src`, so nested iframes fall back to `de
 
 Rules: explicit `https://host[:port]` origins only — no `*` or wildcard subdomains, no paths, no CSP keywords (`'self'`, `'none'`, …), at most 8 origins. The declared origins are disclosed on the App's install/review surface, like `external_origins`.
 
-Declaring `frame-src` also unlocks the **playback permission chain**: the platform scopes `autoplay`, `encrypted-media`, `fullscreen` and `picture-in-picture` to your declared origins (both in the bundle's `Permissions-Policy` response header and in the host window's iframe `allow` attribute). All other features (camera, microphone, geolocation, …) stay denied.
+Declaring `frame-src` also unlocks the **playback permission chain**: the platform scopes `autoplay`, `encrypted-media`, `fullscreen` and `picture-in-picture` to your declared origins (both in the bundle's `Permissions-Policy` response header and in the host window's iframe `allow` attribute). All other features (camera, geolocation, …) stay denied, with one exception: declaring `ui.host_api.audio ∋ "session"` makes the host emit `allow="microphone"` on your iframe and `Permissions-Policy: microphone=(self)` on the bundle response, so the realtime voice session can call `getUserMedia` — see [App UI Audio Session](/developers/apps/app-ui-audio-session).
 
 Your own `<iframe>` inside the bundle **must still forward those features** — the delegation chain is per-frame:
 

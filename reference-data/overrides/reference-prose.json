@@ -321,6 +321,10 @@
             "label": "cap 65536"
           }
         ]
+      },
+      {
+        "name": "llm.catalog",
+        "desc": "Capability discovery: `{serviceType?: 'video_gen'|'image_gen'|'image_edit'|'tts'|'stt'}` → `{models:[{modelName, displayName, serviceTypes, isUserPreferred, capabilities, pricing}], quota:{remainingCU}}`. Only service types the App is **granted** are returned (ungranted → empty list, never an error) so you can feature-detect and degrade. Prices are in CU; TTS entries carry `voices`/`defaultVoice`/`options`/`maxCharsPerCall`, video entries carry `duration`/`resolutions`/`aspectRatios`/`imageToVideo`/`audio`."
       }
     ]
   },
@@ -927,6 +931,62 @@
       {
         "name": "executa_readiness",
         "desc": "Window-open probe found required executas not yet ready on the agent — render a preparing/degraded mask until `anna_app_tools_changed` arrives."
+      },
+      {
+        "name": "media_job",
+        "desc": "Progress / terminal update for a `video.generate` job: `payload = {jobId, seq, state, progress?:{phase, queuePosition}, result?, billedCostCU?}`. `seq` is strictly monotonic — drop out-of-order frames. Terminal `result.url` has the same ~30 min TTL as `getJob`; on 403 call `getJob` to re-sign. `anna.video.generateAwait` already subscribes to this and falls back to adaptive polling."
+      }
+    ]
+  },
+  "host-api-video": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "video.generate",
+        "desc": "Submit an **async** text-to-video / image-to-video job: `{prompt, imageUrl?, durationSec?, resolution?, aspectRatio?, generateAudio?, model?, clientTag?}` → `{jobId:'vjob_…', state:'queued', estimatedCostCU, deadlineAt}` within ~1s. CU is **pre-charged** on submit and settled/refunded at the terminal state. Parameters are validated against the model catalogue (`llm.catalog`) — invalid → `VIDEO_INVALID_REQUEST` with `data.allowed` echoing the full parameter space.",
+        "tags": [
+          {
+            "label": "async job"
+          },
+          {
+            "label": "pre-charge"
+          }
+        ]
+      },
+      {
+        "name": "video.getJob",
+        "desc": "Authoritative job state: `{jobId}` → `{jobId, state, progress:{seq, phase, queuePosition}, request, result?, billedCostCU?, createdAt, deadlineAt}`. On `succeeded`, `result.url` is a presigned R2 GET (~30 min TTL, `expiresIn`); calling `getJob` again **re-signs** an expired URL. Events are an accelerator — the truth is always here."
+      },
+      {
+        "name": "video.cancelJob",
+        "desc": "`{jobId}` → `queued` jobs are cancelled with a **full refund** (`{state:'cancelled', refunded:true}`); `running` jobs attempt a provider cancel — if the provider is already rendering you get `{state:'running', cancelPending:false}` and no refund. Terminal jobs → `VIDEO_JOB_NOT_CANCELLABLE`."
+      },
+      {
+        "name": "video.listJobs",
+        "desc": "Cursor-paginated job history for this App: `{state?, clientTag?, limit?≤50, cursor?}` → `{jobs:[…getJob views…], nextCursor?}`. Use `clientTag` (≤120 chars, set on `generate`) to correlate jobs with your own entities (scenes, timeline clips)."
+      }
+    ]
+  },
+  "host-api-audio": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "audio.speak",
+        "desc": "**Synchronous** TTS: `{text, voice?, language?, speed?(0.5–2.0), format?:'mp3'|'wav', timestamps?, delivery?:'url'|'inline', model?}` → `{url|audioBase64, mimeType, charCount, billedCostCU, model, expiresIn?}`. Text is capped by the model's `maxCharsPerCall` (`AUDIO_TEXT_TOO_LONG` echoes the cap); `voice` must be in the model's voice table (`AUDIO_VOICE_INVALID` echoes valid voices — read them from `llm.catalog`). `delivery:'inline'` returns base64 only for products ≤1 MB. Billed per character as `APP_TTS`.",
+        "tags": [
+          {
+            "label": "sync ≤120s"
+          }
+        ]
+      },
+      {
+        "name": "audio.transcribe",
+        "desc": "**Synchronous** STT: `{audioUrl | audioBase64 (+format), language?, model?}` → `{text, language, billedCostCU}`. Inline audio ≤10 MB, URL fetch ≤25 MB, duration ≤10 min (`AUDIO_TOO_LONG`). Routed to the user's preferred speech-to-text model; billed as `APP_STT`. For **live** recognition with partial results use the realtime `anna.audio.session()` surface instead (manifest `host_api.audio ∋ \"session\"`, same `media_grant` flags).",
+        "tags": [
+          {
+            "label": "sync ≤120s"
+          }
+        ]
       }
     ]
   }

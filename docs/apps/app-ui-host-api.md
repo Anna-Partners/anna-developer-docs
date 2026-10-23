@@ -4,7 +4,7 @@ description: "RPC namespaces and methods your iframe can call on the host, with 
 section: apps
 slug: app-ui-host-api
 order: 14
-updated: 2026-10-14
+updated: 2026-10-23
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -13,7 +13,7 @@ Every call from your iframe goes through `postMessage → Host Bridge → POST /
 
 1. **Auth.** `decode_window_token(t)` against the JWT bound to `(window_uuid, user_id, app_id, version_id, scopes)` (TTL 120s, audience `anna-app-window`).
 2. **ACL.** `host_api_allows(manifest, ns, method)` checks `manifest.ui.host_api[ns]` (with `*` and `<id>` wildcards). `window.*` is always allowed. Top-level `permissions` is **never** consulted (display-only legacy; rejected at `schema: 3`).
-3. **Per-app grants.** Some namespaces are additionally gated by a user-controlled grant enforced inside the handler/facade: `image_grant`, `media_grant` (`video.*` / `audio.*`), `upload_grant`, `web_grant`, `credentials_grant`, and the install-time `storage_token` scopes for `storage`/`files`.
+3. **Per-app grants.** Some namespaces are additionally gated by a user-controlled grant enforced inside the handler/facade: `image_grant`, `media_grant` (`video.*` / `music.*` / `audio.*`), `upload_grant`, `web_grant`, `credentials_grant`, and the install-time `storage_token` scopes for `storage`/`files`.
 
 Then it dispatches to the namespace handler. Any failure returns `{ ok: false, error: { code, message, details? } }`.
 
@@ -333,8 +333,53 @@ Gated by `host_api.image` (method surface) **plus** the per-app
 
 | method | status | args | result |
 |---|---|---|---|
-| `generate` | ✅ | `{ prompt, n?, size?, model_hint? }` | `{ images: [{ url, … }] }` |
-| `edit` | ✅ | `{ prompt, image_ref, n?, size? }` | `{ images: [{ url, … }] }` |
+| `generate` | ✅ | `{ prompt, n?, size?, aspect_ratio?, model?, params?, fit?, reference_image_urls?, modelPreferences? (legacy) }` | `{ images: [{ url, r2_key, width, height, … }], model, requestedSize, size, sizeAdjusted, aspectRatio, fit, params, ignoredParams, usage }` |
+| `edit` | ✅ | `{ prompt, image_url, mask_url?, n?, size?, aspect_ratio?, model?, params?, fit? }` | same shape as `generate` |
+| `generateAsync` | ✅ 0.29.0 | same as `generate` + `{ clientTag?, idempotencyKey? }` | `{ jobId: 'ijob_…', kind: 'image', state: 'queued', estimatedCostCU, deadlineAt, idempotentReplay }` — async job, see [media page](/developers/apps/app-ui-media#image-async-jobs-re-signing) |
+| `editAsync` | ✅ 0.29.0 | same as `edit` + `{ clientTag?, idempotencyKey? }` | same as `generateAsync` (needs `image_grant.allowEdit`) |
+| `getJob` | ✅ 0.29.0 | `{ jobId }` | `ImageJobView` — `result.images[].url` re-signed on every call |
+| `cancelJob` | ✅ 0.29.0 | `{ jobId }` | `{ jobId, state: 'cancelled', refunded: true }` \| `{ jobId, state: 'running', cancelPending: false }` |
+| `listJobs` | ✅ 0.29.0 | `{ state?, clientTag?, limit?, cursor? }` | `{ jobs, nextCursor }` — image jobs only |
+| `resign` | ✅ 0.29.0 | `{ r2Keys: string[] }` (1–20) | `{ urls: [{ r2Key, url, expiresIn }] }` — re-sign already-paid artifacts for 7 days; any foreign key → whole call `IMAGE_ASSET_NOT_FOUND` |
+
+**Model selection** mirrors `audio.speak`: `model` (exact, case-insensitive name
+from `llm.catalog({ serviceType: 'image_gen' })`) → `modelPreferences.hints`
+(legacy, miss falls back silently) → the user's `image_gen` preference →
+platform default. An unknown / non-image `model` fails with
+`IMAGE_MODEL_UNAVAILABLE (-32110)` and `data.allowed` lists the valid names.
+
+**Size semantics.** Each model declares its size space in
+`capabilities.options` (`size.values` + optional `size.custom` constraints,
+`aspect_ratio.values`, `resolution.values`; `capabilities.sizeInput` tells you
+which one drives the output). `fit` picks the policy:
+
+- `fit: "nearest"` (default — unchanged for existing Apps): the host picks the
+  closest supported size **without changing orientation** (a 9:16 request never
+  becomes a square), and echoes `requestedSize` / `size` / `sizeAdjusted`.
+  If no same-orientation candidate exists it fails rather than silently
+  switching orientation.
+- `fit: "strict"`: anything outside the declared space fails with
+  `IMAGE_SIZE_UNSUPPORTED (-32111)` and `data.allowed = { values, custom }` (or
+  `{ aspectRatios, resolutions }` for aspect-ratio models).
+
+Recommended flow: read `options.size.values` (or `aspect_ratio.values`) from the
+catalogue, build your picker from it, then request with `fit: "strict"`. The
+default may become `strict` in a future Host API major version.
+
+**Params.** `params` carries any key from `capabilities.options`
+(`quality`, `resolution`, `output_format`, `enable_web_search`,
+`thinking_level`, …; the same keys are still accepted top-level for
+compatibility, `params` wins). Values are validated against the model's schema
+(`IMAGE_OPTION_INVALID (-32112)`, `data.{key, reason, allowed}`); keys the model
+does not declare are dropped and listed in `ignoredParams`. `n` above the
+model's `maxN` or your grant's `maxPerCallGenerate` fails with
+`IMAGE_PER_CALL_EXCEEDED (-32107)` and `data.allowed.maxN`.
+
+Catalogue entries also carry `isPlatformDefault` (who the host routes to when
+the user has no `image_gen` preference) and per-image CU pricing
+(`pricing.cuPerImage`, `cuByResolution`, `cuBySizeQuality`, `cuByMaxPixels`,
+`surcharges`). Users set an account-level default under `/llm → Specialized
+Models`.
 
 ### `video`
 
@@ -349,6 +394,25 @@ submit and settled / refunded at the terminal state; progress arrives as
 | `getJob` | ✅ | `{ jobId }` | `{ jobId, state, progress?, result?: { url, expiresIn, … }, billedCostCU? }` |
 | `cancelJob` | ✅ | `{ jobId }` | `{ jobId, state, cancelPending }` |
 | `listJobs` | ✅ | `{ state?, limit? }` | `{ jobs: [...] }` |
+
+### `music`
+
+Host-mediated **async** music generation — the video surface in a different
+modality. Gated by `host_api.music` **plus** the per-app `media_grant.music.enabled`.
+CU is pre-charged on submit (per song / per second / per started minute,
+whichever unit the model bills in) and settled / refunded at the terminal state;
+progress arrives as the same `media_job` SSE events. Every field is validated
+against the resolved model's catalogue entry and a feature it cannot deliver
+fails with `MUSIC_FEATURE_UNSUPPORTED` (`data.alternatives`) — never a silent
+downgrade. `idempotencyKey` replays the same job for 24 h without a second
+charge. Full guide: [App UI Media → Music](/developers/apps/app-ui-media#music-async-jobs).
+
+| method | status | args | result |
+|---|---|---|---|
+| `generate` | ✅ | `{ prompt, lyrics?, instrumental?, durationSec?, format?, referenceImageUrl?, options?, model?, clientTag?, idempotencyKey? }` | `{ jobId: 'mjob_…', kind: 'music', state: 'queued', estimatedCostCU, deadlineAt, idempotentReplay }` |
+| `getJob` | ✅ | `{ jobId }` | `{ jobId, state, progress?, result?: { url, mimeType, durationSec, lyrics?, seed?, expiresIn }, billedCostCU? }` |
+| `cancelJob` | ✅ | `{ jobId }` | `{ jobId, state: 'cancelled', refunded: true }` · `{ jobId, state: 'running', cancelPending: false }` |
+| `listJobs` | ✅ | `{ state?, clientTag?, limit?, cursor? }` | `{ jobs: [...], nextCursor? }` |
 
 ### `audio`
 
@@ -397,7 +461,7 @@ Declared in the dispatcher but stubbed today (`not_implemented`). Plan for Phase
 What actually gates a call, in order:
 
 1. **`ui.host_api.<ns>`** must list the method name (or `*`); `window.*` is always allowed; `agent` uses an object spec (`session.auto` / `session.fixed`).
-2. **Per-app user grants** for some namespaces, enforced inside the facade: `image_grant` (`image.*`), `media_grant` (`video.*` / `audio.*`), `upload_grant` (`upload.*`), `web_grant` (`web.*`), `credentials_grant` (`credentials.*`), and the install-time `storage_token` `allowed_scopes` claim for non-default `storage`/`files` scopes.
+2. **Per-app user grants** for some namespaces, enforced inside the facade: `image_grant` (`image.*`), `media_grant` (`video.*` / `music.*` / `audio.*`), `upload_grant` (`upload.*`), `web_grant` (`web.*`), `credentials_grant` (`credentials.*`), and the install-time `storage_token` `allowed_scopes` claim for non-default `storage`/`files` scopes.
 
 The top-level manifest `permissions` list is **not** part of this chain — it has zero enforcement sites, is display-only on `schema ≤ 2`, and is rejected at `schema: 3` (permission display is derived from `ui.host_api` + the storage declaration instead).
 

@@ -1060,9 +1060,9 @@
     {
       "group": "Executa",
       "id": "executa-media",
-      "kicker": "Executa · reverse RPC (v2+) · LLM video & audio",
-      "title": "LLM video generation & speech synthesis",
-      "sub": "Let an Executa plugin **generate video, synthesize speech and transcribe audio through the host** — no provider key, no R2 credentials, no per-plugin billing — mirroring the LLM image gate 1:1. Methods: `video/generate`, `video/get_job`, `video/cancel_job`, `audio/speak`, `audio/transcribe` (both non-streaming; `audio/transcribe` since matrix 2026-10-12 / nexus 1.1.0-beta.189).\n\n**Pre-requisites** (all three required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.video = {}` / `client_capabilities.audio = {}` (`audio.speak` / `audio.transcribe`) on `initialize`.\n2. **Manifest declaration.** `host_capabilities: [\"llm.video\"]` and/or `[\"llm.audio.speak\"]` / `[\"llm.audio.transcribe\"]` (each audio method has its own capability). Missing → `VIDEO_NOT_GRANTED` (`-32120`) / `AUDIO_NOT_GRANTED` (`-32140`) at first call.\n3. **User grant.** End user enables `media_grant.video.enabled` / `media_grant.audio.{enabled, speak, transcribe}` for the plugin in Anna Admin.\n\n**Token.** The Agent attaches a short-lived `media_token` (aud `executa-media`, TTL 10 min, auto-renewed as kind `\"media\"`) to `params.context`; claims `allow_video / allow_audio_speak / allow_audio_transcribe / max_video_jobs / max_audio_chars / max_audio_seconds` are evaluated per call (the two transcribe claims are optional on older tokens). A Redis per-invoke counter (`media:invoke:{tool_invoke_id}`, 30 min TTL) caps video jobs, TTS characters and STT seconds **within one tool invocation** — this is an anti-abuse gate, not a daily quota.\n\n**Billing.** `EXECUTA_VIDEO_GEN` (pre-charge → settle / refund, same state machine as the App surface) `EXECUTA_TTS` (per character) and `EXECUTA_STT` (per audio second). Result URLs are presigned R2 GETs (~30 min); re-`get_job` to re-sign, or `host/uploadFile` for durable storage.\n\n**Errors.** Video `-32120…-32128`, audio `-32140…-32148` (same table as the App surface plus `AUDIO_INVOKE_BUDGET_EXCEEDED` `-32148`). Per-invoke counter exhaustion surfaces as `VIDEO_CONCURRENCY_EXCEEDED` (`-32127`, claim `max_video_jobs` default 2) `AUDIO_TEXT_TOO_LONG` (`-32142`, claim `max_audio_chars` default 8000) and `AUDIO_INVOKE_BUDGET_EXCEEDED` (`-32148`, claim `max_audio_seconds` default 600). SDK helpers: python / node / go `host.video.generate_await()`, `host.audio.speak()` and `host.audio.transcribe()`. Full wire protocol and examples: [Executa media](/docs/tools/executa-media).",
+      "kicker": "Executa · reverse RPC (v2+) · LLM video, music & audio",
+      "title": "LLM video, music generation & speech synthesis",
+      "sub": "Let an Executa plugin **generate video and music, synthesize speech and transcribe audio through the host** — no provider key, no R2 credentials, no per-plugin billing — mirroring the LLM image gate 1:1. Methods: `video/generate`, `video/get_job`, `video/cancel_job`, `music/generate`, `music/get_job`, `music/cancel_job`, `audio/speak`, `audio/transcribe` (all non-streaming; `audio/transcribe` since matrix 2026-10-12 / nexus 1.1.0-beta.189; `music/*` since nexus dispatcher 0.28.0, 2026-10-19).\n\n**Pre-requisites** (all three required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.video = {}` / `client_capabilities.music = {}` / `client_capabilities.audio = {}` (`audio.speak` / `audio.transcribe`) on `initialize`.\n2. **Manifest declaration.** `host_capabilities: [\"llm.video\"]`, `[\"llm.music\"]` and/or `[\"llm.audio.speak\"]` / `[\"llm.audio.transcribe\"]` (each audio method has its own capability). Missing → `VIDEO_NOT_GRANTED` (`-32120`) / `MUSIC_NOT_GRANTED` (`-32160`) / `AUDIO_NOT_GRANTED` (`-32140`) at first call.\n3. **User grant.** End user enables `media_grant.video.enabled` / `media_grant.music.enabled` / `media_grant.audio.{enabled, speak, transcribe}` for the plugin in Anna Admin.\n\n**Token.** The Agent attaches a short-lived `media_token` (aud `executa-media`, TTL 10 min, auto-renewed as kind `\"media\"`) to `params.context`; claims `allow_video / allow_music / allow_audio_speak / allow_audio_transcribe / max_audio_chars / max_audio_seconds` are evaluated per call (`allow_music` and the two transcribe claims are optional on older tokens). A Redis per-invoke counter (`media:invoke:{tool_invoke_id}`, 30 min TTL) caps TTS characters and STT seconds **within one tool invocation** — an anti-abuse gate, not a daily quota. Video and music jobs have **no** per-invoke cap: each job is pre-charged in CU, so the user's CU pool is the only gate.\n\n**Billing.** `EXECUTA_VIDEO_GEN` / `EXECUTA_MUSIC_GEN` (pre-charge → settle / refund, same state machine as the App surface; music is priced per song / per second / per started minute by the catalogue's billing unit) `EXECUTA_TTS` (per character) and `EXECUTA_STT` (per audio second). Result URLs are presigned R2 GETs (~30 min); re-`get_job` to re-sign, or `host/uploadFile` for durable storage.\n\n**Errors.** Video `-32120…-32128`, music `-32160…-32169`, audio `-32140…-32148` (same tables as the App surface plus the plugin-only `*_NOT_GRANTED` / `*_QUOTA_EXCEEDED` codes and `AUDIO_INVOKE_BUDGET_EXCEEDED` `-32148`). `VIDEO_CONCURRENCY_EXCEEDED` (`-32127`) is reserved and never raised. Per-invoke counter exhaustion surfaces as `AUDIO_TEXT_TOO_LONG` (`-32142`, claim `max_audio_chars` default 8000) and `AUDIO_INVOKE_BUDGET_EXCEEDED` (`-32148`, claim `max_audio_seconds` default 600). Music never downgrades silently — an unsupported feature is `MUSIC_FEATURE_UNSUPPORTED` (`-32165`) with `data.alternatives`. SDK helpers: python / node / go `media.generate_await()`, `media.music_generate_await()`, `media.speak()` and `media.transcribe()`. Full wire protocol and examples: [Executa media](/docs/tools/executa-media).",
       "detail_source": "/static/data/reference-executa-media.json",
       "items": []
     },
@@ -2373,6 +2373,10 @@
           "desc": "`string[]` of `video.*` methods the bundle may call: `generate`, `getJob`, `cancelJob`, `listJobs`. Pair with the user's `media_grant.video.enabled`. Async jobs, CU pre-charged on submit."
         },
         {
+          "name": "host_api.music",
+          "desc": "`string[]` of `music.*` methods the bundle may call: `generate`, `getJob`, `cancelJob`, `listJobs`. Pair with the user's `media_grant.music.enabled`. Async jobs (`mjob_…`), CU pre-charged on submit, `idempotencyKey` replay within 24h."
+        },
+        {
           "name": "host_api.audio",
           "desc": "`string[]` of `audio.*` surfaces: `speak` (sync TTS), `transcribe` (sync STT) and `session` (realtime voice session relayed by the host bridge — `anna.audio.session()`; declaring it also gives the iframe `allow=\"microphone\"`). Pair with the user's `media_grant.audio.{enabled, speak, transcribe}` — each sync operation needs its own flag; `session` needs **both**. `session` with `llm:'agent'` additionally requires `host_api.agent.session`."
         },
@@ -2780,7 +2784,7 @@
       "id": "host-api-agent",
       "kicker": "Host API · agent.*",
       "title": "agent.* — agent sessions",
-      "sub": "Spin up, drive, and inspect **LangGraph-backed agent runs** from your bundle. `session.create` mints an `AnnaAppSession` (kind=`agent`) and caches the underlying `app_session_token` in `_aps_token_cache[uuid]` — the iframe never holds capability credentials; it threads the `app_session_uuid` (`aps_…`) through every subsequent call.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_agent_session_*` (dispatcher) → `SqlAlchemyWindowStore.agent_session_*` (store) → `app_llm_facade.agent_session_*` → LangGraph runner via `src.services.app_runner._copilot_unified`.\n\n**Two-layer ACL (the dispatcher checks ui.host_api, NOT permissions):**\n1. The dispatcher gate `host_api_allows` for the `agent` namespace reads ONLY `manifest.ui.host_api.agent` — `manifest.permissions[]` is display/audit metadata and is NEVER consulted.\n2. `manifest.ui.host_api.agent.session.{auto, fixed: {client_ids: []}}` is **submode-aware**: each submode is `false` until explicitly enabled. Fixed mode further validates `fixed_client_id` against the allow-list (empty list = any user-owned Executa).\n3. `manifest.ui.host_api.agent.tools` is the AUTHORIZATION face (declaration-is-consent): the session's sandbox surface is `platform registry ∩ agent.tools ([\"*\"] = full registry) ∩ quotaCaps.allowed_tools` — there is no per-tool user grant.\n\n**Submodes**\n• `auto` — LangGraph runner uses the declared platform-tool surface; host-kit tools target the user's default agent.\n• `fixed` — pin the run to one Executa by `client_id`. Use this for deterministic flows or scoped access (e.g. read-only tools).\n\n**Streaming model.** `agent.session.run` returns SYNCHRONOUSLY with `{stream_id, run_id}`; the dispatcher allocates `stream_id`, enqueues the run, and the agent worker publishes each frame directly to a per-stream NATS subject, delivered to the iframe over the `rpc.stream` event topic — `{stream_id, window_uuid, seq, payload, done}`. The SDK's `AgentRunStream` reassembles by `seq` (out-of-order frames are buffered until the missing seq arrives) into an `AsyncIterable`. The pump ALWAYS emits a terminal `{event:'end', run_id}` with `done:true`, even on cancellation or crash.\n\n**Session lifecycle.** `create` → cached uuid for `expires_in` seconds (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early) → many `run` calls → optional `cancel(run_id)` / `history(limit)` → `delete` revokes + pops cache. After `delete` or TTL eviction, subsequent calls fail `session_expired` / `APP_SESSION_NOT_FOUND`.\n\n**Quotas + caps.** `quotaCaps.allowed_tools` on `create` narrows within the manifest-declared set; `inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (inherit requests emit an `INHERIT_IGNORED` run warning) — output caps are resolved per call as platform constants ∩ model capability. `APP_QUOTA_EXCEEDED` may be raised pre-stream (synchronously) OR mid-stream as an in-band `{event:'error'}` frame.\n\n**SDK ergonomics.** Prefer the high-level helper `await anna.agent.session({submode, ...})` — it returns an `AgentSession` instance with `.run({content})` / `.cancel(runId)` / `.history({limit})` / `.delete()` methods bound to the new uuid, so apps never thread `app_session_uuid` manually. Per-namespace timeout default is **300 000 ms** (ack-only — long streams keep the iterator alive until `done`).",
+      "sub": "Spin up, drive, and inspect **LangGraph-backed agent runs** from your bundle. `session.create` mints an `AnnaAppSession` (kind=`agent`) and caches the underlying `app_session_token` in `_aps_token_cache[uuid]` — the iframe never holds capability credentials; it threads the `app_session_uuid` (`aps_…`) through every subsequent call.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_agent_session_*` (dispatcher) → `SqlAlchemyWindowStore.agent_session_*` (store) → `app_llm_facade.agent_session_*` → LangGraph runner via `src.services.app_runner._copilot_unified`.\n\n**Two-layer ACL (the dispatcher checks ui.host_api, NOT permissions):**\n1. The dispatcher gate `host_api_allows` for the `agent` namespace reads ONLY `manifest.ui.host_api.agent` — `manifest.permissions[]` is display/audit metadata and is NEVER consulted.\n2. `manifest.ui.host_api.agent.session.{auto, fixed: {client_ids: []}}` is **submode-aware**: each submode is `false` until explicitly enabled. Fixed mode further validates `fixed_client_id` against the allow-list (empty list = any user-owned Executa).\n3. `manifest.ui.host_api.agent.tools` is the AUTHORIZATION face (declaration-is-consent): the session's sandbox surface is `platform registry ∩ agent.tools ([\"*\"] = full registry) ∩ quotaCaps.allowed_tools` — there is no per-tool user grant.\n\n**Submodes**\n• `auto` — LangGraph runner uses the declared platform-tool surface; host-kit tools target the user's default agent.\n• `fixed` — pin the run to one Executa by `client_id`. Use this for deterministic flows or scoped access (e.g. read-only tools).\n\n**Streaming model.** `agent.session.run` returns SYNCHRONOUSLY with `{stream_id, run_id}`; the dispatcher allocates `stream_id`, enqueues the run, and the agent worker publishes each frame directly to a per-stream NATS subject, delivered to the iframe over the `rpc.stream` event topic — `{stream_id, window_uuid, seq, payload, done}`. The SDK's `AgentRunStream` reassembles by `seq` (out-of-order frames are buffered until the missing seq arrives) into an `AsyncIterable`. The pump ALWAYS emits a terminal `{event:'end', run_id}` with `done:true`, even on cancellation or crash.\n\n**Session lifecycle.** `create` → cached uuid for `expires_in` seconds (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early) → many `run` calls → optional `cancel(run_id)` / `history(limit)` → `delete` revokes + pops cache. After `delete` or TTL eviction, subsequent calls fail `session_expired` / `APP_SESSION_NOT_FOUND`.\n\n**Quotas + caps.** `quotaCaps.allowed_tools` on `create` narrows within the manifest-declared set; `inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (inherit requests emit an `INHERIT_IGNORED` run warning) — output caps are resolved per call as `min(model output cap, 65 536)` ∩ context-budget reserve (10 % of context, ≤ 65 536); the effective value is disclosed in `run_meta.max_output_tokens`, `run({maxTokens})` can only lower it (dispatcher ≥ 0.30.0), and `task_complete.truncated` flags a final message cut by that cap (host ≥ 1.1.0-beta.200). Between host beta.179 and beta.199 the effective cap was a fixed 8 192 with no signal (forum #403). `APP_QUOTA_EXCEEDED` may be raised pre-stream (synchronously) OR mid-stream as an in-band `{event:'error'}` frame.\n\n**SDK ergonomics.** Prefer the high-level helper `await anna.agent.session({submode, ...})` — it returns an `AgentSession` instance with `.run({content})` / `.cancel(runId)` / `.history({limit})` / `.delete()` methods bound to the new uuid, so apps never thread `app_session_uuid` manually. Per-namespace timeout default is **300 000 ms** (ack-only — long streams keep the iterator alive until `done`).",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-agent.json",
       "items": [
@@ -2819,7 +2823,7 @@
         },
         {
           "name": "agent.session.run",
-          "desc": "Submit a user turn; returns SYNCHRONOUSLY with `{stream_id, run_id}`. LangGraph response frames arrive via `rpc.stream` events; the SDK's `AgentRunStream` reassembles by `seq` into an `AsyncIterable`. Terminal frame is always `{event:'end', run_id}` + `done:true`. The `run_meta` frame and the `task_complete` delta carry `model` / `provider` — the model the server ACTUALLY routed to after `modelPreferences` resolution and any fallback (soft preference; forum #270). Optional per-run fields: `attachments` (native multimodal image inputs — the session's vision model sees them directly, image/* only, ≤6, SSRF-guarded URLs or base64 `data`; non-vision model fails fast with `APP_MODEL_NOT_VISION_CAPABLE`), `allowed_tools` (narrow this run's tool surface — sandbox sessions only), `modelPreferences`, `systemPrompt`.",
+          "desc": "Submit a user turn; returns SYNCHRONOUSLY with `{stream_id, run_id}`. LangGraph response frames arrive via `rpc.stream` events; the SDK's `AgentRunStream` reassembles by `seq` into an `AsyncIterable`. Terminal frame is always `{event:'end', run_id}` + `done:true`. The `run_meta` frame and the `task_complete` delta carry `model` / `provider` — the model the server ACTUALLY routed to after `modelPreferences` resolution and any fallback (soft preference; forum #270). Optional per-run fields: `attachments` (native multimodal image inputs — the session's vision model sees them directly, image/* only, ≤6, SSRF-guarded URLs or base64 `data`; non-vision model fails fast with `APP_MODEL_NOT_VISION_CAPABLE`), `allowed_tools` (narrow this run's tool surface — sandbox sessions only), `modelPreferences`, `systemPrompt`, `maxTokens` (dispatcher ≥ 0.30.0: per-call output cap, `min(maxTokens ∥ model cap, 65 536)` clamped to the context budget — can only lower it). Host ≥ 1.1.0-beta.200 discloses the effective per-call cap in `run_meta.max_output_tokens` and flags a cut-off final message with `task_complete.truncated` / `stop_reason` (`status` stays `'completed'` — forum #403).",
           "tags": [
             {
               "label": "streaming"
@@ -2973,7 +2977,7 @@
       "items": [
         {
           "name": "llm.complete",
-          "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ 8192, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
+          "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ model output cap, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
           "tags": [
             {
               "label": "MCP-shaped"
@@ -2991,7 +2995,7 @@
         },
         {
           "name": "llm.stream",
-          "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
+          "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); omitted `maxTokens` defaults to the model's own output cap (host ≥ 1.1.0-beta.200 — the worst-case precheck follows, so low-balance users should pass a smaller `maxTokens`); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
           "tags": [
             {
               "label": "MCP-shaped"
@@ -3021,14 +3025,73 @@
       "items": [
         {
           "name": "image.generate",
-          "desc": "Generate `n` images (default 1) from a text `prompt`, optional `size` (default `1024x1024`) and `reference_image_urls`. Returns `{images:[{url}], model, quota_used, latency_ms, …}` with ~30-min-TTL presigned R2 URLs."
+          "desc": "Generate `n` images (default 1) from a text `prompt`, optional `size` (default `1024x1024`) and `reference_image_urls`. Returns `{images:[{url}], model, quota_used, latency_ms, …}` with ~30-min-TTL presigned R2 URLs. Provider safety rejections now surface as `IMAGE_CONTENT_REJECTED` (-32115) instead of `APP_PROVIDER_ERROR`; artifacts stay re-signable via `image.resign`."
         },
         {
           "name": "image.edit",
-          "desc": "Restyle / mask-edit an existing `image_url` per a text `prompt`. Optional `mask_url` for inpainting where the provider supports it. Source is not modified; results land in fresh R2 objects.",
+          "desc": "Restyle / mask-edit an existing `image_url` per a text `prompt`. Optional `mask_url` for inpainting where the provider supports it. Source is not modified; results land in fresh R2 objects. Provider safety rejections now surface as `IMAGE_CONTENT_REJECTED` (-32115) instead of `APP_PROVIDER_ERROR`; artifacts stay re-signable via `image.resign`.",
           "tags": [
             {
               "label": "edit grant"
+            }
+          ]
+        },
+        {
+          "name": "image.generateAsync",
+          "desc": "Submit an **async** text-to-image / reference-image job with the **same body as `image.generate`** plus `clientTag?` / `idempotencyKey?` → `{jobId:'ijob_…', kind:'image', state:'queued', estimatedCostCU, deadlineAt, idempotentReplay}` within ~1s. One job = one user action = `n` images: CU is **pre-charged** for `n` on submit and **settled on the actual number of images** (shortfall refunded). Same `idempotencyKey` within 24h (same user + App) → the existing job, no second charge. Validation and error codes are byte-identical to the sync path (`IMAGE_MODEL_UNAVAILABLE`, `IMAGE_SIZE_UNSUPPORTED`, `IMAGE_OPTION_INVALID`, `IMAGE_PER_CALL_EXCEEDED`).",
+          "tags": [
+            {
+              "label": "async job"
+            },
+            {
+              "label": "pre-charge"
+            },
+            {
+              "label": "idempotent"
+            }
+          ]
+        },
+        {
+          "name": "image.editAsync",
+          "desc": "Submit an **async** edit job with the body of `image.edit` (`image_url`, optional `mask_url`) plus `clientTag?` / `idempotencyKey?` → `{jobId:'ijob_…', …}`. Requires `image_grant.allowEdit`; a `mask_url` on a model without `capabilities.edit.mask` fails with `IMAGE_EDIT_MASK_UNSUPPORTED` (-32312) — never a silent whole-image edit. Input images are re-hosted by the platform before submission so an expiring presigned input URL cannot break a queued job.",
+          "tags": [
+            {
+              "label": "async job"
+            },
+            {
+              "label": "pre-charge"
+            },
+            {
+              "label": "idempotent"
+            }
+          ]
+        },
+        {
+          "name": "image.getJob",
+          "desc": "Authoritative job state: `{jobId}` → `{jobId, kind:'image', state, progress:{seq, phase, queuePosition?}, request:{op, prompt, n, size?, aspectRatio?, params, referenceImageCount? | hasBaseImage?, hasMask?, model}, result?:{images:[{url, r2Key, mimeType, width, height, expiresIn}], requestedSize, size, sizeAdjusted, aspectRatio, fit, params, ignoredParams}, estimatedCostCU, billedCostCU?, createdAt, deadlineAt}`. On `succeeded`, **every** `result.images[].url` is a freshly presigned R2 GET (~30 min TTL) — calling `getJob` again **re-signs** them; `url` is `null` once the object was garbage-collected (7 days). Input URLs are never echoed back."
+        },
+        {
+          "name": "image.cancelJob",
+          "desc": "`{jobId}` → `queued` jobs are cancelled with a **full refund** (`{state:'cancelled', refunded:true}`); `running` jobs attempt a provider cancel — if refused the job keeps running to its terminal state and is billed (`{state:'running', cancelPending:false}`). Terminal jobs → `IMAGE_JOB_NOT_CANCELLABLE` (-32114)."
+        },
+        {
+          "name": "image.listJobs",
+          "desc": "`{state?, clientTag?, limit?≤50, cursor?}` → `{jobs:[JobView without re-signed URLs], nextCursor}` — this App's image jobs only (never `vjob_…` / `mjob_…`), newest first. Reload recovery: `listJobs({state:'running'})` then `getJob` for URLs.",
+          "tags": [
+            {
+              "label": "pagination"
+            }
+          ]
+        },
+        {
+          "name": "image.resign",
+          "desc": "`{r2Keys: string[]}` (1–20) → `{urls:[{r2Key, url, expiresIn}]}` in input order: re-sign **already-paid** artifacts — `images[].r2_key` from a sync `image.generate` / `image.edit` response or `result.images[].r2Key` from a job — for up to 7 days after creation, instead of losing them after the 30-min URL TTL. Also accepts your own video / music artifact keys. Free, no quota. Any key that is not yours (or malformed) fails the **whole call** with `IMAGE_ASSET_NOT_FOUND` (-32117, `data.index`); no partial success. Needs only `image_grant.enabled`.",
+          "tags": [
+            {
+              "label": "re-sign"
+            },
+            {
+              "label": "free"
             }
           ]
         }
@@ -3066,6 +3129,44 @@
         {
           "name": "video.listJobs",
           "desc": "Cursor-paginated job history for this App: `{state?, clientTag?, limit?≤50, cursor?}` → `{jobs:[…getJob views…], nextCursor?}`. Use `clientTag` (≤120 chars, set on `generate`) to correlate jobs with your own entities (scenes, timeline clips)."
+        }
+      ]
+    },
+    {
+      "group": "Host API",
+      "id": "host-api-music",
+      "kicker": "Host API · music.*",
+      "title": "music.* — host-managed async music generation",
+      "sub": "Generate music (text-to-music, optionally with lyrics) from the **anna-app bundle** through the host's fal-hosted catalogue (MiniMax Music 2.6, Lyria 3 / 3 Pro, ElevenLabs Music, Stable Audio 2.5, ACE-Step) without provider keys or storage credentials. Music is the **same kind of surface as video, in a different modality**: `generate` returns a `mjob_…` job in ~1s, progress arrives as `media_job` SSE events, and `getJob` is the single source of truth.\n\n**Auth chain.** Bundle calls `anna.music.*` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_music_*` → `app_media_facade.music_*` → fal queue (webhook + poller) → R2. Equivalent HTTP: `POST /api/v1/copilot/app/music/generate`, `GET …/music/jobs[/{job_id}]`, `POST …/music/jobs/{job_id}/cancel` (app_session_token).\n\n**ACL is two-layer.** (a) manifest `ui.host_api.music` must list the methods you call (`generate`, `getJob`, `cancelJob`, `listJobs`); (b) the user's `media_grant.music.enabled` for your App. Missing either → `APP_NOT_GRANTED`.\n\n**Billing is pre-charge → settle → refund** (`APP_MUSIC_GEN`). `estimatedCostCU` is held on submit from the catalogue price in the provider's own unit — `cuPerSong` (MiniMax, Lyria, Stable Audio), `cuPerSecond` (ACE-Step) or `cuPerMinute` rounded **up** to whole minutes (ElevenLabs); on `succeeded` the hold is settled to `billedCostCU`; on `failed` / cancelled-while-queued it is **fully refunded**; cancelling a `running` job does not refund. There is no platform-side daily / concurrency cap — the CU quota pool is the only gate (`APP_QUOTA_EXCEEDED`, HTTP 429).\n\n**Idempotency.** Pass `idempotencyKey` (≤64 chars) on `generate`: the same key within 24 h returns the existing job with `idempotentReplay:true` and is never charged twice. Use it for retry-safe buttons and reload recovery.\n\n**No silent downgrade.** Models differ a lot (lyrics vs. instrumental-only, fixed vs. range length, mp3 vs. wav, reference image). Read `llm.catalog({serviceType:'music_gen'})` — `capabilities.{lyrics, lyricsMode, lyricsMaxChars, instrumentalOnly, duration, formats, defaultFormat, referenceImage, promptMinChars, promptMaxChars, options}` — and build your form from it. A feature the resolved model cannot deliver fails with `MUSIC_FEATURE_UNSUPPORTED` (`-32165`) whose `data.alternatives` lists models that can; the host never swaps the request for something lesser.\n\n**URL lifetime.** `result.url` is a presigned R2 GET with a ~30 min TTL (`expiresIn`). Re-calling `getJob` re-signs it; for permanent storage fetch the bytes and go through `upload.negotiate`/`confirm`. Terminal objects are cleaned up after 7 days; job rows are kept 30 days for billing.\n\n**Errors.** `-32161 MUSIC_PROVIDER_ERROR` (retryable) · `-32162 MUSIC_INVALID_REQUEST` · `-32163 MUSIC_MODEL_UNAVAILABLE` · `-32164 MUSIC_JOB_NOT_FOUND` · `-32165 MUSIC_FEATURE_UNSUPPORTED` · `-32166 MUSIC_LYRICS_TOO_LONG` · `-32167 MUSIC_JOB_NOT_CANCELLABLE` · `-32168 MUSIC_CONTENT_REJECTED`; grant / quota failures surface as the generic `APP_NOT_GRANTED` / `APP_QUOTA_EXCEEDED` (`-32160` / `-32169` are used only by the Executa reverse RPC). Every error's `data` carries `{errorName, retryable, docs}`.",
+      "source": "host_api",
+      "detail_source": "/static/data/reference-host-api-music.json",
+      "items": [
+        {
+          "name": "music.generate",
+          "desc": "Submit an **async** text-to-music job: `{prompt, lyrics?, instrumental?, durationSec?, format?, referenceImageUrl?, options?, model?, clientTag?, idempotencyKey?}` → `{jobId:'mjob_…', kind:'music', state:'queued', estimatedCostCU, deadlineAt, idempotentReplay}` within ~1s. CU is **pre-charged** on submit and settled/refunded at the terminal state. Every field is validated against the resolved model's catalogue entry — a feature it cannot deliver fails with `MUSIC_FEATURE_UNSUPPORTED` (`data.alternatives`), never a silent downgrade. Same `idempotencyKey` within 24h → the existing job, no second charge.",
+          "tags": [
+            {
+              "label": "async job"
+            },
+            {
+              "label": "pre-charge"
+            },
+            {
+              "label": "idempotent"
+            }
+          ]
+        },
+        {
+          "name": "music.getJob",
+          "desc": "Authoritative job state: `{jobId}` → `{jobId, kind:'music', state, progress:{seq, phase, queuePosition}, request, result?:{url, mimeType, durationSec, lyrics?, seed?, expiresIn}, billedCostCU?, createdAt, deadlineAt}`. On `succeeded`, `result.url` is a presigned R2 GET (~30 min TTL); calling `getJob` again **re-signs** an expired URL. Events are an accelerator — the truth is always here."
+        },
+        {
+          "name": "music.cancelJob",
+          "desc": "`{jobId}` → `queued` jobs are cancelled with a **full refund** (`{state:'cancelled', refunded:true}`); `running` jobs attempt a provider cancel — if the provider is already rendering you get `{state:'running', cancelPending:false}` and no refund. Terminal jobs → `MUSIC_JOB_NOT_CANCELLABLE`."
+        },
+        {
+          "name": "music.listJobs",
+          "desc": "Cursor-paginated music-job history for this App: `{state?, clientTag?, limit?≤50, cursor?}` → `{jobs:[…getJob views…], nextCursor?}`. Use `clientTag` (≤120 chars, set on `generate`) to map jobs back to your own entities (scenes, timeline clips); `idempotencyKey` is echoed too."
         }
       ]
     },
@@ -3752,7 +3853,7 @@
         },
         {
           "name": "media_job",
-          "desc": "Progress / terminal update for a `video.generate` job: `payload = {jobId, seq, state, progress?:{phase, queuePosition}, result?, billedCostCU?}`. `seq` is strictly monotonic — drop out-of-order frames. Terminal `result.url` has the same ~30 min TTL as `getJob`; on 403 call `getJob` to re-sign. `anna.video.generateAwait` already subscribes to this and falls back to adaptive polling."
+          "desc": "Progress / terminal update for a `video.generate` or `music.generate` job: `payload = {jobId, kind:'video'|'music', seq, state, progress?:{phase, queuePosition}, result?, billedCostCU?}` (`vjob_…` / `mjob_…` handles). `seq` is strictly monotonic — drop out-of-order frames. Terminal `result.url` has the same ~30 min TTL as `getJob`; on 403 call `getJob` to re-sign. `anna.video.generateAwait` / `anna.music.generateAwait` already subscribe to this and fall back to adaptive polling."
         }
       ]
     },

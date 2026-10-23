@@ -149,7 +149,7 @@
       },
       {
         "name": "agent.session.run",
-        "desc": "Submit a user turn; returns SYNCHRONOUSLY with `{stream_id, run_id}`. LangGraph response frames arrive via `rpc.stream` events; the SDK's `AgentRunStream` reassembles by `seq` into an `AsyncIterable`. Terminal frame is always `{event:'end', run_id}` + `done:true`. The `run_meta` frame and the `task_complete` delta carry `model` / `provider` — the model the server ACTUALLY routed to after `modelPreferences` resolution and any fallback (soft preference; forum #270). Optional per-run fields: `attachments` (native multimodal image inputs — the session's vision model sees them directly, image/* only, ≤6, SSRF-guarded URLs or base64 `data`; non-vision model fails fast with `APP_MODEL_NOT_VISION_CAPABLE`), `allowed_tools` (narrow this run's tool surface — sandbox sessions only), `modelPreferences`, `systemPrompt`.",
+        "desc": "Submit a user turn; returns SYNCHRONOUSLY with `{stream_id, run_id}`. LangGraph response frames arrive via `rpc.stream` events; the SDK's `AgentRunStream` reassembles by `seq` into an `AsyncIterable`. Terminal frame is always `{event:'end', run_id}` + `done:true`. The `run_meta` frame and the `task_complete` delta carry `model` / `provider` — the model the server ACTUALLY routed to after `modelPreferences` resolution and any fallback (soft preference; forum #270). Optional per-run fields: `attachments` (native multimodal image inputs — the session's vision model sees them directly, image/* only, ≤6, SSRF-guarded URLs or base64 `data`; non-vision model fails fast with `APP_MODEL_NOT_VISION_CAPABLE`), `allowed_tools` (narrow this run's tool surface — sandbox sessions only), `modelPreferences`, `systemPrompt`, `maxTokens` (dispatcher ≥ 0.30.0: per-call output cap, `min(maxTokens ∥ model cap, 65 536)` clamped to the context budget — can only lower it). Host ≥ 1.1.0-beta.200 discloses the effective per-call cap in `run_meta.max_output_tokens` and flags a cut-off final message with `task_complete.truncated` / `stop_reason` (`status` stays `'completed'` — forum #403).",
         "tags": [
           {
             "label": "streaming"
@@ -291,7 +291,7 @@
     "items": [
       {
         "name": "llm.complete",
-        "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ 8192, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
+        "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ model output cap, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
         "tags": [
           {
             "label": "MCP-shaped"
@@ -309,7 +309,7 @@
       },
       {
         "name": "llm.stream",
-        "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
+        "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); omitted `maxTokens` defaults to the model's own output cap (host ≥ 1.1.0-beta.200 — the worst-case precheck follows, so low-balance users should pass a smaller `maxTokens`); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
         "tags": [
           {
             "label": "MCP-shaped"
@@ -333,14 +333,73 @@
     "items": [
       {
         "name": "image.generate",
-        "desc": "Generate `n` images (default 1) from a text `prompt`, optional `size` (default `1024x1024`) and `reference_image_urls`. Returns `{images:[{url}], model, quota_used, latency_ms, …}` with ~30-min-TTL presigned R2 URLs."
+        "desc": "Generate `n` images (default 1) from a text `prompt`, optional `size` (default `1024x1024`) and `reference_image_urls`. Returns `{images:[{url}], model, quota_used, latency_ms, …}` with ~30-min-TTL presigned R2 URLs. Provider safety rejections now surface as `IMAGE_CONTENT_REJECTED` (-32115) instead of `APP_PROVIDER_ERROR`; artifacts stay re-signable via `image.resign`."
       },
       {
         "name": "image.edit",
-        "desc": "Restyle / mask-edit an existing `image_url` per a text `prompt`. Optional `mask_url` for inpainting where the provider supports it. Source is not modified; results land in fresh R2 objects.",
+        "desc": "Restyle / mask-edit an existing `image_url` per a text `prompt`. Optional `mask_url` for inpainting where the provider supports it. Source is not modified; results land in fresh R2 objects. Provider safety rejections now surface as `IMAGE_CONTENT_REJECTED` (-32115) instead of `APP_PROVIDER_ERROR`; artifacts stay re-signable via `image.resign`.",
         "tags": [
           {
             "label": "edit grant"
+          }
+        ]
+      },
+      {
+        "name": "image.generateAsync",
+        "desc": "Submit an **async** text-to-image / reference-image job with the **same body as `image.generate`** plus `clientTag?` / `idempotencyKey?` → `{jobId:'ijob_…', kind:'image', state:'queued', estimatedCostCU, deadlineAt, idempotentReplay}` within ~1s. One job = one user action = `n` images: CU is **pre-charged** for `n` on submit and **settled on the actual number of images** (shortfall refunded). Same `idempotencyKey` within 24h (same user + App) → the existing job, no second charge. Validation and error codes are byte-identical to the sync path (`IMAGE_MODEL_UNAVAILABLE`, `IMAGE_SIZE_UNSUPPORTED`, `IMAGE_OPTION_INVALID`, `IMAGE_PER_CALL_EXCEEDED`).",
+        "tags": [
+          {
+            "label": "async job"
+          },
+          {
+            "label": "pre-charge"
+          },
+          {
+            "label": "idempotent"
+          }
+        ]
+      },
+      {
+        "name": "image.editAsync",
+        "desc": "Submit an **async** edit job with the body of `image.edit` (`image_url`, optional `mask_url`) plus `clientTag?` / `idempotencyKey?` → `{jobId:'ijob_…', …}`. Requires `image_grant.allowEdit`; a `mask_url` on a model without `capabilities.edit.mask` fails with `IMAGE_EDIT_MASK_UNSUPPORTED` (-32312) — never a silent whole-image edit. Input images are re-hosted by the platform before submission so an expiring presigned input URL cannot break a queued job.",
+        "tags": [
+          {
+            "label": "async job"
+          },
+          {
+            "label": "pre-charge"
+          },
+          {
+            "label": "idempotent"
+          }
+        ]
+      },
+      {
+        "name": "image.getJob",
+        "desc": "Authoritative job state: `{jobId}` → `{jobId, kind:'image', state, progress:{seq, phase, queuePosition?}, request:{op, prompt, n, size?, aspectRatio?, params, referenceImageCount? | hasBaseImage?, hasMask?, model}, result?:{images:[{url, r2Key, mimeType, width, height, expiresIn}], requestedSize, size, sizeAdjusted, aspectRatio, fit, params, ignoredParams}, estimatedCostCU, billedCostCU?, createdAt, deadlineAt}`. On `succeeded`, **every** `result.images[].url` is a freshly presigned R2 GET (~30 min TTL) — calling `getJob` again **re-signs** them; `url` is `null` once the object was garbage-collected (7 days). Input URLs are never echoed back."
+      },
+      {
+        "name": "image.cancelJob",
+        "desc": "`{jobId}` → `queued` jobs are cancelled with a **full refund** (`{state:'cancelled', refunded:true}`); `running` jobs attempt a provider cancel — if refused the job keeps running to its terminal state and is billed (`{state:'running', cancelPending:false}`). Terminal jobs → `IMAGE_JOB_NOT_CANCELLABLE` (-32114)."
+      },
+      {
+        "name": "image.listJobs",
+        "desc": "`{state?, clientTag?, limit?≤50, cursor?}` → `{jobs:[JobView without re-signed URLs], nextCursor}` — this App's image jobs only (never `vjob_…` / `mjob_…`), newest first. Reload recovery: `listJobs({state:'running'})` then `getJob` for URLs.",
+        "tags": [
+          {
+            "label": "pagination"
+          }
+        ]
+      },
+      {
+        "name": "image.resign",
+        "desc": "`{r2Keys: string[]}` (1–20) → `{urls:[{r2Key, url, expiresIn}]}` in input order: re-sign **already-paid** artifacts — `images[].r2_key` from a sync `image.generate` / `image.edit` response or `result.images[].r2Key` from a job — for up to 7 days after creation, instead of losing them after the 30-min URL TTL. Also accepts your own video / music artifact keys. Free, no quota. Any key that is not yours (or malformed) fails the **whole call** with `IMAGE_ASSET_NOT_FOUND` (-32117, `data.index`); no partial success. Needs only `image_grant.enabled`.",
+        "tags": [
+          {
+            "label": "re-sign"
+          },
+          {
+            "label": "free"
           }
         ]
       }
@@ -934,7 +993,7 @@
       },
       {
         "name": "media_job",
-        "desc": "Progress / terminal update for a `video.generate` job: `payload = {jobId, seq, state, progress?:{phase, queuePosition}, result?, billedCostCU?}`. `seq` is strictly monotonic — drop out-of-order frames. Terminal `result.url` has the same ~30 min TTL as `getJob`; on 403 call `getJob` to re-sign. `anna.video.generateAwait` already subscribes to this and falls back to adaptive polling."
+        "desc": "Progress / terminal update for a `video.generate` or `music.generate` job: `payload = {jobId, kind:'video'|'music', seq, state, progress?:{phase, queuePosition}, result?, billedCostCU?}` (`vjob_…` / `mjob_…` handles). `seq` is strictly monotonic — drop out-of-order frames. Terminal `result.url` has the same ~30 min TTL as `getJob`; on 403 call `getJob` to re-sign. `anna.video.generateAwait` / `anna.music.generateAwait` already subscribe to this and fall back to adaptive polling."
       }
     ]
   },
@@ -964,6 +1023,38 @@
       {
         "name": "video.listJobs",
         "desc": "Cursor-paginated job history for this App: `{state?, clientTag?, limit?≤50, cursor?}` → `{jobs:[…getJob views…], nextCursor?}`. Use `clientTag` (≤120 chars, set on `generate`) to correlate jobs with your own entities (scenes, timeline clips)."
+      }
+    ]
+  },
+  "host-api-music": {
+    "source": "host_api",
+    "items": [
+      {
+        "name": "music.generate",
+        "desc": "Submit an **async** text-to-music job: `{prompt, lyrics?, instrumental?, durationSec?, format?, referenceImageUrl?, options?, model?, clientTag?, idempotencyKey?}` → `{jobId:'mjob_…', kind:'music', state:'queued', estimatedCostCU, deadlineAt, idempotentReplay}` within ~1s. CU is **pre-charged** on submit and settled/refunded at the terminal state. Every field is validated against the resolved model's catalogue entry — a feature it cannot deliver fails with `MUSIC_FEATURE_UNSUPPORTED` (`data.alternatives`), never a silent downgrade. Same `idempotencyKey` within 24h → the existing job, no second charge.",
+        "tags": [
+          {
+            "label": "async job"
+          },
+          {
+            "label": "pre-charge"
+          },
+          {
+            "label": "idempotent"
+          }
+        ]
+      },
+      {
+        "name": "music.getJob",
+        "desc": "Authoritative job state: `{jobId}` → `{jobId, kind:'music', state, progress:{seq, phase, queuePosition}, request, result?:{url, mimeType, durationSec, lyrics?, seed?, expiresIn}, billedCostCU?, createdAt, deadlineAt}`. On `succeeded`, `result.url` is a presigned R2 GET (~30 min TTL); calling `getJob` again **re-signs** an expired URL. Events are an accelerator — the truth is always here."
+      },
+      {
+        "name": "music.cancelJob",
+        "desc": "`{jobId}` → `queued` jobs are cancelled with a **full refund** (`{state:'cancelled', refunded:true}`); `running` jobs attempt a provider cancel — if the provider is already rendering you get `{state:'running', cancelPending:false}` and no refund. Terminal jobs → `MUSIC_JOB_NOT_CANCELLABLE`."
+      },
+      {
+        "name": "music.listJobs",
+        "desc": "Cursor-paginated music-job history for this App: `{state?, clientTag?, limit?≤50, cursor?}` → `{jobs:[…getJob views…], nextCursor?}`. Use `clientTag` (≤120 chars, set on `generate`) to map jobs back to your own entities (scenes, timeline clips); `idempotencyKey` is echoed too."
       }
     ]
   },

@@ -4,7 +4,7 @@ description: "The `ui` section of a schema ≥ 2 manifest: bundle, views, host_a
 section: apps
 slug: app-ui-manifest
 order: 10
-updated: 2026-10-14
+updated: 2026-10-23
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -112,6 +112,17 @@ A view is a named UI surface inside your bundle. The LLM passes `view: "<name>"`
 
 Sizes are integers in CSS pixels, `120 ≤ w,h ≤ 4096`. The validator rejects `default_size` outside `[min_size, max_size]`.
 
+#### Size baseline (small screens)
+
+The dashboard Window Manager adapts windows to the current viewport, so your declared sizes are **requests, not guarantees**. The most common low-resolution effective viewport is about **1092×614** CSS px (1366×768 at 125 % display scaling). Rules to follow:
+
+- **`min_size.h` must be ≤ 600.** Window height is rigidly clamped to the viewport height; a `min_size.h` above it is force-shrunk by the host (your window gets *less* than its declared minimum on low-resolution displays). Make the view scroll vertically instead of demanding a tall minimum.
+- **`min_size.w` should be ≤ 1024.** Width is honoured even when it exceeds the viewport, but the user then has to drag/edge-resize to see the full window — it cannot be shown whole on a single small screen.
+- **`default_size` is a preference, not a guarantee.** Anything above **1440×900** is constrained to the viewport (and centred) on smaller displays.
+- **Your UI must be responsive across the whole `min_size` ~ `max_size` range** — the user, the host, and agent window tools can all resize it anywhere in that interval.
+
+The publish validator emits non-blocking lint warnings when these baselines are exceeded.
+
 `mobile_entry` is served instead of `entry` when the window is opened from a mobile container — see [Mobile Support](/developers/apps/app-mobile). A single responsive entry is recommended.
 
 `single_instance: true` means: opening the same `view` again under the same `(user, conversation_session_uuid, app_id)` re-focuses the existing window and merges the new payload into `entry_payload` rather than spawning a second window.
@@ -134,6 +145,7 @@ The ACL that gates host RPC calls from your iframe. Each namespace key is a list
 | `image` | `generate`, `edit` | Host-mediated image generation/editing — also gated by the per-app `image_grant` |
 | `upload` | `inline`, `negotiate`, `confirm` | User-artifact uploads to host storage — also gated by the per-app `upload_grant` |
 | `video` | `generate`, `getJob`, `cancelJob`, `listJobs` | Host-mediated async video generation jobs (`anna.video.*`; CU pre-charge + refund) — also gated by the per-app `media_grant` |
+| `music` | `generate`, `getJob`, `cancelJob`, `listJobs` | Host-mediated async music generation jobs (`anna.music.*`; same job model as video, CU pre-charge + refund, `idempotencyKey` replay) — also gated by the per-app `media_grant.music` |
 | `audio` | `speak`, `transcribe`, `session` | Host-mediated TTS / STT (`anna.audio.*`) and the realtime voice session (`anna.audio.session()`, relayed by the host bridge — see [App UI Audio Session](/developers/apps/app-ui-audio-session)) — also gated by the per-app `media_grant`; `session` needs both `speak` and `transcribe` flags and makes the host grant the iframe `allow="microphone"` |
 | `web` | `search`, `fetch`, `image_search`, `image_fetch` | Host-managed web search/fetch (provider keys, SSRF guard, billing stay host-side) — also gated by the per-app `web_grant` |
 | `apps` | `list`, `search`, `get`, `launch`, `deck.list`, `deck.add`, `deck.remove`, `deck.reorder` | Apps launcher: browse/launch the user's installed apps, curate the "我的 Apps" deck |

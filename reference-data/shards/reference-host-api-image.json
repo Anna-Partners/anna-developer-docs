@@ -25,7 +25,7 @@
           "summary": "Natural-language description of the image to generate. Trimmed; an empty string after trim is rejected with `APP_INVALID_REQUEST`.",
           "notes": [
             "Forwarded verbatim to the provider — provider-side safety filters apply.",
-            "Provider safety refusals surface as `APP_PROVIDER_ERROR` (HTTP 502 underneath)."
+            "Provider safety refusals surface as `IMAGE_CONTENT_REJECTED` (-32115, HTTP 400; `data.stage:'provider'`) since dispatcher 0.29.0 — previously `APP_PROVIDER_ERROR`."
           ]
         },
         {
@@ -167,6 +167,12 @@
           "name": "not_implemented",
           "code": "not_implemented",
           "desc": "Store does not support `image_generate` (local-dev harness without a facade)."
+        },
+        {
+          "name": "IMAGE_CONTENT_REJECTED",
+          "code": -32115,
+          "desc": "Provider safety / content-policy rejection (since dispatcher 0.29.0; previously `APP_PROVIDER_ERROR`). Not billed.",
+          "retryable": false
         }
       ],
       "example": "// Generate a poster and render it in the iframe.\ntry {\n  const out = await anna.image.generate({\n    prompt: \"A bold art-deco poster of the planet Mars.\",\n    n: 1,\n    size: \"1024x1024\",\n  });\n  posterImg.src = out.images[0].url;        // ~30 min TTL\n  quotaLabel.textContent = `${out.quota_used.images_today}/${out.quota_used.images_quota}`;\n} catch (e) {\n  switch (e.code) {\n    case \"APP_NOT_GRANTED\":     setStatus(\"Enable image generation in Anna Admin.\"); break;\n    case \"APP_QUOTA_EXCEEDED\":  setStatus(\"Daily image quota hit — try again tomorrow.\"); break;\n    case \"APP_INVALID_REQUEST\": setStatus(`Bad request: ${e.message}`); break;\n    case \"APP_PROVIDER_ERROR\":  setStatus(\"Upstream provider hiccup — retry once.\"); break;\n    default: throw e;\n  }\n}\n",
@@ -175,7 +181,8 @@
         "CSP gotcha: the iframe's `img-src` must allow the host's R2 hostname. Either add `https:` (or the specific R2 domain) to `manifest.ui.csp_overrides.img-src`, or display the image via a same-origin proxy.",
         "Cross-Origin-Embedder-Policy: if the iframe is in `require-corp` mode, R2 presigned URLs that don't include `Cross-Origin-Resource-Policy: cross-origin` will be blocked (`ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep`). The default Anna App runtime does **not** set COEP for this reason — only opt in when SharedArrayBuffer is required.",
         "No streaming. Image responses are buffered; a slow provider (DALL·E 3 cold-start, FLUX queue) can take 30-60 s — the SDK default per-call timeout is `DEFAULT_TIMEOUTS_BY_NS.image = 180_000` ms (180 s), override via `opts.timeoutMs`.",
-        "Per-invoke rolling quota (`max_images`) used by Executa plugin-side image calls is **not** applied here. Only `image_grant.maxPerCallGenerate` and plan-level quota apply."
+        "Per-invoke rolling quota (`max_images`) used by Executa plugin-side image calls is **not** applied here. Only `image_grant.maxPerCallGenerate` and plan-level quota apply.",
+        "Returned `images[].r2_key` can be re-signed for 7 days with `anna.image.resign({r2Keys})` (v0.25.0) — the 30-min URL is no longer the only window."
       ]
     },
     {
@@ -212,7 +219,8 @@
           "default": null,
           "required": true,
           "desc": "",
-          "summary": "Edit instruction (e.g. 'restyle in cyberpunk aesthetic'). Trimmed; empty → `APP_INVALID_REQUEST`."
+          "summary": "Edit instruction (e.g. 'restyle in cyberpunk aesthetic'). Trimmed; empty → `APP_INVALID_REQUEST`.",
+          "notes": []
         },
         {
           "name": "n",
@@ -302,6 +310,12 @@
           "name": "not_implemented",
           "code": "not_implemented",
           "desc": "Store does not support `image_edit`."
+        },
+        {
+          "name": "IMAGE_CONTENT_REJECTED",
+          "code": -32115,
+          "desc": "Provider safety / content-policy rejection (since dispatcher 0.29.0; previously `APP_PROVIDER_ERROR`). Not billed.",
+          "retryable": false
         }
       ],
       "example": "// Restyle a previously-generated poster.\nconst gen  = await anna.image.generate({ prompt: \"art-deco Mars poster\", n: 1 });\nconst edit = await anna.image.edit({\n  image_url: gen.images[0].url,           // re-use immediately — URL is fresh\n  prompt: \"Restyle this poster in a cyberpunk aesthetic with neon magenta.\",\n  n: 1,\n});\noutImg.src = edit.images[0].url;\n",
@@ -310,7 +324,522 @@
         "Mask support varies per provider. Probe with a small request before exposing a mask UI to the user.",
         "Edit grant defaults to **off**. `image_grant.enabled = true` alone is not enough; the user must also flip `allowEdit` in Anna Admin.",
         "Same URL-expiry, CSP, and COEP caveats as `image.generate`.",
-        "Edits do not chain — each call goes back to the provider; there is no server-side artifact graph that would let the host skip a re-fetch of `image_url`."
+        "Edits do not chain — each call goes back to the provider; there is no server-side artifact graph that would let the host skip a re-fetch of `image_url`.",
+        "Returned `images[].r2_key` can be re-signed for 7 days with `anna.image.resign({r2Keys})` (v0.25.0) — the 30-min URL is no longer the only window."
+      ]
+    },
+    {
+      "slug": "image-generate-async",
+      "name": "image.generateAsync",
+      "kind": "Host API method · iframe surface",
+      "group": "Image",
+      "since": "Introduced anna-app-runtime v0.25.0 / dispatcher 0.29.0 / schema 0.29.0 (2026-10-21)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.image_generate_async → quota hold → anna_media_jobs INSERT (kind:'image') → fal queue (webhook + poller) → R2 exec-images/…",
+      "summary": "Submit an asynchronous text-to-image / reference-image job. Body = `image.generate` body + `clientTag?` / `idempotencyKey?`. The host validates exactly as the sync path, **pre-charges** per-image price × `n`, persists an `anna_media_jobs` row and returns an `ijob_…` handle within ~1s. Progress arrives as `media_job` events (`kind:'image'`); `image.getJob` is the authoritative state and re-signs every `result.images[].url`. Most apps should use `anna.image.generateAwait()`. Use jobs for 2K/4K or `quality:'high'` renders (60–120 s) that would otherwise hold a sync call open and be lost on reload.",
+      "wire": {
+        "json_rpc_method": "image.generateAsync",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/image/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "POST /api/v1/copilot/app/image/generate/async"
+      },
+      "signature": "anna.image.generateAsync(args: ImageGenerateArgs & {clientTag?: string, idempotencyKey?: string}, opts?: {timeoutMs?: number}) => Promise<ImageJobCreated>\n\nanna.image.generateAwait(args, {onProgress?, signal?, timeoutMs?}) => Promise<ImageJobView>\n\nImageJobCreated = {jobId: string, kind:'image', state:'queued', estimatedCostCU: number, deadlineAt: string, idempotentReplay: boolean}",
+      "params": [
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "Same as the sync method. Provider safety refusals end the job as `failed` with `error.code:'IMAGE_CONTENT_REJECTED'` — fully refunded.",
+          "notes": []
+        },
+        {
+          "name": "n",
+          "type": "integer",
+          "required": false,
+          "default": "1",
+          "summary": "Images in this job (one job = n images, submitted as one provider request `num_images=n`). Capped by `image_grant.maxPerCallGenerate` / `maxPerCallEdit` and the model's `maxN` → `IMAGE_PER_CALL_EXCEEDED`.",
+          "notes": []
+        },
+        {
+          "name": "reference_image_urls",
+          "type": "string[]",
+          "required": false,
+          "default": null,
+          "summary": "https URLs (SSRF-checked). Re-hosted by the platform before submit; count is capped by the model's `capabilities.edit.maxReferenceImages` → `APP_INVALID_REQUEST` (no silent truncation). Job view echoes `request.referenceImageCount`, never the URLs.",
+          "notes": []
+        },
+        {
+          "name": "size / aspect_ratio / fit / params / model / modelPreferences",
+          "type": "see image.generate",
+          "required": false,
+          "default": null,
+          "summary": "Identical semantics and validation to the sync method (`fit:'strict'` → `IMAGE_SIZE_UNSUPPORTED`; unknown `params` keys dropped into `ignoredParams`).",
+          "notes": []
+        },
+        {
+          "name": "clientTag",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "≤120 chars; echoed in the job view and filterable in `listJobs`.",
+          "notes": []
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "`^[A-Za-z0-9_\\-:.]{1,64}$`. Same key within 24h (same user + App, shared between generateAsync and editAsync) → the existing job with `idempotentReplay:true`, never charged twice.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "ImageJobCreated",
+        "desc": "`estimatedCostCU` is the CU held now (settled to the actual image count on success, refunded on failure). `deadlineAt` = now + 15 min. `idempotentReplay:true` means the key matched an existing job (which may already be terminal — `generateAwait` returns it without polling)."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "retryable": false
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": -32004,
+          "desc": "Bad body (`prompt` empty, `n` not a positive int, unsafe / non-https URL, bad `idempotencyKey` / `clientTag`, `IMAGE_JOBS_APP_ENABLED` switched off).",
+          "retryable": false
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": -32015,
+          "desc": "Not enough CU for the up-front hold (`estimatedCostCU` = per-image price × `n`). HTTP 429.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_PER_CALL_EXCEEDED",
+          "code": -32107,
+          "desc": "`n` exceeds `image_grant.maxPerCallGenerate` / `maxPerCallEdit` (`data.allowed.maxN`).",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_MODEL_UNAVAILABLE",
+          "code": -32110,
+          "desc": "Unknown / inactive `model` (`data.allowed` lists the catalogue), or the model has no job path.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_SIZE_UNSUPPORTED",
+          "code": -32111,
+          "desc": "`size` / `aspect_ratio` outside the model's space with `fit:'strict'` (`data.allowed`).",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_OPTION_INVALID",
+          "code": -32112,
+          "desc": "A `params` value violates the model's `capabilities.options` schema (`data.{key, reason, allowed}`).",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "APP_IMAGE_GEN | APP_IMAGE_EDIT (by op)",
+        "model": "pre-charge on submit (per-image catalogue price × n, same formula as the sync path) → settle on the actual image count → full refund on failed / cancelled / expired / provider rejection",
+        "pricing": "`anna.llm.catalog({serviceType:'image_gen'|'image_edit'})` → `pricing.cuPerImage` / `cuByResolution` / `cuBySizeQuality` / `cuByMaxPixels` + `surcharges`"
+      },
+      "example": "const job = await anna.image.generateAwait(\n  { prompt: 'art-deco poster of Mars', n: 2, model: 'fal-ai/nano-banana-2',\n    aspect_ratio: '9:16', params: { resolution: '4K' },\n    clientTag: 'poster-v3', idempotencyKey: `poster-v3:${attempt}` },\n  { onProgress: (p) => bar.textContent = `${p.state} · queue ${p.queuePosition ?? '-'}`, signal: ac.signal },\n);\nfor (const im of job.result.images) gallery.add(im.url, im.r2Key);   // url ~30 min; r2Key → image.resign",
+      "limitations": [
+        "Rows are kept 30 days for billing; objects 7 days — after that `getJob` still answers but `result.images[].url` is `null`.",
+        "Deadline is 15 min (`IMAGE_JOB_MAX_DURATION_SECONDS`); past it the poller marks the job `expired` and refunds.",
+        "Models are fal-hosted only (`fal-ai/nano-banana-2`, `openai/gpt-image-2`, `bytedance/seedream/v5/pro/text-to-image`); `capabilities.jobs` in the catalogue tells you jobs are available.",
+        "`IMAGE_JOBS_APP_ENABLED=false` (platform switch) rejects new jobs with `APP_INVALID_REQUEST 'image jobs disabled'`; existing jobs stay queryable."
+      ]
+    },
+    {
+      "slug": "image-edit-async",
+      "name": "image.editAsync",
+      "kind": "Host API method · iframe surface",
+      "group": "Image",
+      "since": "Introduced anna-app-runtime v0.25.0 / dispatcher 0.29.0 / schema 0.29.0 (2026-10-21)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.image_edit_async → input re-host → quota hold → anna_media_jobs INSERT → fal queue edit endpoint → R2",
+      "summary": "Submit an asynchronous edit job (whole-image or mask-based). Body = `image.edit` body + `clientTag?` / `idempotencyKey?`. Requires `image_grant.allowEdit` (default **off**). `image_url` / `mask_url` are SSRF-checked and re-hosted to platform storage before submission, so an expiring input URL cannot break a queued job. Everything else mirrors `image.generateAsync`.",
+      "wire": {
+        "json_rpc_method": "image.editAsync",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/image/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "POST /api/v1/copilot/app/image/edit/async"
+      },
+      "signature": "anna.image.editAsync(args: ImageEditArgs & {clientTag?: string, idempotencyKey?: string}, opts?: {timeoutMs?: number}) => Promise<ImageJobCreated>\n\nanna.image.editAwait(args, {onProgress?, signal?, timeoutMs?}) => Promise<ImageJobView>",
+      "params": [
+        {
+          "name": "image_url",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "Base image (https; SSRF-checked). Re-hosted by the platform before submit. Job view echoes `request.hasBaseImage`, not the URL.",
+          "notes": []
+        },
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "Same as the sync method. Provider safety refusals end the job as `failed` with `error.code:'IMAGE_CONTENT_REJECTED'` — fully refunded.",
+          "notes": []
+        },
+        {
+          "name": "n",
+          "type": "integer",
+          "required": false,
+          "default": "1",
+          "summary": "Images in this job (one job = n images, submitted as one provider request `num_images=n`). Capped by `image_grant.maxPerCallGenerate` / `maxPerCallEdit` and the model's `maxN` → `IMAGE_PER_CALL_EXCEEDED`.",
+          "notes": []
+        },
+        {
+          "name": "mask_url",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "1-channel PNG, same dimensions; only on models with `capabilities.edit.mask` → else `IMAGE_EDIT_MASK_UNSUPPORTED`.",
+          "notes": []
+        },
+        {
+          "name": "size / aspect_ratio / fit / params / model / modelPreferences",
+          "type": "see image.generate",
+          "required": false,
+          "default": null,
+          "summary": "Identical semantics and validation to the sync method (`fit:'strict'` → `IMAGE_SIZE_UNSUPPORTED`; unknown `params` keys dropped into `ignoredParams`).",
+          "notes": []
+        },
+        {
+          "name": "clientTag",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "≤120 chars; echoed in the job view and filterable in `listJobs`.",
+          "notes": []
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "`^[A-Za-z0-9_\\-:.]{1,64}$`. Same key within 24h (same user + App, shared between generateAsync and editAsync) → the existing job with `idempotentReplay:true`, never charged twice.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "ImageJobCreated",
+        "desc": "As `image.generateAsync`."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "retryable": false
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": -32004,
+          "desc": "Bad body (`prompt` empty, `n` not a positive int, unsafe / non-https URL, bad `idempotencyKey` / `clientTag`, `IMAGE_JOBS_APP_ENABLED` switched off).",
+          "retryable": false
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": -32015,
+          "desc": "Not enough CU for the up-front hold (`estimatedCostCU` = per-image price × `n`). HTTP 429.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_PER_CALL_EXCEEDED",
+          "code": -32107,
+          "desc": "`n` exceeds `image_grant.maxPerCallGenerate` / `maxPerCallEdit` (`data.allowed.maxN`).",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_MODEL_UNAVAILABLE",
+          "code": -32110,
+          "desc": "Unknown / inactive `model` (`data.allowed` lists the catalogue), or the model has no job path.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_SIZE_UNSUPPORTED",
+          "code": -32111,
+          "desc": "`size` / `aspect_ratio` outside the model's space with `fit:'strict'` (`data.allowed`).",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_OPTION_INVALID",
+          "code": -32112,
+          "desc": "A `params` value violates the model's `capabilities.options` schema (`data.{key, reason, allowed}`).",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_EDIT_MASK_UNSUPPORTED",
+          "code": -32312,
+          "desc": "`mask_url` given but the resolved model lacks `capabilities.edit.mask`.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "APP_IMAGE_EDIT",
+        "model": "pre-charge on submit (per-image catalogue price × n, same formula as the sync path) → settle on the actual image count → full refund on failed / cancelled / expired / provider rejection",
+        "pricing": "`anna.llm.catalog({serviceType:'image_gen'|'image_edit'})` → `pricing.cuPerImage` / `cuByResolution` / `cuBySizeQuality` / `cuByMaxPixels` + `surcharges`"
+      },
+      "example": "const job = await anna.image.editAwait({\n  image_url: baseUrl, mask_url: maskUrl, prompt: 'replace the sky with aurora',\n  model: 'openai/gpt-image-2', params: { quality: 'high' }, idempotencyKey: `edit-${layerId}:${attempt}`,\n});",
+      "limitations": [
+        "Rows are kept 30 days for billing; objects 7 days — after that `getJob` still answers but `result.images[].url` is `null`.",
+        "Deadline is 15 min (`IMAGE_JOB_MAX_DURATION_SECONDS`); past it the poller marks the job `expired` and refunds.",
+        "`n` is capped by `maxPerCallEdit` (default 1) and the model's `maxN` (GPT Image 2: 1)."
+      ]
+    },
+    {
+      "slug": "image-get-job",
+      "name": "image.getJob",
+      "kind": "Host API method · iframe surface",
+      "group": "Image",
+      "since": "Introduced anna-app-runtime v0.25.0 / dispatcher 0.29.0 / schema 0.29.0 (2026-10-21)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.image_get_job → anna_media_jobs (+ R2 presign per image)",
+      "summary": "Authoritative job state. Returns the full `ImageJobView`; on `succeeded`, **each** `result.images[].url` is a freshly presigned R2 GET — calling `getJob` again **re-signs** expired URLs (`null` once the object was garbage-collected after 7 days). `request` echoes counts / flags (`referenceImageCount`, `hasBaseImage`, `hasMask`) instead of the input URLs. `media_job` events are an accelerator; this is the truth.",
+      "wire": {
+        "json_rpc_method": "image.getJob",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/image/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "GET /api/v1/copilot/app/image/jobs/{job_id}"
+      },
+      "signature": "anna.image.getJob({jobId: string}) => Promise<ImageJobView>\n\nImageJobView = {jobId, kind:'image', state:'queued'|'running'|'succeeded'|'failed'|'cancelled'|'expired', clientTag?, idempotencyKey?, model, createdAt, updatedAt, deadlineAt, estimatedCostCU, request:{op:'generate'|'edit', prompt, n, size?, aspectRatio?, fit, params, referenceImageCount? | hasBaseImage?, hasMask?, model}, progress?:{seq, phase:'IN_QUEUE'|'IN_PROGRESS', queuePosition?}, result?:{images:[{url: string|null, r2Key, mimeType, width, height, expiresIn}], requestedSize, size, sizeAdjusted, aspectRatio, fit, params, ignoredParams}, billedCostCU?, error?:{code, message}}",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "`ijob_…` handle returned by `generateAsync` / `editAsync`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "ImageJobView",
+        "desc": "`result` only on `succeeded`: `images[]` (`url` presigned for `expiresIn` seconds, `r2Key` for `image.resign`, `mimeType`, decoded `width` / `height`), plus the same echo block as the sync path (`requestedSize`, `size`, `sizeAdjusted`, `aspectRatio`, `fit`, `params`, `ignoredParams`). `billedCostCU` is the settled amount (≤ `estimatedCostCU`). On `failed` / `cancelled` / `expired`, `error.code` is `IMAGE_CONTENT_REJECTED` | `IMAGE_PROVIDER_ERROR` | `IMAGE_JOB_CANCELLED` | `IMAGE_JOB_EXPIRED`."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_JOB_NOT_FOUND",
+          "code": -32113,
+          "desc": "Unknown `jobId`, a `vjob_…` / `mjob_…` handle, or a job owned by another user / App / Executa.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "free",
+        "pricing": "—"
+      },
+      "example": "const job = await anna.image.getJob({ jobId });\nif (job.state === 'succeeded') render(job.result.images);     // fresh URLs\nelse if (job.error) toast(`${job.error.code}: ${job.error.message}`);",
+      "limitations": [
+        "Rows are kept 30 days for billing; objects 7 days — after that `getJob` still answers but `result.images[].url` is `null`."
+      ]
+    },
+    {
+      "slug": "image-cancel-job",
+      "name": "image.cancelJob",
+      "kind": "Host API method · iframe surface",
+      "group": "Image",
+      "since": "Introduced anna-app-runtime v0.25.0 / dispatcher 0.29.0 / schema 0.29.0 (2026-10-21)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.image_cancel_job → fal queue cancel → anna_media_jobs transition → refund",
+      "summary": "Cancel a job. `queued` → cancelled with a **full refund** (`{jobId, state:'cancelled', refunded:true}`). `running` → the host asks the provider; if it refuses the job keeps rendering to its terminal state and is billed (`{jobId, state:'running', cancelPending:false}`). `generateAwait`'s `signal` abort calls this for you.",
+      "wire": {
+        "json_rpc_method": "image.cancelJob",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/image/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "POST /api/v1/copilot/app/image/jobs/{job_id}/cancel"
+      },
+      "signature": "anna.image.cancelJob({jobId: string}) => Promise<{jobId, state:'cancelled', refunded:true} | {jobId, state:'running', cancelPending:false}>",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "`ijob_…` handle.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "object",
+        "desc": "See summary. A concurrent terminal transition (webhook won the race) returns the fresh `ImageJobView` instead."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_JOB_NOT_FOUND",
+          "code": -32113,
+          "desc": "Unknown `jobId`, a `vjob_…` / `mjob_…` handle, or a job owned by another user / App / Executa.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_JOB_NOT_CANCELLABLE",
+          "code": -32114,
+          "desc": "Job already terminal (`data.state`). HTTP 409.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "refund of the hold when the cancel is accepted",
+        "pricing": "—"
+      },
+      "example": "await anna.image.cancelJob({ jobId });",
+      "limitations": [
+        "Running cancels are best-effort — fal only guarantees cancellation while the request is still queued."
+      ]
+    },
+    {
+      "slug": "image-list-jobs",
+      "name": "image.listJobs",
+      "kind": "Host API method · iframe surface",
+      "group": "Image",
+      "since": "Introduced anna-app-runtime v0.25.0 / dispatcher 0.29.0 / schema 0.29.0 (2026-10-21)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.image_list_jobs → anna_media_jobs",
+      "summary": "List this App's image jobs for the current user, newest first, cursor-paginated (≤50). Views carry `result.images[].r2Key` but **no presigned URLs** — call `getJob` for a job you want to display. Never returns `vjob_…` / `mjob_…` rows.",
+      "wire": {
+        "json_rpc_method": "image.listJobs",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/image/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "GET /api/v1/copilot/app/image/jobs?state=&clientTag=&limit=&cursor="
+      },
+      "signature": "anna.image.listJobs({state?: JobState, clientTag?: string, limit?: number, cursor?: string}) => Promise<{jobs: ImageJobView[], nextCursor: string | null}>",
+      "params": [
+        {
+          "name": "state",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Filter by job state.",
+          "notes": []
+        },
+        {
+          "name": "clientTag",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Exact match on the tag you passed at submit.",
+          "notes": []
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "20",
+          "summary": "1–50.",
+          "notes": []
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Opaque `nextCursor` from the previous page.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{jobs, nextCursor}",
+        "desc": "`nextCursor` is `null` on the last page."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "retryable": false
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": -32004,
+          "desc": "Malformed `cursor`.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "free",
+        "pricing": "—"
+      },
+      "example": "const { jobs } = await anna.image.listJobs({ state: 'running' });   // reload recovery\nfor (const j of jobs) resume(j.jobId);",
+      "limitations": [
+        "Rows are kept 30 days."
+      ]
+    },
+    {
+      "slug": "image-resign",
+      "name": "image.resign",
+      "kind": "Host API method · iframe surface",
+      "group": "Image",
+      "since": "Introduced anna-app-runtime v0.25.0 / dispatcher 0.29.0 / schema 0.29.0 (2026-10-21)",
+      "direction": "Bundle (iframe) → Host RPC → app_llm_facade.image_resign → prefix ownership check → R2 presign (no network)",
+      "summary": "Re-sign **already-paid** artifacts by storage key so a user who generated an image can still fetch it after the 30-min URL TTL — up to the 7-day object lifetime. Accepts `images[].r2_key` from a sync `image.generate` / `image.edit` response, `result.images[].r2Key` from a job, and (as a convenience) your own video / music artifact keys. Keys are checked against the caller's own prefixes (`exec-images/{env}/{user_uuid}/…`, `media/{env}/{user_id}/…`); **any** failing key rejects the whole call (`IMAGE_ASSET_NOT_FOUND`, `data.index`) so the App never assumes partial availability. Pure local signing: free, no quota, no existence check — a GC'd object yields a URL that 404s.",
+      "wire": {
+        "json_rpc_method": "image.resign",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/image/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "POST /api/v1/copilot/app/image/resign"
+      },
+      "signature": "anna.image.resign({r2Keys: string[]}) => Promise<{urls: {r2Key: string, url: string, expiresIn: number}[]}>",
+      "params": [
+        {
+          "name": "r2Keys",
+          "type": "string[]",
+          "required": true,
+          "default": null,
+          "summary": "1–20 keys, each ≤512 chars. Output order = input order.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{urls}",
+        "desc": "`expiresIn` is the presign TTL in seconds (1800)."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "retryable": false
+        },
+        {
+          "name": "APP_INVALID_REQUEST",
+          "code": -32004,
+          "desc": "Empty / >20 / non-string / over-long key list.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_ASSET_NOT_FOUND",
+          "code": -32117,
+          "desc": "A key is not under this user's `exec-images/` or `media/` prefix, or is malformed — `data.index` points at it; nothing is signed. HTTP 404.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "free",
+        "pricing": "—"
+      },
+      "example": "img.onerror = async () => {\n  const { urls } = await anna.image.resign({ r2Keys: [img.dataset.r2Key] });\n  img.src = urls[0].url;\n};",
+      "limitations": [
+        "Objects are deleted 7 days after creation; a re-signed URL for a deleted object returns 404 — treat as expired.",
+        "Only `image_grant.enabled` is required — the method does not distinguish generate / edit."
       ]
     }
   ]

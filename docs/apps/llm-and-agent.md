@@ -4,7 +4,7 @@ description: "Call llm.complete and run a multi-turn agent session from inside y
 section: apps
 slug: llm-and-agent
 order: 16
-updated: 2026-10-14
+updated: 2026-10-23
 estimated_minutes: 8
 category: "App UI"
 ---
@@ -132,13 +132,18 @@ There is no per-app "max tokens" grant to configure. The effective output
 cap is resolved per call:
 
 ```
-effective = min(maxTokens ?? 8192, model output cap, path ceiling)
+effective = min(maxTokens ?? model output cap, model output cap, path ceiling)
 ```
 
 - **`llm.complete`** rides a held HTTP request → path ceiling **8 192**.
 - **`llm.stream`** delivers frames over the push channel → ceiling **65 536**.
-- The resolved cap is echoed in `_meta.maxTokens` (`limitedBy` tells you
-  which constraint won), so clamping is never silent.
+- Omitting `maxTokens` means "the model's own output cap" (host ≥ 1.1.0-beta.200;
+  earlier hosts applied a fixed 8 192 default). On `llm.stream` the worst-case
+  quota precheck follows that larger cap — low-balance users should pass an
+  explicit, smaller `maxTokens` or retry from the 429 `data.requiredCu`.
+- The resolved cap is echoed in `_meta.maxTokens` (`limitedBy` ∈
+  `request | model | transport` tells you which constraint won), so clamping
+  is never silent.
 
 **Long outputs belong on `llm.stream`.** With `@anna-ai/app-runtime`
 ≥ 0.17.0 you don't even need to switch calls: `llm.complete` with
@@ -351,6 +356,58 @@ reorders out-of-order frames within a 256-frame buffer. You should **not**
 need to deal with this directly — the `for await` loop yields frames in
 order and ends after the `done: true` frame.
 
+### 3.2a Per-call output cap & truncation
+
+> Host ≥ 1.1.0-beta.200 / `@anna-ai/app-schema` ≥ 0.30.0 (forum #403).
+
+Two different ceilings are easy to confuse:
+
+- **Session aggregate ceiling** — there is none. The old `quotaCaps.max_tokens_per_call`
+  / `max_runs_per_day` keys are accepted and ignored.
+- **Per-call output cap** — every model call inside a run is sent with a
+  `max_tokens` the platform resolves for you. A long answer that exceeds it is
+  cut mid-sentence by the provider; the agent graph still ends normally.
+
+| Call | Per-call cap | Configurable? | Truncation signal |
+|---|---|---|---|
+| `llm.complete` | `min(maxTokens ?? model cap, model cap, 8 192)` | `maxTokens` | `stopReason === "maxTokens"` |
+| `llm.stream` | `min(maxTokens ?? model cap, model cap, 65 536)` | `maxTokens` | terminal frame `stopReason === "maxTokens"` |
+| `sess.run(...)` | `min(maxTokens ?? model cap, model cap, 65 536)` **then clamped to the model's context-budget reserve** (10 % of context, ≤ 65 536) — e.g. 65 536 on 1M-context models, 20 000 on 200K-context models | `maxTokens` can only **lower** it | `task_complete.truncated` (= `stop_reason === "maxTokens"`) |
+
+The effective value for a run is published **before any token** in the
+`run_meta` frame as `max_output_tokens`, and the terminal `task_complete`
+delta tells you whether the final assistant message hit it:
+
+```js
+let cap = null;
+for await (const frame of sess.run({ content: prompt, maxTokens: 16384 })) {
+  if (frame.event === "run_meta") cap = frame.max_output_tokens;
+  const tc = frame.choices?.[0]?.delta?.task_complete;
+  if (!tc) continue;
+  // tc.status is "completed" even when truncated — the graph finished normally.
+  if (tc.truncated) {
+    // tc.stop_reason === "maxTokens"; tc.token_usage.total_completion_tokens ≈ cap
+    await continueFrom(sess, lastChunkOf(accumulatedText));
+  }
+}
+```
+
+`stop_reason` shares the `llm.complete` `stopReason` set
+(`endTurn | maxTokens | contentFilter | toolUse`). Hosts older than beta.200
+omit all three fields — and between beta.179 and beta.199 every agent call
+was silently capped at 8 192 tokens with no signal at all.
+
+**Long structured outputs** (slide decks, multi-file scaffolds, big HTML):
+
+1. **One artefact per run** — one slide / one file per `sess.run(...)`; keep each
+   well under `run_meta.max_output_tokens`.
+2. **Detect and continue** — on `truncated`, send a follow-up turn in the same
+   session (`"Continue exactly from: <last ~200 chars>"`) and stitch on the app
+   side. Note `history()` stores the truncated text as-is.
+3. **Pure generation → `llm.stream`** — if you don't need tools, `llm.stream`
+   gives you the 65 536 ceiling without the context-budget clamp, an explicit
+   `maxTokens`, and `stopReason`.
+
 ### 3.3 Concurrency
 
 There is no fixed per-window session cap — create as many concurrent
@@ -479,7 +536,7 @@ Branch on `error.name` (the stable string), not the numeric code.
 | `anna.llm.complete(req)` | `POST /api/v1/copilot/app/complete` | `llm: ["complete"]` |
 | `anna.llm.catalog({serviceType?})` | `/runtime/rpc` only (dispatcher `llm.catalog`, no standalone HTTP route) — see [App UI Media](/developers/apps/app-ui-media#discover-before-you-call) | `llm: ["catalog"]` |
 | `anna.agent.session({...})` | `POST /api/v1/copilot/app/sessions` | `agent.session.auto` or `.fixed` |
-| `sess.run({content})` | `POST /api/v1/copilot/app/agent` (SSE) | (covered by session grant) |
+| `sess.run({content, maxTokens?})` | `POST /api/v1/copilot/app/agent` (SSE) | (covered by session grant) |
 | `sess.cancel(runId)` | `POST /api/v1/copilot/app/agent/cancel` | (covered) |
 | `sess.refresh()` | `POST /api/v1/copilot/app/sessions/{uuid}/refresh` | (covered) |
 | `sess.delete()` | `DELETE /api/v1/copilot/app/sessions/{uuid}` | (covered) |

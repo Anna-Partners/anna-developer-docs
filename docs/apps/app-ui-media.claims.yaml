@@ -1,12 +1,23 @@
 # Machine-checkable claims for docs/apps/app-ui-media.md.
 # video.* / audio.speak / audio.transcribe / llm.catalog and the media_job
 # event ship in @anna-ai/app-schema >= 0.26.0 (0.27.0 adds the
-# llm.audio.transcribe capability for the Executa side).
+# llm.audio.transcribe capability for the Executa side; 0.28.0 adds music.*;
+# 0.29.0 adds the image job + resign surface).
 host_api_methods:
   - video.generate
   - video.getJob
   - video.cancelJob
   - video.listJobs
+  - music.generate
+  - music.getJob
+  - music.cancelJob
+  - music.listJobs
+  - image.generateAsync
+  - image.editAsync
+  - image.getJob
+  - image.cancelJob
+  - image.listJobs
+  - image.resign
   - audio.speak
   - audio.transcribe
   - llm.catalog

@@ -4,7 +4,7 @@ description: "Embed the Anna App SDK in your bundle and call host APIs from insi
 section: apps
 slug: app-ui-sdk
 order: 13
-updated: 2026-04-28
+updated: 2026-10-23
 estimated_minutes: 5
 category: "App UI"
 ---
@@ -189,6 +189,35 @@ await anna.window.close({ reason: "user_done" });
 ```
 
 `window.*` is always allowed — no permission required.
+
+## Follow the user's theme and language
+
+The host tells your App which theme and UI language the user picked in Anna
+(SDK ≥ 0.24.0). Both are read-only on the runtime and come with a subscription
+that replays the current value once — so you never race the handshake and the
+first paint is already right:
+
+```js
+const anna = await AnnaAppRuntime.connect();
+
+anna.theme;      // 'light' | 'dark'
+anna.themeMode;  // 'light' | 'dark' | 'system'
+anna.locale;     // 'en' | 'zh-CN' | …
+
+anna.onThemeChange(({ theme }) => { document.documentElement.dataset.theme = theme; });
+anna.onLocaleChange(({ lang }) => setUiLanguage(lang));
+```
+
+Migration in three steps:
+
+1. Apply the theme to `<html data-theme>` from `onThemeChange`.
+2. Style with `:root[data-theme="light"]` / `:root[data-theme="dark"]`.
+3. Keep `@media (prefers-color-scheme: dark) { :root:not([data-theme]) { … } }` as the
+   standalone / older-host fallback — hosts that predate this contract send nothing,
+   and the SDK then falls back to `prefers-color-scheme` / `navigator.language`.
+
+These are one-way host → app broadcasts (`theme.changed`, `locale.changed`), not RPC
+methods: **no `host_api` entry is needed** and adding one has no effect.
 
 ## Errors
 

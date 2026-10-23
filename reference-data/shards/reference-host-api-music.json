@@ -1,0 +1,362 @@
+{
+  "section_id": "host-api-music",
+  "items": [
+    {
+      "slug": "music-generate",
+      "name": "music.generate",
+      "kind": "Host API method · iframe surface",
+      "group": "Music",
+      "since": "Introduced anna-app-runtime v0.23.0 / dispatcher 0.28.0 / schema 0.28.0 (2026-10-19)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.music_generate → quota hold → anna_media_jobs INSERT → fal queue (webhook + poller) → R2",
+      "summary": "Submit an asynchronous text-to-music job (optionally with lyrics, an instrumental flag, a duration, an output format or a reference image). The host resolves the model, validates **every** field against that model's catalogue entry, **pre-charges** the estimated CU, persists an `anna_media_jobs` row (`kind:'music'`), submits to the fal queue and returns a `mjob_…` handle within ~1s. Nothing is downgraded silently: a feature the model cannot deliver is rejected with `MUSIC_FEATURE_UNSUPPORTED` and `data.alternatives`. Progress arrives as `media_job` SSE events; `music.getJob` is the authoritative state. Most apps should use `anna.music.generateAwait()`.",
+      "wire": {
+        "json_rpc_method": "music.generate",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "POST /api/v1/copilot/app/music/generate"
+      },
+      "signature": "anna.music.generate(args: {prompt: string, lyrics?: string, instrumental?: boolean, durationSec?: number, format?: 'mp3'|'wav', referenceImageUrl?: string, options?: Record<string, unknown>, model?: string, clientTag?: string, idempotencyKey?: string}, opts?: {timeoutMs?: number}) => Promise<{jobId: string, kind: 'music', state: 'queued', estimatedCostCU: number, deadlineAt: string, idempotentReplay: boolean}>\n\nanna.music.generateAwait(args, {onProgress?, signal?, timeoutMs?}) => Promise<JobView & {result: {url, refreshUrl(): Promise<string>, …}}>",
+      "params": [
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "Style / mood / instrumentation description. Trimmed; empty or shorter than the model's `capabilities.promptMinChars` (MiniMax: 10) or longer than `promptMaxChars` → `MUSIC_INVALID_REQUEST`. Forwarded verbatim to the provider — provider safety filters apply (`MUSIC_CONTENT_REJECTED`, not billed).",
+          "notes": []
+        },
+        {
+          "name": "lyrics",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Song lyrics. Only accepted when `capabilities.lyrics` is true (`lyricsMode:'field'` — MiniMax, ACE-Step — takes a dedicated field; `'prompt_embedded'` — Lyria, ElevenLabs — folds them into the prompt). Longer than `lyricsMaxChars` → `MUSIC_LYRICS_TOO_LONG`; on a model without lyrics → `MUSIC_FEATURE_UNSUPPORTED {feature:'lyrics'}`. MiniMax requires lyrics for vocal output unless `options.lyricsOptimizer` is on.",
+          "notes": []
+        },
+        {
+          "name": "instrumental",
+          "type": "boolean",
+          "required": false,
+          "default": "model default",
+          "summary": "`true` asks for no vocals. `false` on an instrumental-only model (Stable Audio) → `MUSIC_FEATURE_UNSUPPORTED {feature:'vocals'}`.",
+          "notes": []
+        },
+        {
+          "name": "durationSec",
+          "type": "integer",
+          "required": false,
+          "default": "model default",
+          "summary": "Only for range-length models (`capabilities.duration.type:'range'` — ElevenLabs 3–600, Stable Audio 1–190, ACE-Step 5–240). Fixed-length models (MiniMax, Lyria) decide the length themselves and **reject** this field with `MUSIC_FEATURE_UNSUPPORTED {feature:'duration'}`.",
+          "notes": []
+        },
+        {
+          "name": "format",
+          "type": "string",
+          "required": false,
+          "default": "`capabilities.defaultFormat`",
+          "summary": "Must be in `capabilities.formats` (`mp3` and/or `wav`). Unsupported → `MUSIC_FEATURE_UNSUPPORTED {feature:'format'}`.",
+          "notes": []
+        },
+        {
+          "name": "referenceImageUrl",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "An `https` image that steers mood / cover art (Lyria 3 only — `capabilities.referenceImage`). SSRF guard applies; other models → `MUSIC_FEATURE_UNSUPPORTED {feature:'referenceImage'}`.",
+          "notes": []
+        },
+        {
+          "name": "options",
+          "type": "object",
+          "required": false,
+          "default": null,
+          "summary": "Model-native knobs declared in `capabilities.options` (schema v2: `seed`, `lyricsOptimizer`, …). camelCase keys are mapped to the provider's snake_case. Unlike `audio.speak`, **unknown keys are rejected** (`MUSIC_INVALID_REQUEST`) rather than dropped.",
+          "notes": []
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "required": false,
+          "default": "user preference → catalogue default",
+          "summary": "Optional model hint (`modelName` from `llm.catalog({serviceType:'music_gen'})`). Defaults to the user's `modelPreferences.music_gen`, then the platform default (MiniMax Music 2.6). Unknown / inactive → `MUSIC_MODEL_UNAVAILABLE`.",
+          "notes": []
+        },
+        {
+          "name": "clientTag",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Free-form correlation tag (≤120 chars) echoed in `getJob` / `listJobs` / `media_job`; filter `listJobs` by it.",
+          "notes": []
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "≤64 chars `[A-Za-z0-9_\\-:.]`. A second `generate` with the same key within **24 h** (same user + App) returns the existing job with `idempotentReplay:true` and **no new charge** — use it for retry-safe UI buttons and reload recovery.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobId: string, kind: 'music', state: 'queued', estimatedCostCU: number, deadlineAt: string, idempotentReplay: boolean }",
+        "desc": "`jobId` is the `mjob_…` handle for every other call (`vjob_…` are video jobs). `estimatedCostCU` is the amount **held** from the user's quota; settled or refunded at the terminal state. `deadlineAt` is the server-side wall clock after which the job is failed and refunded. On an idempotent hit the full `JobView` of the earlier job is returned with `idempotentReplay:true`."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.music` does not list this method, or the user's `media_grant.music.enabled` is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "APP_QUOTA_EXCEEDED",
+          "code": -32015,
+          "desc": "CU pre-charge failed — the user's plan quota is exhausted (HTTP 429 on the HTTP surface). There is no per-App concurrency or daily job cap; this is the only gate.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_INVALID_REQUEST",
+          "code": -32162,
+          "desc": "Malformed field (prompt empty / too short / too long, `durationSec` not an integer, bad `referenceImageUrl`, unknown `options` key, `clientTag` > 120 chars, bad `idempotencyKey`). `data.allowed` echoes the resolved model's parameter space.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_FEATURE_UNSUPPORTED",
+          "code": -32165,
+          "desc": "The resolved model cannot deliver a requested feature. `data = {feature:'lyrics'|'vocals'|'duration'|'format'|'referenceImage'|'stems'|'continuation', model, alternatives:[modelName…], allowed}` — pick one of `alternatives` or drop the feature. The host never downgrades silently.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_LYRICS_TOO_LONG",
+          "code": -32166,
+          "desc": "`lyrics` exceeds the model's `lyricsMaxChars`. `data = {maxChars, actualChars}`.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_MODEL_UNAVAILABLE",
+          "code": -32163,
+          "desc": "No active text-to-music model is routable, or the `model` hint does not exist / is not allowed for the user.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_PROVIDER_ERROR",
+          "code": -32161,
+          "desc": "fal submit failed (message carries the first 200 chars of the provider error). The CU hold is refunded immediately.",
+          "retryable": true
+        },
+        {
+          "name": "MUSIC_CONTENT_REJECTED",
+          "code": -32168,
+          "desc": "The provider's safety system rejected the prompt / lyrics / image (`data.stage:'provider'`). Not billed.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "APP_MUSIC_GEN",
+        "model": "pre-charge on submit → settle on `succeeded` → full refund on `failed` / cancelled-while-queued; cancelling a `running` job does not refund; an idempotent replay is never charged twice",
+        "pricing": "catalogue `pricing` by the provider's billing unit: `cuPerSong` (MiniMax, Lyria, Stable Audio), `cuPerSecond` (ACE-Step) or `cuPerMinute` with `roundUp` (ElevenLabs — rounded **up** to whole minutes). Shown in CU via `llm.catalog`."
+      },
+      "example": "const { models } = await anna.llm.catalog({ serviceType: 'music_gen' });\nconst m = models.find(x => x.capabilities.lyrics) ?? models[0];\n\nconst song = await anna.music.generateAwait({\n  prompt: 'melancholic cinematic piano, slow ~70 BPM, rainy night',\n  lyrics: m.capabilities.lyrics ? '[Verse 1]\\n…\\n[Chorus]\\n…' : undefined,\n  model: m.modelName,\n  clientTag: 'scene-3-score',\n  idempotencyKey: 'canvas-node-8f3a-v2',\n}, {\n  onProgress: (p) => status.textContent = `${p.state} · queue ${p.progress?.queuePosition ?? '-'}`,\n  signal: abortController.signal,          // → music.cancelJob\n  timeoutMs: 10 * 60 * 1000,\n});\naudioEl.src = song.result.url;             // ~30 min TTL\naudioEl.onerror = async () => { audioEl.src = await song.result.refreshUrl(); };\ncostEl.textContent = `${song.billedCostCU} CU`;",
+      "limitations": [
+        "Asynchronous only — `generateAwait` is SDK-side sugar (events + adaptive `getJob` polling).",
+        "No silent downgrade: a field the resolved model cannot honour fails with `MUSIC_FEATURE_UNSUPPORTED` — read `llm.catalog({serviceType:'music_gen'})` (`lyrics`, `lyricsMode`, `instrumentalOnly`, `duration`, `formats`, `referenceImage`) and build your form from it.",
+        "`stems`, `continuation` / `continueFrom` and `referenceAudioUrl` are reserved request fields — every current model rejects them with `MUSIC_FEATURE_UNSUPPORTED`.",
+        "Result URLs expire in ~30 min (`expiresIn`). Re-`getJob` to re-sign; for durable storage fetch the bytes and use `upload.negotiate`/`confirm`. Terminal objects are deleted after 7 days.",
+        "Generated music is licensed by the provider; `llm.catalog` entries may carry a `licenseNote` you should surface to the user before commercial use.",
+        "CSP: `media-src` must allow the host's R2 hostname (`https:`) to play `result.url` in an `<audio>` element."
+      ]
+    },
+    {
+      "slug": "music-get-job",
+      "name": "music.getJob",
+      "kind": "Host API method · iframe surface",
+      "group": "Music",
+      "since": "Introduced anna-app-runtime v0.23.0 / dispatcher 0.28.0 / schema 0.28.0 (2026-10-19)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.music_get_job → anna_media_jobs (+ R2 presign)",
+      "summary": "Authoritative job state. Returns the full `JobView`; on `succeeded`, `result.url` is a freshly presigned R2 GET — calling `getJob` again **re-signs** an expired URL. `media_job` events are an accelerator; this is the truth.",
+      "wire": {
+        "json_rpc_method": "music.getJob",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "GET /api/v1/copilot/app/music/jobs/{job_id}"
+      },
+      "signature": "anna.music.getJob({jobId: string}) => Promise<JobView>\n\nJobView = {jobId, kind:'music', state:'queued'|'running'|'succeeded'|'failed'|'cancelled', clientTag?, idempotencyKey?, model, createdAt, updatedAt, deadlineAt, estimatedCostCU, request:{prompt, lyrics?, instrumental?, durationSec?, format?, referenceImageUrl?, options, model}, progress?:{seq, phase, queuePosition?}, result?:{url, mimeType, durationSec, lyrics?, seed?, expiresIn}, billedCostCU?, error?:{code, message}}",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "`mjob_…` handle returned by `generate`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "JobView",
+        "desc": "`result` is present only on `succeeded`: `url` (presigned, `expiresIn` seconds), `mimeType` (`audio/mpeg` | `audio/wav`), `durationSec` (measured from the file), `lyrics` when the provider returns the lyrics it actually sang, `seed` when the model exposes one. `billedCostCU` is the settled amount. On `failed` / `cancelled`, `error.code` is one of the `MUSIC_*` codes."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.music` does not list this method, or the user's `media_grant.music.enabled` is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_JOB_NOT_FOUND",
+          "code": -32164,
+          "desc": "Unknown `jobId`, a `vjob_…` video handle, or a job owned by another user / App.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "free",
+        "pricing": "—"
+      },
+      "example": "const job = await anna.music.getJob({ jobId });\nif (job.state === 'succeeded') audioEl.src = job.result.url;\nelse if (job.state === 'failed') toast(`${job.error.code}: ${job.error.message}`);",
+      "limitations": [
+        "Rows are kept 30 days for billing; after the 7-day object cleanup `getJob` still answers but without `result.url`.",
+        "`result.durationSec` is measured from the delivered file (mp3 / wav header), so it may differ by a second from the requested `durationSec`."
+      ]
+    },
+    {
+      "slug": "music-cancel-job",
+      "name": "music.cancelJob",
+      "kind": "Host API method · iframe surface",
+      "group": "Music",
+      "since": "Introduced anna-app-runtime v0.23.0 / dispatcher 0.28.0 / schema 0.28.0 (2026-10-19)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.music_cancel_job → fal queue cancel → quota refund",
+      "summary": "Cancel a job. `queued` jobs are cancelled with a **full refund**; `running` jobs attempt a provider cancel — if the provider is already rendering the job stays `running` and nothing is refunded. Terminal jobs → `MUSIC_JOB_NOT_CANCELLABLE`.",
+      "wire": {
+        "json_rpc_method": "music.cancelJob",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "POST /api/v1/copilot/app/music/jobs/{job_id}/cancel"
+      },
+      "signature": "anna.music.cancelJob({jobId: string}) => Promise<{jobId: string, state: 'cancelled', refunded: true} | {jobId: string, state: 'running', cancelPending: false}>",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "summary": "`mjob_…` handle.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobId, state: 'cancelled', refunded: true } | { jobId, state: 'running', cancelPending: false }",
+        "desc": "`{state:'cancelled', refunded:true}` when the hold was released; `{state:'running', cancelPending:false}` when the provider refused to cancel — the job will still reach a terminal state and be billed."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.music` does not list this method, or the user's `media_grant.music.enabled` is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_JOB_NOT_FOUND",
+          "code": -32164,
+          "desc": "Unknown `jobId`, a `vjob_…` video handle, or a job owned by another user / App.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_JOB_NOT_CANCELLABLE",
+          "code": -32167,
+          "desc": "The job is already `succeeded` / `failed` / `cancelled`.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "APP_MUSIC_GEN",
+        "model": "full refund of the hold when cancelled while `queued`; no refund once the provider is rendering",
+        "pricing": "—"
+      },
+      "example": "abortController.signal.addEventListener('abort', () => anna.music.cancelJob({ jobId }));",
+      "limitations": [
+        "Provider cancellation is best-effort; treat `cancelPending:false` on a `running` job as 'will complete and be billed'."
+      ]
+    },
+    {
+      "slug": "music-list-jobs",
+      "name": "music.listJobs",
+      "kind": "Host API method · iframe surface",
+      "group": "Music",
+      "since": "Introduced anna-app-runtime v0.23.0 / dispatcher 0.28.0 / schema 0.28.0 (2026-10-19)",
+      "direction": "Bundle (iframe) → Host RPC → app_media_facade.music_list_jobs → anna_media_jobs (kind:'music')",
+      "summary": "Cursor-paginated job history for this App (music jobs only — video jobs live under `video.listJobs`). Use it for reload recovery and to correlate jobs with your own entities via `clientTag`.",
+      "wire": {
+        "json_rpc_method": "music.listJobs",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/...` accept an `app_session_token`.",
+        "streaming": false,
+        "http_equivalent": "GET /api/v1/copilot/app/music/jobs?state=&client_tag=&limit=&cursor="
+      },
+      "signature": "anna.music.listJobs({state?: string, clientTag?: string, limit?: number, cursor?: string}) => Promise<{jobs: JobView[], nextCursor?: string}>",
+      "params": [
+        {
+          "name": "state",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Filter by job state (`queued` | `running` | `succeeded` | `failed` | `cancelled`).",
+          "notes": []
+        },
+        {
+          "name": "clientTag",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "Exact match on the tag set at `generate`.",
+          "notes": []
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "20",
+          "summary": "Page size, clamped to 1…50 (default 20).",
+          "notes": []
+        },
+        {
+          "name": "cursor",
+          "type": "string",
+          "required": false,
+          "default": null,
+          "summary": "`nextCursor` from the previous page.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobs: JobView[], nextCursor?: string }",
+        "desc": "Newest first. Each entry is the same view as `getJob` (URLs re-signed)."
+      },
+      "errors": [
+        {
+          "name": "APP_NOT_GRANTED",
+          "code": -32001,
+          "desc": "manifest `ui.host_api.music` does not list this method, or the user's `media_grant.music.enabled` is off for this App.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_INVALID_REQUEST",
+          "code": -32162,
+          "desc": "Malformed `cursor`.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "free",
+        "pricing": "—"
+      },
+      "example": "const { jobs } = await anna.music.listJobs({ state: 'running' });\nfor (const j of jobs) resumeTracking(j.jobId, j.clientTag);",
+      "limitations": [
+        "Scoped to the calling App and user — jobs created by other Apps (or via the Executa reverse RPC) are not listed.",
+        "Out-of-range `limit` is clamped, not rejected."
+      ]
+    }
+  ]
+}

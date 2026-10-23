@@ -8,7 +8,7 @@
       "group": "Video · LLM video generation",
       "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ media reverse-RPC release (2026-10-08)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/media/video/generate` → executa_media_gate → app_media_facade (origin=executa) → fal queue → R2",
-      "summary": "Submit an async text-to-video / image-to-video job from a plugin. Same parameter space, state machine, pre-charge/refund billing and 30-min URL rule as the App Host API `video.generate`; gated by `host_capabilities: [\"llm.video\"]`, the user's `media_grant.video`, the `media_token` claim `allow_video` and a per-invoke job counter (`max_video_jobs`).",
+      "summary": "Submit an async text-to-video / image-to-video job from a plugin. Same parameter space, state machine, pre-charge/refund billing and 30-min URL rule as the App Host API `video.generate`; gated by `host_capabilities: [\"llm.video\"]`, the user's `media_grant.video` and the `media_token` claim `allow_video`. No per-invoke job cap: each job is pre-charged in CU.",
       "wire": {
         "json_rpc_method": "video/generate",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -60,7 +60,7 @@
         {
           "name": "VIDEO_CONCURRENCY_EXCEEDED",
           "code": -32127,
-          "desc": "Per-invoke Redis counter exhausted (`media_token` claim `max_video_jobs`, default **2**) — too many video jobs inside one tool invocation. Reservation is rolled back.",
+          "desc": "Reserved, not raised. There is no per-invoke or platform-wide video job cap (the former `max_video_jobs` counter was removed); the user's CU pool is the only gate.",
           "retryable": false
         },
         {
@@ -90,12 +90,12 @@
       ],
       "billing": {
         "request_type": "EXECUTA_VIDEO_GEN",
-        "model": "pre-charge → settle / refund (same as App surface); per-invoke cap `max_video_jobs` (default 2) tracked in Redis `media:invoke:{tool_invoke_id}` for 30 min → `VIDEO_CONCURRENCY_EXCEEDED`"
+        "model": "pre-charge → settle / refund (same as App surface); no per-invoke job cap — CU pre-charge on each submit is the only gate"
       },
       "example": "# python executa_sdk\nresult = host.video.generate_await(\n    prompt=\"Slow dolly-in on a rain-soaked neon street\",\n    duration_sec=5, resolution=\"768p\", aspect_ratio=\"16:9\",\n    metadata={\"executa_invoke_id\": ctx.invoke_id},\n)\nurl = result[\"result\"][\"url\"]        # ~30 min TTL — host/uploadFile for durable storage",
       "limitations": [
         "No push events on the plugin side — poll `video/get_job`.",
-        "Result URL ~30 min; re-`get_job` re-signs. Per-invoke job cap (`VIDEO_CONCURRENCY_EXCEEDED`) is separate from (and in addition to) the user's CU quota."
+        "Result URL ~30 min; re-`get_job` re-signs. No per-invoke job cap — only the user's CU quota applies."
       ]
     },
     {
@@ -386,6 +386,220 @@
         "Non-streaming only — stdio has no audio-stream semantics; realtime ASR is the App-side `anna.audio.session` design.",
         "Inline cap 10 MB (~5 min of 16 kHz mono wav); use `audioUrl` or chunk for longer recordings.",
         "Duration is exact only for `wav`; the 600 s cap is enforced exactly for `wav` and by byte caps otherwise."
+      ]
+    },
+    {
+      "slug": "music-generate",
+      "name": "music/generate",
+      "kind": "Reverse RPC method · Music",
+      "group": "Music · LLM music generation",
+      "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ music reverse-RPC release / nexus dispatcher 0.28.0 (2026-10-19)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/media/music/generate` → executa_media_gate → app_media_facade.music_generate (origin=executa) → fal queue → R2",
+      "summary": "Submit an async text-to-music job (lyrics / instrumental / duration / format / reference image / model-native `options`) from a plugin. Same parameter space, no-silent-downgrade validation, idempotency, state machine, pre-charge/refund billing and 30-min URL rule as the App Host API `music.generate`; gated by `host_capabilities: [\"llm.music\"]`, the user's `media_grant.music` and the `media_token` claim `allow_music`. No per-invoke job cap: each job is pre-charged in CU.",
+      "wire": {
+        "json_rpc_method": "music/generate",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/media/music/generate",
+        "default_timeout_s": 120,
+        "context": "Agent injects `params.context = {invoke_id, media_token}` automatically — plugins never fill it."
+      },
+      "signature": "python: host.music_generate(*, prompt: str, lyrics: str | None = None, instrumental: bool | None = None, duration_sec: int | None = None, format: str | None = None, reference_image_url: str | None = None, options: dict | None = None, model: str | None = None, client_tag: str | None = None, idempotency_key: str | None = None) -> dict  ·  host.music_generate_await(..., poll_interval_s=5, await_timeout_s=540) -> dict\nnode: media.musicGenerate({...}) / musicGenerateAwait(...)  ·  go: media.Client.MusicGenerate / MusicGenerateAwait",
+      "params": [
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": true,
+          "summary": "Style / mood / instrumentation description (model `promptMinChars` … `promptMaxChars`).",
+          "notes": []
+        },
+        {
+          "name": "lyrics",
+          "type": "string",
+          "required": false,
+          "summary": "Only on models with `capabilities.lyrics`; `MUSIC_LYRICS_TOO_LONG` over `lyricsMaxChars`.",
+          "notes": []
+        },
+        {
+          "name": "instrumental / durationSec / format / referenceImageUrl / options / model / clientTag / idempotencyKey",
+          "type": "various",
+          "required": false,
+          "summary": "Identical semantics and catalogue validation to the App surface (see `music.generate`): a feature the resolved model cannot deliver fails with `MUSIC_FEATURE_UNSUPPORTED` + `data.alternatives`; `idempotencyKey` replays the same job for 24h without a second charge.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobId: 'mjob_…', kind: 'music', state: 'queued', estimatedCostCU, deadlineAt, idempotentReplay }",
+        "desc": "Poll with `music/get_job` (plugins have no event channel) — the SDK `music_generate_await` helper does adaptive polling for you. On an idempotent hit the full job view is returned with `idempotentReplay:true`."
+      },
+      "errors": [
+        {
+          "name": "MUSIC_NOT_GRANTED",
+          "code": -32160,
+          "desc": "manifest `host_capabilities` lacks `llm.music`, `media_grant.music.enabled` is off, token claim `allow_music` false, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_QUOTA_EXCEEDED",
+          "code": -32169,
+          "desc": "CU pre-charge failed (user plan quota). The only gate — there is no per-invoke job cap.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_INVALID_REQUEST",
+          "code": -32162,
+          "desc": "Malformed field or unknown `options` key; `data.allowed` echoes the model's parameter space.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_FEATURE_UNSUPPORTED",
+          "code": -32165,
+          "desc": "Resolved model cannot deliver a requested feature — `data = {feature, model, alternatives}`. Never downgraded silently.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_LYRICS_TOO_LONG",
+          "code": -32166,
+          "desc": "`lyrics` over `lyricsMaxChars` — `data = {maxChars, actualChars}`.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_PROVIDER_ERROR",
+          "code": -32161,
+          "desc": "fal submit failed; hold refunded.",
+          "retryable": true
+        },
+        {
+          "name": "MUSIC_MODEL_UNAVAILABLE",
+          "code": -32163,
+          "desc": "No routable text-to-music model / bad hint.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_CONTENT_REJECTED",
+          "code": -32168,
+          "desc": "Provider safety system rejected prompt / lyrics / image; not billed.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "EXECUTA_MUSIC_GEN",
+        "model": "pre-charge → settle / refund (same as App surface); per song / per second / per started minute by the catalogue's billing unit; no per-invoke job cap — CU pre-charge on each submit is the only gate"
+      },
+      "example": "# python executa_sdk\nview = await media.music_generate_await(\n    prompt=\"melancholic cinematic piano, slow ~70 BPM, rainy night\",\n    lyrics=\"[Verse 1]\\n…\\n[Chorus]\\n…\",\n    client_tag=f\"score-{ctx.invoke_id}\",\n    idempotency_key=f\"score-{scene_id}-v2\",\n)\nurl = view[\"result\"][\"url\"]        # ~30 min TTL — host/uploadFile for durable storage",
+      "limitations": [
+        "No push events on the plugin side — poll `music/get_job`.",
+        "Read the catalogue first (`llm.catalog`-equivalent data is in the App Hub / Playground Compare tab): fixed-length models reject `durationSec`, instrumental-only models reject lyrics, and so on — the host raises `MUSIC_FEATURE_UNSUPPORTED` instead of adapting.",
+        "Result URL ~30 min; re-`get_job` re-signs. No per-invoke job cap — only the user's CU quota applies."
+      ]
+    },
+    {
+      "slug": "music-get-job",
+      "name": "music/get_job",
+      "kind": "Reverse RPC method · Music",
+      "group": "Music · LLM music generation",
+      "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ music reverse-RPC release / nexus dispatcher 0.28.0 (2026-10-19)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/media/music/get_job`",
+      "summary": "Authoritative job view (same `JobView` shape as the App surface, `kind:'music'`). Re-signs an expired `result.url`.",
+      "wire": {
+        "json_rpc_method": "music/get_job",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/media/music/get_job",
+        "default_timeout_s": 60,
+        "context": "Agent injects `params.context = {invoke_id, media_token}` automatically — plugins never fill it."
+      },
+      "signature": "host.music_get_job(job_id: str) -> dict  ·  node: media.musicGetJob(jobId)  ·  go: media.Client.MusicGetJob",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "summary": "`mjob_…` handle.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "JobView",
+        "desc": "See App `music.getJob` — `result:{url, mimeType, durationSec, lyrics?, seed?, expiresIn}` on `succeeded`."
+      },
+      "errors": [
+        {
+          "name": "MUSIC_NOT_GRANTED",
+          "code": -32160,
+          "desc": "manifest `host_capabilities` lacks `llm.music`, `media_grant.music.enabled` is off, token claim `allow_music` false, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_JOB_NOT_FOUND",
+          "code": -32164,
+          "desc": "Unknown `jobId` (or not owned by this user).",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "free"
+      },
+      "example": "view = await media.music_get_job(job_id)\nif view[\"state\"] == \"succeeded\":\n    url = view[\"result\"][\"url\"]",
+      "limitations": [
+        "Rows kept 30 days; objects 7 days after the terminal state."
+      ]
+    },
+    {
+      "slug": "music-cancel-job",
+      "name": "music/cancel_job",
+      "kind": "Reverse RPC method · Music",
+      "group": "Music · LLM music generation",
+      "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ music reverse-RPC release / nexus dispatcher 0.28.0 (2026-10-19)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/media/music/cancel_job`",
+      "summary": "Cancel a queued job with a full refund; a running job attempts a provider cancel and is not refunded if the provider is already rendering.",
+      "wire": {
+        "json_rpc_method": "music/cancel_job",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/media/music/cancel_job",
+        "default_timeout_s": 60,
+        "context": "Agent injects `params.context = {invoke_id, media_token}` automatically — plugins never fill it."
+      },
+      "signature": "host.music_cancel_job(job_id: str) -> dict  ·  node: media.musicCancelJob(jobId)  ·  go: media.Client.MusicCancelJob",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "summary": "`mjob_…` handle.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{ jobId, state: 'cancelled', refunded: true } | { jobId, state: 'running', cancelPending: false }",
+        "desc": "Same semantics as App `music.cancelJob`."
+      },
+      "errors": [
+        {
+          "name": "MUSIC_NOT_GRANTED",
+          "code": -32160,
+          "desc": "manifest `host_capabilities` lacks `llm.music`, `media_grant.music.enabled` is off, token claim `allow_music` false, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_JOB_NOT_FOUND",
+          "code": -32164,
+          "desc": "Unknown `jobId` (or not owned by this user).",
+          "retryable": false
+        },
+        {
+          "name": "MUSIC_JOB_NOT_CANCELLABLE",
+          "code": -32167,
+          "desc": "Job already terminal.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "EXECUTA_MUSIC_GEN",
+        "model": "full refund when cancelled while queued; none once rendering"
+      },
+      "example": "await media.music_cancel_job(job_id)",
+      "limitations": [
+        "Provider cancellation is best-effort."
       ]
     }
   ]

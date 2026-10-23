@@ -4,7 +4,7 @@ description: "Window lifecycle, geometry persistence, multi-tab/device sync, doc
 section: apps
 slug: app-ui-windows
 order: 12
-updated: 2026-04-28
+updated: 2026-10-23
 estimated_minutes: 5
 category: "App UI"
 ---
@@ -78,6 +78,8 @@ Every PATCH and DELETE re-broadcasts a `data_model/AnnaAppEvent` over SSE so oth
 
 - Drag/resize uses an in-memory transform for 60 fps; on `pointerup` the Window Manager `_schedulePatch`-es a `PATCH /windows/{wid} { geometry }` after a 250 ms debounce.
 - The backend clamps `w`/`h` to the view's `min_size` and `max_size` (from the manifest).
+- **Viewport adaptation (render-layer).** On mount, on incoming geometry events, and on browser resize, the dashboard WM constrains the rendered geometry to the current viewport: height never exceeds the viewport (a `min_size.h` above it is force-shrunk — see the [size baseline](/developers/apps/app-ui-manifest#size-baseline-small-screens)); width honours `min_size.w` even when wider than the screen; the title bar always stays reachable. These corrections are **not** written back to the server — a big-screen layout survives a small-screen session untouched until the user drags, resizes, or fits the window there.
+- Windows resize from all four edges and corners. The title bar has a *Fit to screen* button and double-click toggles maximize ⇄ restore; both persist like any user gesture.
 - `monitor_w` / `monitor_h` are stored so a second device with a different screen can re-flow proportionally.
 
 ## Single-instance views

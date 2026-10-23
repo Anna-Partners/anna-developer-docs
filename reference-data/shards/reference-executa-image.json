@@ -431,6 +431,365 @@
         "**Provider capability matrix is heterogeneous** — handle `EDIT_NOT_SUPPORTED` / `MASK_UNSUPPORTED` / `N_UNSUPPORTED` distinctly. Falling back from a masked edit to a full-image edit is usually safe; from any edit to a fresh `generate` requires re-prompting.",
         "**Inherits every limitation of `image/generate`** — URL TTL, no streaming, timeout semantics, manifest declaration."
       ]
+    },
+    {
+      "slug": "image-generate-async",
+      "name": "image/generate_async",
+      "kind": "Reverse RPC method · Image",
+      "group": "Image · async jobs",
+      "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/image/generate_async`",
+      "summary": "Submit an async text-to-image / reference-image job (same body as `image/generate` + `clientTag?` / `idempotencyKey?`; snake_case `job_id` / `client_tag` also accepted) → `{jobId:'ijob_…', kind:'image', state:'queued', estimatedCostCU, deadlineAt, idempotentReplay}`. Same grant (`image_grant`), same `image_token`, same `llm.image` capability as the sync call. Per-invoke `max_images` is **reserved by `n` at submit** and not released if the job later fails (guardrail, not billing — the CU hold is refunded). Use the SDK wrapper `generate_await` or return `jobId` from the invoke and resume with `image/get_job` for renders longer than the invoke budget.",
+      "wire": {
+        "json_rpc_method": "image/generate_async",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/image/generate_async",
+        "default_timeout_s": 60,
+        "context": "Agent injects `params.context = {invoke_id, image_token}` automatically — plugins never fill it."
+      },
+      "signature": "py: image.generate_async(prompt, *, n=1, size=None, aspect_ratio=None, model=None, params=None, fit='nearest', reference_image_urls=None, client_tag=None, idempotency_key=None) -> dict  ·  image.generate_await(prompt, *, poll_interval_s=5.0, await_timeout_s=540.0, on_progress=None, **kw)\nnode: image.imageGenerateAsync({prompt, n, size, aspectRatio, model, params, fit, referenceImageUrls, clientTag, idempotencyKey})  ·  image.imageGenerateAwait({..., pollIntervalMs, awaitTimeoutMs, onProgress})\ngo: image.Client.GenerateAsync(JobGenerateRequest, timeout)  ·  GenerateAwait(req, pollInterval, awaitTimeout, onProgress)",
+      "params": [
+        {
+          "name": "prompt / n / size / aspect_ratio / model / params / fit / reference_image_urls",
+          "type": "see image/generate",
+          "required": "prompt",
+          "summary": "Identical validation to the sync call (host-side `image_api_family` fal-only models; `IMAGE_MODEL_UNAVAILABLE` / `IMAGE_SIZE_UNSUPPORTED` / `IMAGE_OPTION_INVALID` pass through). `model` defaults to the token's first `model_hints` entry.",
+          "notes": []
+        },
+        {
+          "name": "clientTag",
+          "type": "string",
+          "required": false,
+          "summary": "≤120 chars, echoed in the job view.",
+          "notes": []
+        },
+        {
+          "name": "idempotencyKey",
+          "type": "string",
+          "required": false,
+          "summary": "`^[A-Za-z0-9_\\-:.]{1,64}$`; recommended `f\"{tool_invoke_id}:{attempt}\"`. 24h replay returns the existing job, no second charge (and releases the per-invoke reservation).",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "ImageJobCreated",
+        "desc": "As the App surface `image.generateAsync`."
+      },
+      "errors": [
+        {
+          "name": "IMAGE_NOT_GRANTED",
+          "code": -32101,
+          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "Not enough CU for the up-front hold.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Bad body / binding mismatch / `IMAGE_JOBS_APP_ENABLED` off.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_MAX_IMAGES_EXCEEDED",
+          "code": -32106,
+          "desc": "Per-invoke `max_images` would be exceeded — reserved by `n` at submit time (`data.{images, maxImages}`).",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_PER_CALL_EXCEEDED",
+          "code": -32107,
+          "desc": "`n` > token `max_per_call_generate`.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "EXECUTA_IMAGE_GEN",
+        "model": "pre-charge per-image price × n → settle on actual count → refund on failure"
+      },
+      "example": "job = await image.generate_await(\n    \"art-deco poster of Mars\", n=2, model=\"fal-ai/nano-banana-2\",\n    params={\"resolution\": \"4K\"}, idempotency_key=f\"{ctx.invoke_id}:1\",\n    await_timeout_s=min(540, ctx.remaining_s() - 10),\n)\nurls = [im[\"url\"] for im in job[\"result\"][\"images\"]]",
+      "limitations": [
+        "Keep `await_timeout_s` inside the invoke budget; `ImageJobTimeout` carries `job_id` for a later `get_job`.",
+        "Rows kept 30 days; objects 7 days."
+      ]
+    },
+    {
+      "slug": "image-edit-async",
+      "name": "image/edit_async",
+      "kind": "Reverse RPC method · Image",
+      "group": "Image · async jobs",
+      "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/image/edit_async`",
+      "summary": "Submit an async edit job (`image_url`, optional `mask_url`, same body as `image/edit` + `clientTag?` / `idempotencyKey?`). Requires token `allow_edit` and manifest `llm.image.edit` (or legacy `llm.image`); `mask_url` on a model without mask support → `-32312`. Inputs are re-hosted by the platform before submission.",
+      "wire": {
+        "json_rpc_method": "image/edit_async",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/image/edit_async",
+        "default_timeout_s": 60,
+        "context": "Agent injects `params.context = {invoke_id, image_token}` automatically — plugins never fill it."
+      },
+      "signature": "py: image.edit_async(image_url, prompt, *, n=1, model=None, params=None, mask_url=None, client_tag=None, idempotency_key=None) -> dict  ·  image.edit_await(image_url, prompt, **kw)\nnode: image.imageEditAsync({imageUrl, prompt, maskUrl, …})  ·  imageEditAwait(…)\ngo: image.Client.EditAsync(JobEditRequest, timeout)  ·  EditAwait(…)",
+      "params": [
+        {
+          "name": "image_url",
+          "type": "string",
+          "required": true,
+          "summary": "Base image (https).",
+          "notes": []
+        },
+        {
+          "name": "mask_url",
+          "type": "string",
+          "required": false,
+          "summary": "Mask PNG; only on mask-capable models (GPT Image 2).",
+          "notes": []
+        },
+        {
+          "name": "prompt / n / model / params / clientTag / idempotencyKey",
+          "type": "see image/generate_async",
+          "required": "prompt",
+          "summary": "`n` ≤ token `max_per_call_edit`.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "ImageJobCreated",
+        "desc": "As `image/generate_async`."
+      },
+      "errors": [
+        {
+          "name": "IMAGE_EDIT_NOT_ALLOWED",
+          "code": -32311,
+          "desc": "Token `allow_edit` false.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_NOT_GRANTED",
+          "code": -32101,
+          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_QUOTA_EXCEEDED",
+          "code": -32102,
+          "desc": "Not enough CU for the up-front hold.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Bad body / binding mismatch / `IMAGE_JOBS_APP_ENABLED` off.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_MAX_IMAGES_EXCEEDED",
+          "code": -32106,
+          "desc": "Per-invoke `max_images` would be exceeded — reserved by `n` at submit time (`data.{images, maxImages}`).",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_EDIT_MASK_UNSUPPORTED",
+          "code": -32312,
+          "desc": "Model cannot mask.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_EDIT_N_UNSUPPORTED",
+          "code": -32313,
+          "desc": "`n` > token `max_per_call_edit`.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": "EXECUTA_IMAGE_EDIT",
+        "model": "pre-charge → settle → refund"
+      },
+      "example": "job = await image.edit_await(base_url, \"replace the sky with aurora\", mask_url=mask, model=\"openai/gpt-image-2\")",
+      "limitations": [
+        "As `image/generate_async`."
+      ]
+    },
+    {
+      "slug": "image-get-job",
+      "name": "image/get_job",
+      "kind": "Reverse RPC method · Image",
+      "group": "Image · async jobs",
+      "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/image/get_job`",
+      "summary": "Authoritative job view (same `ImageJobView` as the App surface). Re-signs every `result.images[].url` on each call. Only jobs submitted by **this Executa** are visible — App-side `ijob_…` (and other Executas') → `IMAGE_JOB_NOT_FOUND`.",
+      "wire": {
+        "json_rpc_method": "image/get_job",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/image/get_job",
+        "default_timeout_s": 60,
+        "context": "Agent injects `params.context = {invoke_id, image_token}` automatically — plugins never fill it."
+      },
+      "signature": "py: image.get_job(job_id) -> dict  ·  node: image.imageGetJob(jobId)  ·  go: image.Client.GetJob(jobID, timeout)",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "summary": "`ijob_…` handle (`job_id` also accepted).",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "ImageJobView",
+        "desc": "See App `image.getJob` — `result.images[]: {url, r2Key, mimeType, width, height, expiresIn}` on `succeeded`; terminal `error.code` ∈ `IMAGE_CONTENT_REJECTED` | `IMAGE_PROVIDER_ERROR` | `IMAGE_JOB_CANCELLED` | `IMAGE_JOB_EXPIRED`."
+      },
+      "errors": [
+        {
+          "name": "IMAGE_NOT_GRANTED",
+          "code": -32101,
+          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Bad body / binding mismatch / `IMAGE_JOBS_APP_ENABLED` off.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_JOB_NOT_FOUND",
+          "code": -32113,
+          "desc": "Unknown `jobId`, or a job not submitted by this Executa (App-side `ijob_…` are invisible).",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "free"
+      },
+      "example": "view = await image.get_job(job_id)\nif view[\"state\"] == \"succeeded\":\n    urls = [im[\"url\"] for im in view[\"result\"][\"images\"]]",
+      "limitations": [
+        "Rows kept 30 days; objects 7 days (`url` becomes `null`)."
+      ]
+    },
+    {
+      "slug": "image-cancel-job",
+      "name": "image/cancel_job",
+      "kind": "Reverse RPC method · Image",
+      "group": "Image · async jobs",
+      "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/image/cancel_job`",
+      "summary": "Cancel: `queued` = guaranteed + full refund (`{state:'cancelled', refunded:true}`); `running` = best-effort — provider may refuse (`{state:'running', cancelPending:false}`), the job then runs to terminal and is billed. The per-invoke `max_images` reservation is **not** released.",
+      "wire": {
+        "json_rpc_method": "image/cancel_job",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/image/cancel_job",
+        "default_timeout_s": 60,
+        "context": "Agent injects `params.context = {invoke_id, image_token}` automatically — plugins never fill it."
+      },
+      "signature": "py: image.cancel_job(job_id) -> dict  ·  node: image.imageCancelJob(jobId)  ·  go: image.Client.CancelJob(jobID, timeout)",
+      "params": [
+        {
+          "name": "jobId",
+          "type": "string",
+          "required": true,
+          "summary": "`ijob_…` handle.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "object",
+        "desc": "See summary."
+      },
+      "errors": [
+        {
+          "name": "IMAGE_NOT_GRANTED",
+          "code": -32101,
+          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Bad body / binding mismatch / `IMAGE_JOBS_APP_ENABLED` off.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_JOB_NOT_FOUND",
+          "code": -32113,
+          "desc": "Unknown `jobId`, or a job not submitted by this Executa (App-side `ijob_…` are invisible).",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_JOB_NOT_CANCELLABLE",
+          "code": -32114,
+          "desc": "Job already terminal.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "refund of the hold when accepted"
+      },
+      "example": "await image.cancel_job(job_id)",
+      "limitations": []
+    },
+    {
+      "slug": "image-resign",
+      "name": "image/resign",
+      "kind": "Reverse RPC method · Image",
+      "group": "Image · re-sign",
+      "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
+      "direction": "Plugin → Agent → Nexus `POST /copilot/image/resign` (local presign, no provider call)",
+      "summary": "Re-sign already-paid artifacts by storage key (`r2_key` from a sync result or `r2Key` from a job view) for up to 7 days — `{r2Keys:[…]}` (1–20) → `{urls:[{r2Key, url, expiresIn}]}` in input order. Any key not owned by the invoking user fails the whole call (`IMAGE_ASSET_NOT_FOUND`, `data.index`). Free; needs `llm.image` or `llm.image.edit` + `image_grant.enabled`.",
+      "wire": {
+        "json_rpc_method": "image/resign",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
+        "nexus_endpoint": "POST /api/v1/copilot/image/resign",
+        "default_timeout_s": 60,
+        "context": "Agent injects `params.context = {invoke_id, image_token}` automatically — plugins never fill it."
+      },
+      "signature": "py: image.resign(r2_keys: list[str]) -> dict  ·  node: image.imageResign(r2Keys)  ·  go: image.Client.Resign(r2Keys, timeout)",
+      "params": [
+        {
+          "name": "r2Keys",
+          "type": "string[]",
+          "required": true,
+          "summary": "1–20 keys.",
+          "notes": []
+        }
+      ],
+      "returns": {
+        "type": "{urls}",
+        "desc": "`expiresIn` = 1800 s."
+      },
+      "errors": [
+        {
+          "name": "IMAGE_NOT_GRANTED",
+          "code": -32101,
+          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_INVALID_REQUEST",
+          "code": -32104,
+          "desc": "Bad body / binding mismatch / `IMAGE_JOBS_APP_ENABLED` off.",
+          "retryable": false
+        },
+        {
+          "name": "IMAGE_ASSET_NOT_FOUND",
+          "code": -32117,
+          "desc": "A key is not under this user's prefixes (`data.index`); nothing signed.",
+          "retryable": false
+        }
+      ],
+      "billing": {
+        "request_type": null,
+        "model": "free"
+      },
+      "example": "fresh = await image.resign([im[\"r2_key\"] for im in earlier[\"images\"]])",
+      "limitations": [
+        "No existence check: a deleted (7-day GC) object yields a URL that 404s."
+      ]
     }
   ]
 }

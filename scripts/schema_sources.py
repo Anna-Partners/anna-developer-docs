@@ -8,8 +8,7 @@ and reads the same truth sets from it. One loader, one resolution order:
     --schema-dir → $ANNA_APP_SCHEMA_DIR → ./node_modules/@anna-ai/app-schema
 
 Capabilities/permissions come from ``acl/capabilities.json`` inside the
-package (bundle ≥ 0.20); until that ships, the byte-identical snapshot in
-``scripts/data/acl-capabilities-snapshot.json`` is the fallback.
+package (shipped since bundle 0.20); a bundle without it is rejected.
 """
 from __future__ import annotations
 
@@ -19,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-_ACL_SNAPSHOT = Path(__file__).resolve().parent / "data" / "acl-capabilities-snapshot.json"
 
 
 def resolve_schema_dir(arg: str | None = None) -> Path:
@@ -74,7 +72,10 @@ def load_truth(schema_dir: Path) -> Truth:
 
     acl_path = schema_dir / "acl" / "capabilities.json"
     if not acl_path.is_file():
-        acl_path = _ACL_SNAPSHOT
+        raise SystemExit(
+            f"{acl_path} missing — @anna-ai/app-schema must be >= 0.20.0 "
+            "(acl/capabilities.json ships inside the bundle)"
+        )
     acl = _load_json(acl_path)
 
     return Truth(

@@ -4,7 +4,7 @@ description: "The bugs that show up most often when authors build Executa plugin
 section: tools
 slug: executa-pitfalls
 order: 14
-updated: 2026-10-12
+updated: 2026-10-26
 estimated_minutes: 8
 ---
 
@@ -493,6 +493,58 @@ stt = await media.transcribe(audio_url=public_https_url)
   enable the **transcribe** toggle in the media permission dialog.
 
 See [Media](/developers/tools/executa-media#audiotranscribe).
+
+---
+
+## 15 · Sampling — empty text, `stopReason: "maxTokens"` and 40–50 s latency on a thinking model
+
+**Symptom**
+
+- `sampling/createMessage` with a modest `maxTokens` (say 700) returns
+  `content.text: ""` (or a few characters) and `stopReason: "maxTokens"`, even
+  though the prompt asked for a two-line summary.
+- `usage.outputTokens` is right at the cap and `usage.reasoningTokens` (when
+  present) is almost the same number.
+- The call took 40–50 s. The second call is just as slow, so it's not a cold
+  start.
+
+**Cause**
+
+The user's preferred model is a **thinking model** (Qwen3 / DeepSeek-R1 /
+GPT-5.x / Claude extended thinking …) running with reasoning enabled. On
+DashScope / Qwen reasoning tokens count **inside `maxTokens`**, so the model
+spends the whole budget thinking and the provider truncates before a single
+visible token is emitted. You are billed for the reasoning tokens you never
+see, and the latency is the model filling its thinking budget — not process
+start-up (forum #454).
+
+Since `@anna-ai/app-schema` 0.32.0 the platform runs sampling (and
+`llm.complete` / `llm.stream`) with thinking **off by default** whenever the
+model can disable it; you only hit this when you opt in with `thinking: true`
+/ `{effort}` on a small budget, when the model's reasoning is **mandatory**
+(`_meta.thinking.reason: "mandatory"`), or on an older host.
+
+**Fix**
+
+Detect it programmatically and retry without thinking or with a larger cap:
+
+```python
+res = await sampling.create_message(messages=msgs, max_tokens=700, thinking=False)
+usage = res.get("usage", {})
+if res.get("stopReason") == "maxTokens" and usage.get("outputTokens", 0) - usage.get("reasoningTokens", 0) <= 0:
+    # reasoning consumed the whole budget — mandatory-reasoning model or old host
+    res = await sampling.create_message(messages=msgs, max_tokens=4096, thinking=False)
+```
+
+- Leave `thinking` unset (or `False`) for extraction / summarisation / JSON
+  tools; opt in with `{"effort": "low"}` only where reasoning helps.
+- Check `_meta.thinking.warning` — the host warns when `maxTokens` is below
+  the thinking floor. On mandatory-reasoning models raise `maxTokens` or steer
+  to another model via `modelPreferences`.
+- `usage.reasoningTokens` is omitted (not `0`) when the provider doesn't report
+  it — treat "absent" as unknown, not as "no reasoning".
+
+See [Sampling → Thinking models](/developers/tools/executa-sampling#thinking-models-thinking).
 
 ---
 

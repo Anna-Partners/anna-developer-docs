@@ -226,8 +226,9 @@ try {
     case "tool_failed":   /* plugin returned failure; err.details */ break;
     case "wait_timeout":  /* client wall clock elapsed — the job may
                              still be running; recover via err.jobId */ break;
-    case "job_quota_exceeded": /* ≤5 active jobs per user */ break;
-    case "long_job_capacity":  /* agent long-job slots busy — retry */ break;
+    case "job_quota_exceeded": /* 50 active jobs per user — err.details.{active,max_active,scope} */ break;
+    case "long_job_capacity":  /* agent admitted (running+queued) long jobs full —
+                                  retry after err.details.retry_after_ms */ break;
     default: throw err;
   }
 }
@@ -258,11 +259,28 @@ for (const job of jobs) {
 - `timeoutMs` is the **job deadline**: default 30 min, clamped to
   [60 s, 24 h]. Deadline elapsed → `state: "expired"`, error
   `tool_timeout`, and the host cancels the agent-side execution.
-- Per-user active job quota: **5** (`job_quota_exceeded`); per-agent
-  long-job concurrency: **3** (`long_job_capacity`, retryable).
-- Progress: plugins emit via the Executa SDK's `emit_progress` (rate limit
-  50/s per job; latest 500 events kept; ≤8 KB each). Heartbeats update
-  `lastHeartbeatAt` but are not pushed.
+- Per-user active job quota: **50** (`job_quota_exceeded`; per user, shared
+  across apps / windows / agents; counts `queued` + `running`; `details`
+  carries `active` / `max_active` / `scope`).
+- Per-agent long-job slots: **30 running** (same as the sync `tools.invoke`
+  channel); further jobs **queue on the agent** — you receive a progress
+  event `{type: "queued", data: {position, max_concurrent}}` and the job stays
+  `queued` until a slot frees — up to **100 admitted**; beyond that
+  `long_job_capacity` with `details.{max_concurrent, max_admitted, active,
+  queued, retry_after_ms}`. In practice the per-user quota is hit first.
+  Queue time counts against `timeoutMs`.
+- Progress: plugins emit via the Executa SDK's `emit_progress` (budget: 50/s
+  per job **and 200/s per user**, excess dropped — heartbeats, `queued` and
+  terminal events are never dropped; latest 500 events kept; ≤8 KB each;
+  history readable via `getJob` for 24 h after the deadline). Heartbeats
+  update `lastHeartbeatAt` but are not pushed.
+- **Concurrency is not speed.** Slots only guarantee a burst is never
+  rejected. Heavy per-invoke resources (headless browsers, GPU) run inside
+  your executa on the agent's sandbox (cloud agents: 4 vCPU / 4 GB) and are
+  **not** throttled by the platform beyond these slots — cap them inside
+  your executa (e.g. 3–4 concurrent Chrome renders, queue the rest); 30
+  parallel renders will OOM the whole agent, not just one job.
+- Need more? Post on the forum with your app id and workload shape.
 - Result cap: 256 KB. Bigger payloads must go through `host/uploadFile`
   and return a reference (`result_too_large` otherwise).
 - Cancel is **cooperative and idempotent**: the agent first cancels the
@@ -431,9 +449,13 @@ own user flag; `session` needs **both**. Full guides: [App UI Media](/developers
 `session` is not a dispatcher RPC: the SDK posts `audio.session.{open, send,
 flush, context, say, interrupt, close}` and the **host page's bridge** handles
 them locally over its own WebSocket to `/api/v1/anna-apps/runtime/voice`
-(nothing reaches `/runtime/rpc`). Declaring `session` also makes the host
-render the iframe with `allow="microphone"`; `llm: 'agent'` additionally
-requires a `host_api.agent.session` submode.
+(nothing reaches `/runtime/rpc`). Declaring `session` also implies the
+`microphone` browser permission (iframe `allow="microphone 'src'"` +
+`Permissions-Policy: microphone=(self)`); `llm: 'agent'` additionally
+requires a `host_api.agent.session` submode. Recording for `transcribe`
+without a session needs an explicit `"browser_permissions": ["microphone"]`
+in `manifest.ui` — `host_api` is the RPC ACL, browser features are declared
+separately. See [App UI Browser Permissions](/developers/apps/app-ui-browser-permissions).
 
 ### `upload`
 

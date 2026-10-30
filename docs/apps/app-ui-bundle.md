@@ -4,7 +4,7 @@ description: "Upload your static SPA bundle for a schema ≥ 2 Anna App version:
 section: apps
 slug: app-ui-bundle
 order: 11
-updated: 2026-04-28
+updated: 2026-10-23
 estimated_minutes: 5
 category: "App UI"
 ---
@@ -166,7 +166,8 @@ Response headers:
   Content-Security-Policy: <built from manifest.ui.csp_overrides + external_origins>
   X-Content-Type-Options: nosniff
   Cross-Origin-Resource-Policy: same-origin
-  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Permissions-Policy: <every feature `()` unless granted by ui.browser_permissions
+                       or implied — e.g. microphone=(self), fullscreen=(self "https://www.youtube.com")>
   ETag: "<sha256>"
   Cache-Control: public, max-age=31536000, immutable
 ```
@@ -175,6 +176,7 @@ Two extra rules apply to the entry HTML:
 
 - The runtime requires `Sec-Fetch-Dest: iframe` on requests for the entry HTML when the header is sent (modern browsers always send it). Direct top-level navigations to the bundle URL are rejected with `403 must_be_iframed`.
 - The bundle URL embeds **no authentication** — the iframe uses query params `?wid=<window_uuid>&t=<jwt>` to bootstrap, then upgrades to `postMessage` RPC.
+- `Permissions-Policy` denies every browser feature (`microphone`, `camera`, `fullscreen`, `screen-wake-lock`, …) unless `manifest.ui.browser_permissions` lists it or an existing declaration implies it (`host_api.audio ∋ "session"` ⇒ `microphone`; `csp_overrides["frame-src"]` ⇒ playback features). The outer iframe `allow` attribute is generated from the same computation. See [App UI Browser Permissions](/developers/apps/app-ui-browser-permissions).
 
 ## Local development tips
 

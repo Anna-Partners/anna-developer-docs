@@ -4,7 +4,7 @@ description: "Open a full-duplex voice session from your bundle — streaming AS
 section: apps
 slug: app-ui-audio-session
 order: 17
-updated: 2026-10-14
+updated: 2026-10-23
 estimated_minutes: 10
 category: "App UI"
 ---
@@ -72,9 +72,12 @@ Consequences you can rely on:
 Three gates, all checked when the session opens:
 
 1. **Manifest** — `ui.host_api.audio` must contain `"session"`. Declaring it also
-   makes the host render your iframe with `allow="microphone"` (and the bundle
-   response with `Permissions-Policy: microphone=(self)`); without the
-   declaration `getUserMedia` is denied before you can ask.
+   **implies** the `microphone` browser permission: the host renders your
+   iframe with `allow="microphone 'src'"` and serves the bundle with
+   `Permissions-Policy: microphone=(self)`. Listing it explicitly as well —
+   `"browser_permissions": ["microphone"]` — is recommended for clarity and is
+   required if you record outside a session (e.g. for `audio.transcribe`). See
+   [App UI Browser Permissions](/developers/apps/app-ui-browser-permissions).
 
    ```json
    "ui": {

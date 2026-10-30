@@ -4,8 +4,8 @@ description: "Call llm.complete and run a multi-turn agent session from inside y
 section: apps
 slug: llm-and-agent
 order: 16
-updated: 2026-10-23
-estimated_minutes: 8
+updated: 2026-10-26
+estimated_minutes: 9
 category: "App UI"
 ---
 
@@ -97,6 +97,7 @@ const reply = await window.anna.llm.complete({
     { role: "user", content: { type: "text", text: "Say hi" } },
   ],
   maxTokens: 256,
+  // thinking: true | { effort: "low" }  — opt in to reasoning; off by default (§3.2b)
 });
 console.log(reply.role, reply.content.text, reply.usage.totalTokens);
 ```
@@ -109,7 +110,8 @@ Response shape:
   content: { type: "text", text: string },
   model: string,
   stopReason: "endTurn" | "maxTokens" | "contentFilter" | "toolUse",
-  usage: { inputTokens: number, outputTokens: number, totalTokens: number },
+  usage: { inputTokens: number, outputTokens: number, totalTokens: number,
+           reasoningTokens?: number },   // only when the provider reports it
   _meta: {
     provider: string | null,
     latencyMs: number,
@@ -117,6 +119,11 @@ Response shape:
     // effective output cap actually applied to this call:
     maxTokens: { requested: number | null, effective: number,
                  limitedBy: "request" | "model" | "transport" | "default" },
+    // thinking / reasoning control actually applied (§3.2b):
+    thinking: { requested: boolean | object | null,
+                effective: { enabled: boolean, effort?: string, budgetTokens?: number },
+                applied: boolean, reason: string, warning?: string,
+                reasoning?: string, reasoningTruncated?: boolean },
   },
 }
 ```
@@ -144,6 +151,10 @@ effective = min(maxTokens ?? model output cap, model output cap, path ceiling)
 - The resolved cap is echoed in `_meta.maxTokens` (`limitedBy` ∈
   `request | model | transport` tells you which constraint won), so clamping
   is never silent.
+- On thinking models the cap **includes reasoning tokens** (DashScope / Qwen
+  count them inside `max_tokens`). Programmatic calls run with thinking
+  **off** by default — see [§3.2b](#32b-thinking-models-thinking) before you
+  opt in with a small `maxTokens`.
 
 **Long outputs belong on `llm.stream`.** With `@anna-ai/app-runtime`
 ≥ 0.17.0 you don't even need to switch calls: `llm.complete` with
@@ -375,8 +386,10 @@ Two different ceilings are easy to confuse:
 | `sess.run(...)` | `min(maxTokens ?? model cap, model cap, 65 536)` **then clamped to the model's context-budget reserve** (10 % of context, ≤ 65 536) — e.g. 65 536 on 1M-context models, 20 000 on 200K-context models | `maxTokens` can only **lower** it | `task_complete.truncated` (= `stop_reason === "maxTokens"`) |
 
 The effective value for a run is published **before any token** in the
-`run_meta` frame as `max_output_tokens`, and the terminal `task_complete`
-delta tells you whether the final assistant message hit it:
+`run_meta` frame as `max_output_tokens` (alongside `thinking`, the reasoning
+control actually applied — [§3.2b](#32b-thinking-models-thinking)), and the
+terminal `task_complete` delta tells you whether the final assistant message
+hit it:
 
 ```js
 let cap = null;
@@ -407,6 +420,66 @@ was silently capped at 8 192 tokens with no signal at all.
 3. **Pure generation → `llm.stream`** — if you don't need tools, `llm.stream`
    gives you the 65 536 ceiling without the context-budget clamp, an explicit
    `maxTokens`, and `stopReason`.
+
+### 3.2b Thinking models (`thinking`)
+
+> `@anna-ai/app-schema` ≥ 0.32.0 / `@anna-ai/app-runtime` ≥ 0.27.0 (forum #454).
+> Older hosts ignore the field (dispatcher `additionalProperties: true`) —
+> feature-detect via the presence of `_meta.thinking`.
+
+Reasoning models (Qwen3, DeepSeek-R1, GPT-5.x, Claude extended thinking,
+Gemini 2.5+) spend part of the output budget on **hidden reasoning tokens**.
+On DashScope / Qwen those tokens count **inside `maxTokens`**, so a
+`maxTokens: 700` call can come back with `stopReason: "maxTokens"`, an empty
+`content.text` and a 40–50 s latency that looks like a cold start.
+
+All three calls accept the same optional `thinking` field, at the same level
+as `maxTokens` / `temperature`:
+
+```ts
+thinking?: boolean | {
+  enabled?: boolean,        // defaults to true when effort / budgetTokens is set
+  effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
+  budgetTokens?: number,    // reasoning-token cap on providers that support one
+  includeReasoning?: boolean, // return the reasoning text (see below)
+}
+```
+
+| Call | Default when omitted | Echo |
+|---|---|---|
+| `llm.complete` | **off** (when the model can disable it) | `_meta.thinking` |
+| `llm.stream` | **off** (when the model can disable it) | terminal frame `_meta.thinking` |
+| `sess.run(...)` | **provider default** (agents benefit from reasoning; matches main chat) | `run_meta.thinking` |
+
+- `thinking: true` / `{ effort: "low" }` opts a programmatic call in;
+  `thinking: false` forces it off (also on `sess.run`).
+- Models with **mandatory** reasoning cannot be disabled: the host leaves them
+  untouched and reports `effective.enabled: true, reason: "mandatory"`, plus
+  a `warning` when `maxTokens` is below the thinking floor.
+- `reason` ∈ `default_off | requested | mandatory | unsupported_model |
+  unknown_provider | provider_default | effort_ignored_budget_wins`;
+  `applied` tells you whether a control parameter was actually sent upstream.
+- `usage.reasoningTokens` is **additive** and present only when the provider
+  reports it (never `0` as a placeholder).
+- `includeReasoning: true` returns the reasoning text in
+  `_meta.thinking.reasoning` (`reasoningTruncated` flags a cut). On
+  `llm.stream` it additionally emits `{ event: "reasoning_token", text }`
+  frames before the first `model_token` — an additive frame kind, only sent
+  when you asked for it; ignore unknown `event` values to stay forward-compatible.
+- Invalid shapes fail fast with `APP_INVALID_REQUEST` (`thinking.effort must be
+  one of minimal, low, medium, high, xhigh, max`, …).
+
+**Detecting "reasoning ate the budget"** — the programmatic rule, worth a
+retry with `thinking: false` or a larger `maxTokens`:
+
+```js
+const r = await window.anna.llm.complete({ messages, maxTokens: 700, thinking: true });
+const visible = r.usage.outputTokens - (r.usage.reasoningTokens ?? 0);
+if (r.stopReason === "maxTokens" && visible <= 0) {
+  // reasoning consumed the whole budget — retry without thinking or raise the cap
+  return window.anna.llm.complete({ messages, maxTokens: 700, thinking: false });
+}
+```
 
 ### 3.3 Concurrency
 
@@ -536,7 +609,7 @@ Branch on `error.name` (the stable string), not the numeric code.
 | `anna.llm.complete(req)` | `POST /api/v1/copilot/app/complete` | `llm: ["complete"]` |
 | `anna.llm.catalog({serviceType?})` | `/runtime/rpc` only (dispatcher `llm.catalog`, no standalone HTTP route) — see [App UI Media](/developers/apps/app-ui-media#discover-before-you-call) | `llm: ["catalog"]` |
 | `anna.agent.session({...})` | `POST /api/v1/copilot/app/sessions` | `agent.session.auto` or `.fixed` |
-| `sess.run({content, maxTokens?})` | `POST /api/v1/copilot/app/agent` (SSE) | (covered by session grant) |
+| `sess.run({content, maxTokens?, thinking?})` | `POST /api/v1/copilot/app/agent` (SSE) | (covered by session grant) |
 | `sess.cancel(runId)` | `POST /api/v1/copilot/app/agent/cancel` | (covered) |
 | `sess.refresh()` | `POST /api/v1/copilot/app/sessions/{uuid}/refresh` | (covered) |
 | `sess.delete()` | `DELETE /api/v1/copilot/app/sessions/{uuid}` | (covered) |

@@ -4,8 +4,8 @@ description: "Let your plugin ask the host to perform an LLM completion on the u
 section: tools
 slug: executa-sampling
 order: 9
-updated: 2026-06-10
-estimated_minutes: 11
+updated: 2026-10-26
+estimated_minutes: 12
 ---
 
 Sampling lets your plugin invoke an LLM **on the user's behalf** without shipping your own API key, picking a model, or metering quota. The plugin describes the completion in protocol-neutral terms; Anna routes it through the user's preferred provider, charges the user's plan, and returns the result.
@@ -79,6 +79,7 @@ After v2 is live, every `invoke` request also carries `invoke_id` and `sampling_
 | `metadata` | no | Free dict. Convention: include `executa_invoke_id` for trace stitching. |
 | `responseFormat` | no | Structured-output constraint — `{"type":"json_object"}` or `{"type":"json_schema", "json_schema":{…}}`. See [Structured output](#structured-output-responseformat). |
 | `onUnsupported` | no | What to do when the selected model can't honour `json_schema`: `"error"` (default), `"json_object"`, or `"text"`. |
+| `thinking` | no | Thinking / reasoning control for reasoning-capable models — `true`, `false`, or `{"enabled"?, "effort"?, "budgetTokens"?, "includeReasoning"?}` (`effort` ∈ `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). **Default is off** for sampling (when the model can disable it). See [Thinking models](#thinking-models-thinking). |
 
 The host replies on stdin (the same channel) with the result:
 
@@ -92,7 +93,11 @@ The host replies on stdin (the same channel) with the result:
     "model": "claude-3-5-sonnet-20241022",
     "stopReason": "endTurn",
     "usage": { "inputTokens": 312, "outputTokens": 187, "totalTokens": 499 },
-    "_meta": { "provider": "anthropic", "latencyMs": 1432 }
+    "_meta": {
+      "provider": "anthropic",
+      "latencyMs": 1432,
+      "thinking": { "requested": null, "effective": { "enabled": false }, "applied": true, "reason": "default_off" }
+    }
   }
 }
 ```
@@ -223,6 +228,48 @@ The dev harness validates `responseFormat` with the same rules as production and
 anna-app executa dev --dir ./my-plugin --mock-sampling ./sampling-fixture.jsonl
 ```
 
+## Thinking models (`thinking`)
+
+Reasoning models (Qwen3, DeepSeek-R1, GPT-5.x, Claude extended thinking, Gemini 2.5+) spend part of the output budget on **hidden reasoning tokens**. On DashScope / Qwen those tokens count **inside `maxTokens`** — a `maxTokens: 700` summary call can come back with `stopReason: "maxTokens"`, an empty `content.text` and a 40–50 s latency (forum #454). Because sampling callers pass small budgets and want text / JSON, the platform runs sampling with thinking **off by default** whenever the model allows it. Opt in explicitly:
+
+```json
+{ "thinking": true }
+{ "thinking": { "effort": "low" } }
+{ "thinking": { "budgetTokens": 1024, "includeReasoning": true } }
+```
+
+- `enabled` defaults to `true` when `effort` or `budgetTokens` is present; `budgetTokens` wins over `effort` on providers where the two are mutually exclusive (`reason: "effort_ignored_budget_wins"`).
+- Models with **mandatory** reasoning cannot be disabled: the host leaves them untouched and reports `effective.enabled: true, reason: "mandatory"`, plus a `warning` when `maxTokens` is below the thinking floor.
+- Invalid shapes fail fast with `-32004 SAMPLING_INVALID_REQUEST` (`thinking.effort must be one of minimal, low, medium, high, xhigh, max`, `thinking.budgetTokens must be a positive integer`, …). Older hosts ignore the field — feature-detect via `_meta.thinking`.
+
+The response always echoes what was applied, and reports reasoning usage when the provider does:
+
+```jsonc
+"_meta": {
+  "thinking": {
+    "requested": { "effort": "low" },
+    "effective": { "enabled": true, "budgetTokens": 1024 },
+    "applied": true,
+    "reason": "requested",
+    "warning": "maxTokens (700) is below the thinking floor (2048); reasoning may consume the whole budget",
+    "reasoning": "…",                 // only with includeReasoning: true
+    "reasoningTruncated": false
+  }
+},
+"usage": { "inputTokens": 312, "outputTokens": 700, "totalTokens": 1012, "reasoningTokens": 698 }
+```
+
+`usage.reasoningTokens` is additive and **omitted** (not `0`) when the upstream doesn't report it. The programmatic "reasoning ate the budget" check:
+
+```python
+usage = result.get("usage", {})
+if result.get("stopReason") == "maxTokens" and usage.get("outputTokens", 0) - usage.get("reasoningTokens", 0) <= 0:
+    # retry with thinking=False or a larger max_tokens
+    ...
+```
+
+SDKs: Python `create_message(..., thinking=False | {"effort": "low"})`; Node `createMessage({ thinking })`; Go `CreateMessageRequest{Thinking: false}` / `&sampling.Thinking{Effort: "low"}` (SDK ≥ 0.2.0).
+
 ## Per-invoke caps
 
 | Cap | Value | Where enforced |
@@ -232,6 +279,7 @@ anna-app executa dev --dir ./my-plugin --mock-sampling ./sampling-fixture.jsonl
 | Total tokens per `invoke_id` | **32 000** | Platform constant (fixed; not user-adjustable) |
 | `sampling_token` TTL | **600 s** | JWT `aud=executa-sampling` |
 | `includeContext` values | only `"none"` | host rejects others as `-32004 SAMPLING_INVALID_REQUEST` |
+| `thinking` default | **off** (when the model can disable it) | Platform policy for programmatic calls — reasoning tokens count inside `maxTokens`; see [Thinking models](#thinking-models-thinking) |
 
 Both call-count and total-token caps are **terminal** within the same `invoke_id` — your plugin cannot retry past them; it must shrink the workload or exit gracefully.
 
@@ -244,7 +292,7 @@ All sampling errors come back as JSON-RPC errors with stable codes:
 | `-32001` | `SAMPLING_NOT_GRANTED` | User has not enabled sampling for this Executa. |
 | `-32002` | `SAMPLING_QUOTA_EXCEEDED` | User account quota exhausted. |
 | `-32003` | `SAMPLING_PROVIDER_ERROR` | Upstream LLM provider failed. |
-| `-32004` | `SAMPLING_INVALID_REQUEST` | Malformed params (e.g. `includeContext != "none"`, `messages` empty, `responseFormat` schema over limits). |
+| `-32004` | `SAMPLING_INVALID_REQUEST` | Malformed params (e.g. `includeContext != "none"`, `messages` empty, `responseFormat` schema over limits, `thinking` not a boolean / object). |
 | `-32005` | `SAMPLING_TIMEOUT` | The completion did not finish in time. |
 | `-32006` | `SAMPLING_MAX_CALLS_EXCEEDED` | Per-invoke call-count cap reached. |
 | `-32007` | `SAMPLING_MAX_TOKENS_EXCEEDED` | Per-invoke cumulative token cap reached. |
@@ -335,7 +383,7 @@ For a polished version with retries, see the upstream
 | Node.js | [`new SamplingClient().createMessage()`](https://github.com/whtcjdtc2007/anna-executa-examples/blob/main/sdk/nodejs/sampling.js) |
 | Go      | [`sampling.New(nil).CreateMessage()`](https://github.com/whtcjdtc2007/anna-executa-examples/blob/main/sdk/go/sampling/sampling.go) |
 
-All three SDKs ship a single-reader / multi-writer dispatcher so you don't have to wire it yourself, and all three expose `responseFormat` / `onUnsupported` (Python: `response_format=` / `on_unsupported=` kwargs; Node: request options; Go: `ResponseFormat` / `OnUnsupported` struct fields).
+All three SDKs ship a single-reader / multi-writer dispatcher so you don't have to wire it yourself, and all three expose `responseFormat` / `onUnsupported` (Python: `response_format=` / `on_unsupported=` kwargs; Node: request options; Go: `ResponseFormat` / `OnUnsupported` struct fields) and, from SDK 0.2.0, `thinking` (Python: `thinking=`; Node: `thinking`; Go: `Thinking`).
 
 ## Common pitfalls
 
@@ -343,6 +391,7 @@ All three SDKs ship a single-reader / multi-writer dispatcher so you don't have 
 - **Always echo `invoke_id` in `metadata`.** Nexus uses it to attribute usage and enforce per-invoke caps.
 - **Don't ship API keys.** If you reach for `OPENAI_API_KEY` from env, you almost certainly want sampling instead.
 - **Treat `SAMPLING_MAX_TOKENS_EXCEEDED` and `SAMPLING_USER_DENIED` as terminal** — not retryable inside the same invoke.
+- **Empty text + `stopReason: "maxTokens"` + `reasoningTokens ≈ outputTokens` means the thinking model ate your budget.** Keep the default (`thinking` off), or raise `maxTokens` / lower `effort` when you opt in. ([Pitfall #15](/developers/tools/executa-pitfalls#15-sampling-empty-text-stopreason-maxtokens-and-4050-s-latency-on-a-thinking-model))
 - **Don't trust `structuredValid` as a parse.** It's informational; always `json.loads` with a fallback — and prefer `onUnsupported: "json_object"` over the default `"error"` unless your tool is useless without strict schemas.
 
 ## See also

@@ -1,15 +1,15 @@
 ---
 title: "App UI Manifest"
-description: "The `ui` section of a schema ≥ 2 manifest: bundle, views, host_api, csp_overrides."
+description: "The `ui` section of a schema ≥ 2 manifest: bundle, views, host_api, csp_overrides, browser_permissions."
 section: apps
 slug: app-ui-manifest
 order: 10
-updated: 2026-10-23
+updated: 2026-10-30
 estimated_minutes: 6
 category: "App UI"
 ---
 
-When `schema` ≥ 2 (current maximum: 3), an Anna App manifest gains a `ui` section that describes the static bundle, the named views the LLM can summon, the host API scopes the iframe is allowed to call, and any per-bundle CSP overrides. Everything else from [App Manifest](/developers/apps/app-manifest) still applies — including the schema-3 changes (structured [`storage`](/developers/apps/app-manifest#storage-schema-3) entry, top-level `permissions` removed).
+When `schema` ≥ 2 (current maximum: 3), an Anna App manifest gains a `ui` section that describes the static bundle, the named views the LLM can summon, the host API scopes the iframe is allowed to call, the browser features (Permissions Policy) the iframe needs, and any per-bundle CSP overrides. Everything else from [App Manifest](/developers/apps/app-manifest) still applies — including the schema-3 changes (structured [`storage`](/developers/apps/app-manifest#storage-schema-3) entry, top-level `permissions` removed).
 
 ## Example
 
@@ -51,6 +51,7 @@ When `schema` ≥ 2 (current maximum: 3), an Anna App manifest gains a `ui` sect
       "storage": ["get", "set", "delete", "list"],
       "window": ["set_title", "open_view", "close"]
     },
+    "browser_permissions": ["microphone"],
     "csp_overrides": {
       "connect-src": ["https://api.example.com"],
       "img-src":     ["https://images.example.com"]
@@ -69,6 +70,7 @@ When `schema` ≥ 2 (current maximum: 3), an Anna App manifest gains a `ui` sect
 | `views` | array | yes | 1–16 entries; at most one `default: true`. See [`views[]`](#views) |
 | `form_factors` | array of string | no | Containers the app supports: `"desktop"` / `"mobile"`. Defaults to `["desktop"]` — declare `"mobile"` to appear in the Anna mobile launcher. See [Mobile Support](/developers/apps/app-mobile) |
 | `host_api` | object | no | RPC ACL. See [`host_api`](#host_api). Defaults to all empty (only the always-allowed `window` scope) |
+| `browser_permissions` | array of string | no | Browser features (Permissions Policy) delegated to the iframe: `microphone`, `camera`, `geolocation`, `display-capture`, `clipboard-read`, `fullscreen`, `autoplay`, `picture-in-picture`, `screen-wake-lock`, `web-share`. Unique entries; anything else is rejected. Defaults to `[]`. See [App UI Browser Permissions](/developers/apps/app-ui-browser-permissions) |
 | `csp_overrides` | object | no | Map of CSP directive → list of values. Only the directives below are accepted; `style-src` accepts only `'self'`, `'sha256-...'`, `'nonce-...'`; `script-src` additionally accepts `'wasm-unsafe-eval'` (see [WebAssembly](#webassembly)); `frame-src` accepts only explicit `https://` origins (see [Embedding third-party content](#embedding-third-party-content-frame-src)) |
 | `state_merge` | string | no | Reserved. Default `"last_writer_wins"` |
 
@@ -199,7 +201,7 @@ By default the bundle CSP has no `frame-src`, so nested iframes fall back to `de
 
 Rules: explicit `https://host[:port]` origins only — no `*` or wildcard subdomains, no paths, no CSP keywords (`'self'`, `'none'`, …), at most 8 origins. The declared origins are disclosed on the App's install/review surface, like `external_origins`.
 
-Declaring `frame-src` also unlocks the **playback permission chain**: the platform scopes `autoplay`, `encrypted-media`, `fullscreen` and `picture-in-picture` to your declared origins (both in the bundle's `Permissions-Policy` response header and in the host window's iframe `allow` attribute). All other features (camera, geolocation, …) stay denied, with one exception: declaring `ui.host_api.audio ∋ "session"` makes the host emit `allow="microphone"` on your iframe and `Permissions-Policy: microphone=(self)` on the bundle response, so the realtime voice session can call `getUserMedia` — see [App UI Audio Session](/developers/apps/app-ui-audio-session).
+Declaring `frame-src` also unlocks the **playback permission chain**: the platform scopes `autoplay`, `encrypted-media`, `fullscreen` and `picture-in-picture` to your declared origins (both in the bundle's `Permissions-Policy` response header and in the host window's iframe `allow` attribute). Every other browser feature stays denied unless you list it in [`ui.browser_permissions`](/developers/apps/app-ui-browser-permissions) — with one legacy implication kept for published Apps: declaring `ui.host_api.audio ∋ "session"` makes the host emit `allow="microphone 'src'"` on your iframe and `Permissions-Policy: microphone=(self)` on the bundle response, so the realtime voice session can call `getUserMedia` — see [App UI Audio Session](/developers/apps/app-ui-audio-session).
 
 Your own `<iframe>` inside the bundle **must still forward those features** — the delegation chain is per-frame:
 
@@ -216,7 +218,7 @@ Tips:
 
 - Prefer `https://www.youtube-nocookie.com` over `https://www.youtube.com` — same player, fewer ambient cookies sent to Google.
 - **Don't strip the referrer on your embed iframe.** Declaring `frame-src` also relaxes the bundle's `Referrer-Policy` from `no-referrer` to `strict-origin-when-cross-origin` (cross-origin requests carry the origin only, never the path) — YouTube requires a Referer on embed requests and shows **error 153** ("video player configuration error") without one. Adding `referrerpolicy="no-referrer"` to your `<iframe>` re-breaks it.
-- **Local harness parity**: `anna-app dev` serves your bundle without CSP or Permissions-Policy headers, so embeds work locally even *without* the declaration. Always verify with `anna-app validate` and an online working draft before relying on local behaviour.
+- **Local harness parity**: `anna-app dev` serves your bundle without CSP headers, so embeds work locally even *without* the declaration (the `Permissions-Policy` header, by contrast, is production-aligned since CLI 0.1.63). Always verify with `anna-app validate` and an online working draft before relying on local behaviour.
 - The embedded page is a normal cross-origin iframe: it inherits the app sandbox, cannot reach the Anna host bridge, and cannot call Host APIs.
 
 ### WebAssembly
@@ -244,7 +246,7 @@ The root-level `permissions` list is **display-only legacy metadata with zero en
 
 Two passes:
 
-1. **Static** — runs on every `validate-manifest` and version-create call. Checks `format`, view counts/sizes, `host_api.tools` references, `csp_overrides` shape, `external_origins` schemes.
+1. **Static** — runs on every `validate-manifest` and version-create call. Checks `format`, view counts/sizes, `host_api.tools` references, `browser_permissions` allow-list, `csp_overrides` shape, `external_origins` schemes.
 2. **With files** — runs at `bundle/finalize`. Confirms `bundle.entry` exists in the uploaded `file_map`.
 
 Both raise `ManifestValidationError` with a Chinese-language reason string. Common rejections:
@@ -254,6 +256,8 @@ Both raise `ManifestValidationError` with a Chinese-language reason string. Comm
 - `ui.views 中只能有一个 default=true`
 - `view '<name>' default_size 小于 min_size`
 - `host_api.tools 引用未在 manifest 中声明的 tool_id: <ref>`
+- `browser_permissions contains an unsupported feature: ['payment']`
+- `browser_permissions has duplicate entries: ['microphone']`
 - `csp_overrides 含不允许的 directive: [...]`
 - `csp_overrides[script-src] 仅允许 'self' / 'wasm-unsafe-eval' / 'sha256-...' / 'nonce-...'`
 - `csp_overrides[style-src] 仅允许 'self' / 'sha256-...' / 'nonce-...'`

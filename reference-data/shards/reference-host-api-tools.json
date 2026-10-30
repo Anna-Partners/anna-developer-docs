@@ -256,7 +256,12 @@
         {
           "name": "job_quota_exceeded",
           "code": "job_quota_exceeded",
-          "desc": "The user already has 5 active (queued/running) jobs. `details` carries `{max_active, active}`."
+          "desc": "The user already has 50 active (queued/running) jobs — per user, shared across apps/windows/agents. `details` carries `{max_active, active, scope:\"user\"}`."
+        },
+        {
+          "name": "long_job_capacity",
+          "code": "long_job_capacity",
+          "desc": "Surfaces as the job's terminal `error.code` (not at create time): the agent's admitted long jobs (30 running + queue, 100 total) are full. `details` carries `{max_concurrent, max_admitted, active, queued, retry_after_ms}`; retry after `retry_after_ms`. In practice `job_quota_exceeded` (50 per user) is hit first."
         },
         {
           "name": "agent_unavailable",
@@ -276,10 +281,12 @@
       ],
       "example": "// The high-level wrapper is what most apps want:\nconst ctl = new AbortController();\ncancelBtn.onclick = () => ctl.abort();\n\nconst result = await anna.tools.invokeAsyncAwait(\n  {\n    tool_id: TOOL_ID,\n    method: \"run_steps\",\n    args: { steps: 100 },\n    timeoutMs: 30 * 60_000,      // job deadline\n    clientTag: \"render-batch-7\", // reload-recovery key\n  },\n  {\n    onProgress: (ev) => bar.update(ev.data),  // {seq, type, data}\n    signal: ctl.signal,                        // abort → cancelJob\n  },\n);\n// rejects with err.code ∈ tool_failed | tool_timeout | cancelled |\n// wait_timeout (err.jobId lets you recover) | job_quota_exceeded | …",
       "limitations": [
-        "Per-user active job quota: 5. Per-agent long-job concurrency: 3 — excess jobs fail fast with `long_job_capacity` (fold into the job's error; retryable).",
+        "Per-user active job quota: 50 (per user, shared across apps/windows/agents, counts queued+running). Per-agent long-job slots: 30 running (same as sync `tools.invoke`); further jobs queue on the agent (progress event `{type:\"queued\", data:{position, max_concurrent}}`, queue time counts against `timeoutMs`) up to 100 admitted — only beyond that `long_job_capacity` (retryable; `details.{max_concurrent, max_admitted, active, queued, retry_after_ms}`).",
         "Result cap 256 KB — larger payloads must be stored via `host/uploadFile` and returned as a reference (`result_too_large` otherwise).",
         "The `tool_job` push events never carry the result; always `getJob` after a terminal event.",
-        "Terminal jobs are retained 30 days, then purged (progress cascades)."
+        "Terminal jobs are retained 30 days, then purged (progress cascades).",
+        "Progress budget: 50 events/s per job and 200/s per user (excess dropped; heartbeats, `queued` and terminal events are never dropped); history stays readable via `getJob` for 24 h after the deadline.",
+        "Concurrency is not speed: slots only guarantee a burst is never rejected. Heavy per-invoke resources (headless browsers, GPU) are not throttled by the platform beyond the slots — cap them inside your executa; the cloud agent sandbox is 4 vCPU / 4 GB."
       ]
     },
     {
@@ -350,7 +357,8 @@
       "example": "// Incremental poll loop (what invokeAsyncAwait does internally):\nlet seq = 0;\nfor (;;) {\n  const snap = await anna.tools.getJob({ jobId, sinceSeq: seq });\n  snap.progress.forEach(renderProgress);      // [{seq, ts, type, data}]\n  if (snap.progress.length) seq = snap.lastSeq;\n  if ([\"succeeded\",\"failed\",\"cancelled\",\"expired\"].includes(snap.state)) {\n    if (snap.state === \"succeeded\") return snap.result;\n    throw Object.assign(new Error(snap.error.message), snap.error);\n  }\n  await sleep(2000);\n}",
       "limitations": [
         "Progress is a per-job ring of the **latest 500** events — a slow reader can miss early events (the terminal state + result are never in the ring, they're on the row).",
-        "Progress event `data` is truncated to 8 KB per event (`{_truncated: true}` placeholder beyond)."
+        "Progress event `data` is truncated to 8 KB per event (`{_truncated: true}` placeholder beyond).",
+        "Progress budget: 50 events/s per job and 200/s per user (excess dropped; heartbeats, `queued` and terminal events are never dropped); history stays readable via `getJob` for 24 h after the deadline."
       ]
     },
     {

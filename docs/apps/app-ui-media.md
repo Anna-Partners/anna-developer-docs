@@ -288,11 +288,20 @@ new Audio(out.url).play();      // ~30 min TTL; out.model tells you who spoke
 out.params;                     // what actually reached the provider, normalised
 out.ignoredParams;              // keys this model does not declare — dropped, never surcharged
 
-// STT — whole recording, ≤ 10 min
+// STT — whole recording, ≤ 10 min. Recording INSIDE the iframe needs
+// "browser_permissions": ["microphone"] in manifest.ui — `transcribe` alone
+// does not grant the mic (see /developers/apps/app-ui-browser-permissions).
 const blob = new Blob(chunks, { type: 'audio/webm' });
 const b64 = btoa(String.fromCharCode(...new Uint8Array(await blob.arrayBuffer())));
 const { text } = await anna.audio.transcribe({ audioBase64: b64, format: 'webm', language: 'zh' });
 ```
+
+> **Recording in the iframe?** `getUserMedia` / `MediaRecorder` are governed
+> by the browser's Permissions Policy, not by `host_api`. Declare
+> `"browser_permissions": ["microphone"]` in `manifest.ui` or the Dashboard
+> rejects the call with `NotAllowedError` before the user is even asked
+> (`transcribe` accepts uploaded files / URLs too, so it does not imply the
+> microphone). Details: [App UI Browser Permissions](/developers/apps/app-ui-browser-permissions).
 
 Limits: `text` ≤ the model's `maxCharsPerCall` (1000–2000 depending on tier);
 inline audio ≤ 10 MB, URL fetch ≤ 25 MB, duration ≤ 10 min. Per-model knobs are

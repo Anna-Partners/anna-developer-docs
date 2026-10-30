@@ -1,0 +1,9 @@
+# Machine-checkable claims for docs/apps/app-ui-browser-permissions.md.
+# `browser_permissions` (UiManifestSection) ships in @anna-ai/app-schema
+# >= 0.31.0 (pinned in .schema-version).
+host_api_methods:
+  - audio.transcribe
+ui_manifest_fields:
+  - host_api
+  - csp_overrides
+  - browser_permissions

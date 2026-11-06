@@ -4,12 +4,12 @@ description: "Walk an app through review and into the Anna App Store."
 section: apps
 slug: app-publish
 order: 7
-updated: 2026-08-26
+updated: 2026-11-02
 estimated_minutes: 5
 category: "Distribution & Lifecycle"
 ---
 
-Apps move through the review pipeline from the [Developer Console](/developer) **or** the `anna-app` CLI (`anna-app apps push` / `cut` / `release` / `publish` / `submit-review`, plus `archive` / `unpublish` / `status` / `versions` / `grants`). There is no raw zip upload — the CLI bundles and uploads for you, and admin review is the only step that happens exclusively server-side.
+Apps move through the review pipeline from the [Developer Console](/developer) **or** the `anna-app` CLI (`anna-app apps push` / `cut` / `release` / `publish` / `submit-review`, plus `archive` / `unpublish` / `status` / `versions`). There is no raw zip upload — the CLI bundles and uploads for you, and admin review is the only step that happens exclusively server-side.
 
 > `anna-app apps publish` is a composite of `apps push` + `apps cut <version>` — it creates the immutable version artifact (with frozen executa bindings) but does **not** put it on the App Store. A new app still needs `apps submit-review` → admin approval → `apps release <version>` before it is live. Until then the App Center detail (visible to you and reviewers) shows the review-candidate version's bundled tools with a `candidate` badge.
 

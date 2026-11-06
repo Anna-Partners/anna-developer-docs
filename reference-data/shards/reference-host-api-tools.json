@@ -18,7 +18,7 @@
       "params": [],
       "returns": {
         "type": "{ tools: Array<{ tool_id: string, status?: string }> }",
-        "desc": "Flat array of `{tool_id}` objects. Order is `required_executas` first, then `optional_executas`, both filtered through `_is_tool_allowed`.\n\n**Inclusion rule.** A tool appears iff *both* hold:\n• It is declared in `manifest.required_executas[].tool_id` *or* `manifest.optional_executas[].tool_id`.\n• It is matched by an entry in `manifest.ui.host_api.tools` — either `\"required:*\"` (all required), `\"optional:*\"` (all optional), the bare `tool_id`, or any prefixed form whose suffix after the final `:` equals `<tool_id>` (the runtime gate `_is_tool_allowed` does a `:<tool_id>` suffix match). NOTE: the runtime accepts any such prefix, but the CLI `anna-app validate` (`@anna-ai/app-schema`) only permits the canonical authoring forms — `required:*`, `optional:*`, `required:<id>`, `optional:<id>`, a bare `<id>`, or `bundled:<handle>` — so write your manifest using those.\n\nThis call ignores user-grant state and runtime availability: a `tool_id` may be listed even if the Executa Agent for the user is offline. To know whether a tool will *actually run*, you must call `tools.invoke` and handle `agent_unavailable`.\n\n**`status` (optional; dispatcher ≥ 0.14.0).** When the host implements the `get_tool_availability` store hook, each entry carries `status: 'available' | 'deploying' | 'unavailable'` computed from the deploy-reconciliation facts table — use it to disable buttons before a click fails with `executa_not_deployed`. Hosts/harnesses without the hook return the legacy shape (no `status`); treat a missing field as unknown, not available."
+        "desc": "Flat array of `{tool_id}` objects. Order is `required_executas` first, then `optional_executas`.\n\n**Inclusion rule.** A tool appears iff it is declared in `manifest.required_executas[].tool_id` *or* `manifest.optional_executas[].tool_id` — those two arrays are the only allow-list (the legacy `ui.host_api.tools` narrowing list is dropped on ingest; refs it named become `optional_executas`).\n\nThis call ignores install state and runtime availability: a `tool_id` may be listed even if the Executa Agent for the user is offline. To know whether a tool will *actually run*, you must call `tools.invoke` and handle `agent_unavailable`.\n\n**`status` (optional; dispatcher ≥ 0.14.0).** When the host implements the `get_tool_availability` store hook, each entry carries `status: 'available' | 'deploying' | 'unavailable'` computed from the deploy-reconciliation facts table — use it to disable buttons before a click fails with `executa_not_deployed`. Hosts/harnesses without the hook return the legacy shape (no `status`); treat a missing field as unknown, not available."
       },
       "errors": [
         {
@@ -32,7 +32,7 @@
           "desc": "`X-Anna-App-Token` is missing, expired, or signed for a different `window_uuid`."
         }
       ],
-      "example": "// At bundle boot — show only buttons the manifest actually grants.\nconst { tools } = await anna.tools.list();\nconst allowed = new Set(tools.map(t => t.tool_id));\n\nfor (const btn of document.querySelectorAll('[data-tool]')) {\n  if (!allowed.has(btn.dataset.tool)) btn.hidden = true;\n}\n",
+      "example": "// At bundle boot — show only buttons for executas the manifest declares.\nconst { tools } = await anna.tools.list();\nconst allowed = new Set(tools.map(t => t.tool_id));\n\nfor (const btn of document.querySelectorAll('[data-tool]')) {\n  if (!allowed.has(btn.dataset.tool)) btn.hidden = true;\n}\n",
       "limitations": [
         "Result is a snapshot — subscribe with `anna.tools.onChanged(cb)` (SDK ≥ 0.12.0; fires on the `tools.changed` window event after deploy reconciliation lands tools on the agent) and re-run `tools.list()` instead of polling. Manifest-revision changes still require a window reload.",
         "Does not call into the Executa Agent. A `tool_id` in the list can still fail at invoke time with `agent_unavailable` if no Agent is online for the user.",
@@ -46,7 +46,7 @@
       "group": "Tools",
       "since": "Introduced anna-app-runtime v0.1 · timeoutMs since v0.3 · current v0.15.0 / dispatcher 0.19.0",
       "direction": "Bundle (iframe) → Host RPC → Executa Agent (NATS) → plugin",
-      "summary": "Invoke a single Executa tool *directly from the bundle*, bypassing the LLM. The host enforces the `host_api.tools` whitelist, mints credentials, negotiates a deadline, calls the user's online Executa Agent over NATS, and returns the plugin's payload — two envelope layers stripped — to the iframe.",
+      "summary": "Invoke a single Executa tool *directly from the bundle*, bypassing the LLM. The host checks the `tool_id` against `required_executas` / `optional_executas`, mints credentials, negotiates a deadline, calls the user's online Executa Agent over NATS, and returns the plugin's payload — two envelope layers stripped — to the iframe.",
       "wire": {
         "json_rpc_method": "tools.invoke",
         "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
@@ -64,7 +64,7 @@
           "summary": "Server-minted Executa tool id; must be present in the `tools.list` projection.",
           "notes": [
             "Format is opaque. Mint-only ids look like `tool-{handle}-{slug}-{uniq}` (no separator); legacy ids use `plugin.tool` or `plugin__tool` — both still routed by `_split_tool_id`.",
-            "Must match an entry in `manifest.ui.host_api.tools`. The runtime gate `_is_tool_allowed` accepts `required:*`, `optional:*`, the bare id, or any ref ending in `:<tool_id>`; otherwise `permission_denied`. For authoring, the CLI `anna-app validate` only permits the canonical forms `required:*` / `optional:*` / `required:<id>` / `optional:<id>` / bare `<id>` / `bundled:<handle>`.",
+            "Must be a `tool_id` in `manifest.required_executas` / `optional_executas` (otherwise `permission_denied`), and the Executa must be installed and enabled for the user.",
             "Reject reasons (HostRpcError `invalid_arg`): missing, empty, or non-string."
           ]
         },
@@ -122,7 +122,7 @@
         {
           "name": "permission_denied",
           "code": "permission_denied",
-          "desc": "`tool_id` is not whitelisted by `manifest.ui.host_api.tools` for this window."
+          "desc": "`tool_id` is not in `required_executas` / `optional_executas`, or the Executa is not installed / disabled for this user."
         },
         {
           "name": "agent_unavailable",
@@ -132,12 +132,12 @@
         {
           "name": "tool_timeout",
           "code": "tool_timeout",
-          "desc": "Host wall-clock wait (`timeoutMs + grace_ms`) elapsed before the Agent acked. `details` carries `{tool_id, timeout_ms}` and any deadline metadata the Agent attached."
+          "desc": "Host wall-clock wait (`timeoutMs + grace_ms`) elapsed without a result. `details` carries `{tool_id, timeout_ms, invoke_id, client_id, reason: \"host_timeout\", host_timeout_s}` — hand `invoke_id` to platform support to locate the request in server logs (forum #500)."
         },
         {
           "name": "executa_unavailable",
           "code": "executa_unavailable",
-          "desc": "Outer NATS envelope reported `success != true` for transport-level reasons (Agent crashed, NATS rejection, stdio protocol breakage `-32700`/`-32600`). Plugin application errors (`-32602`, `-32601`, `-32603`, `-32000..-32099`) no longer land here — they classify to `invalid_arg` / `tool_failed`."
+          "desc": "Outer NATS envelope reported `success != true` for transport-level reasons (Agent crashed, NATS rejection, stdio protocol breakage `-32700`/`-32600`). Plugin application errors (`-32602`, `-32601`, `-32603`, `-32000..-32099`) no longer land here — they classify to `invalid_arg` / `tool_failed`. `details` echoes `{invoke_id, command_id}` when available. **`details.reason: \"no_ack\"`** (Agent ≥ 1.1.0-beta.47): the Agent did not acknowledge the command within ~5 s. In the vast majority of cases the command never reached the Agent (transport flap) and `retriable: true` — retry immediately with back-off instead of waiting out the timeout. However, a lost acknowledgement does **not guarantee** the command was not executed (the delivery may have succeeded while the receipt was lost in transit). For side-effecting, non-idempotent operations, query your business state before retrying or implement idempotency (e.g. a client-side dedup key) (forum #500 / #535). For `tools.invokeAsync`, `agent_unavailable` with `details.reason: \"no_ack\"` is stronger: the job row is recorded as `failed` and is guaranteed NOT dispatched — resubmit safely with the same `clientTag`."
         },
         {
           "name": "tool_failed",
@@ -193,7 +193,7 @@
           "default": null,
           "required": true,
           "desc": "",
-          "summary": "Server-minted Executa tool id; same whitelist gate (`host_api.tools`) as `tools.invoke`.",
+          "summary": "Server-minted Executa tool id; same `required_executas` / `optional_executas` gate as `tools.invoke`.",
           "notes": [
             "Mint-only ids (`tool-{handle}-{slug}-{uniq}`) carry no separator — pass the plugin method via `method`."
           ]
@@ -246,7 +246,7 @@
         {
           "name": "permission_denied",
           "code": "permission_denied",
-          "desc": "`tool_id` not whitelisted by `manifest.ui.host_api.tools`."
+          "desc": "`tool_id` not in `required_executas` / `optional_executas`."
         },
         {
           "name": "invalid_arg",

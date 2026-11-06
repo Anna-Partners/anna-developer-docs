@@ -4,7 +4,7 @@ description: "From an empty directory to a running Anna App harness in under a m
 section: apps
 slug: app-quickstart
 order: 2
-updated: 2026-04-29
+updated: 2026-11-02
 estimated_minutes: 4
 ---
 
@@ -66,7 +66,7 @@ What's happening underneath:
 - The CLI auto-discovers each `executas/<name>/` subdirectory and supervises it as a stdio process. Detection is language-agnostic: `executa.json` (explicit) > `pyproject.toml` (Python via `uv run`) > `package.json` (Node) > `go.mod` + `executa.json` (Go) > `bin/<name>` (pre-built binary). See [Multi-language executas](https://github.com/whtcjdtc2007/anna-executa-examples/blob/main/docs/multi-language-anna-apps.md).
 - A static-file server serves your `bundle/` at `/anna-apps/<slug>/dev/`.
 - An SSE relay forwards server-pushed events (`auth.refresh`, `app/method`, `entry_payload`) into the iframe.
-- The bundle's `tools.invoke`, `storage.set`, `storage.get`, `window.set_title`, `window.ready` calls land in the production RPC dispatcher and are ACL-checked against `manifest.ui.host_api`.
+- The bundle's `tools.invoke`, `storage.set`, `storage.get`, `window.set_title`, `window.ready` calls land in the production RPC dispatcher — the same decisions as production, no grants to simulate.
 
 Hot reload is on by default — edit `bundle/app.js`, save, watch the iframe refresh.
 
@@ -74,15 +74,15 @@ Hot reload is on by default — edit `bundle/app.js`, save, watch the iframe ref
 
 ```bash
 anna-app validate           # JSON Schema + ui static + tool_id linter
-anna-app validate --strict  # also greps the bundle for host_api ACL coverage
+anna-app validate --strict  # also greps the bundle for Host API calls the host does not implement
 ```
 
 The validator is fail-fast and layered:
 
 1. JSON Schema (`@anna-ai/app-schema`) — same definition the server uses on `POST /api/v1/developer/apps/{id}/versions`.
 2. UI static checks — bundle entry exists, view names unique, sizes well-formed.
-3. Cross-file `tool_id` linter — every `host_api.tools[]` entry resolves to a `required_executas[]` entry, with Levenshtein-1 typo suggestions.
-4. `--strict` — scans your bundle JS/TS for `anna.<ns>.<method>` usage and verifies each is allowlisted in `manifest.ui.host_api`. String literals and comments are lexically stripped first, so a diagnostic string like `"recover via anna.tools.getJob({jobId})"` is not treated as a call.
+3. Cross-file `tool_id` linter — every `tool_id` your bundle invokes resolves to a `required_executas[]` / `optional_executas[]` entry, with Levenshtein-1 typo suggestions. Retired schema ≤ 3 fields (`permissions`, `host_capabilities`, `ui.host_api` method lists) produce warnings, not errors.
+4. `--strict` — scans your bundle JS/TS for `anna.<ns>.<method>` usage and verifies each exists in the Host API table. String literals and comments are lexically stripped first, so a diagnostic string like `"recover via anna.tools.getJob({jobId})"` is not treated as a call.
 
 If everything is green, you have a publishable artifact.
 

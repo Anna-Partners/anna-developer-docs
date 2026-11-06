@@ -1,6 +1,6 @@
 """Tests for the P3 verification layer (design §5.3 / §9.2 / §13).
 
-Includes the §13 acceptance fixtures: a deliberately wrong capability string
+Includes the §13 acceptance fixtures: a deliberately wrong storage-scope string
 must fail the claims check, and a hand edit in a generated reference section
 must fail the regenerate-diff.
 """
@@ -27,8 +27,9 @@ TRUTH = Truth(
     event_kinds=frozenset({"executa_installed"}),
     manifest_fields=frozenset({"schema", "required_executas"}),
     ui_manifest_fields=frozenset({"bundle"}),
-    capabilities=frozenset({"aps.kv", "llm.sample"}),
-    permissions=frozenset({"storage.read"}),
+    capability_kinds=frozenset({"accounts", "shared_data", "local_device"}),
+    storage_scopes=frozenset({"user", "app", "tool"}),
+    storage_modes=frozenset({"r", "w", "rw"}),
 )
 
 
@@ -45,18 +46,18 @@ def _write_pair(tmp_path: Path, body: str, claims: str) -> Path:
 def test_claims_pass_when_truthful_and_honest(tmp_path):
     path = _write_pair(
         tmp_path,
-        "Declare `aps.kv` and call `storage.get`.",
-        "capabilities: [aps.kv]\nhost_api_methods: [storage.get]\n",
+        "Declare `storage.scopes.user` and call `storage.get`.",
+        "storage_scopes: [user]\nhost_api_methods: [storage.get]\n",
     )
     assert check_claims_file(path, TRUTH) == []
 
 
 def test_wrong_capability_string_fails(tmp_path):
-    # §13 acceptance: a deliberately wrong capability string fails CI.
+    # §13 acceptance: a deliberately wrong storage-scope string fails CI.
     path = _write_pair(
         tmp_path,
-        "Declare `aps.scope.everything` for full access.",
-        "capabilities: [aps.scope.everything]\n",
+        "Declare `storage.scopes.everything` for full access.",
+        "storage_scopes: [everything]\n",
     )
     errors = check_claims_file(path, TRUTH)
     assert any("not in the published schema" in e for e in errors)
@@ -65,8 +66,8 @@ def test_wrong_capability_string_fails(tmp_path):
 def test_stale_claim_not_in_article_fails(tmp_path):
     path = _write_pair(
         tmp_path,
-        "This article no longer mentions the capability.",
-        "capabilities: [aps.kv]\n",
+        "This article no longer mentions the scope.",
+        "storage_scopes: [user]\n",
     )
     errors = check_claims_file(path, TRUTH)
     assert any("does not appear" in e for e in errors)
@@ -80,7 +81,7 @@ def test_unknown_claim_type_fails(tmp_path):
 
 def test_orphan_sidecar_fails(tmp_path):
     path = tmp_path / "ghost.claims.yaml"
-    path.write_text("capabilities: [aps.kv]\n", encoding="utf-8")
+    path.write_text("storage_scopes: [user]\n", encoding="utf-8")
     errors = check_claims_file(path, TRUTH)
     assert any("no matching article" in e for e in errors)
 

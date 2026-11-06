@@ -4,7 +4,7 @@ description: "How Anna Apps render an interactive sandboxed window on the dashbo
 section: apps
 slug: app-ui-overview
 order: 9
-updated: 2026-04-28
+updated: 2026-11-02
 estimated_minutes: 5
 category: "App UI"
 ---
@@ -115,17 +115,17 @@ Closing **≠** refreshing. Only an explicit user `×` or `close_app_view` flips
 ## Security baseline
 
 - iframe runs in a `<iframe sandbox>` (no `allow-same-origin` in the spec; the SDK itself talks only via `postMessage`).
-- Every request from iframe → backend carries a short-TTL (120s) JWT bound to `(window_uuid, user_id, app_id, version_id, scopes)`. The Host Bridge auto-refreshes it.
+- Every request from iframe → backend carries a short-TTL (120s) JWT bound to `(window_uuid, user_id, app_id, version_id)`. The Host Bridge auto-refreshes it.
 - Asset responses include a per-bundle `Content-Security-Policy` (default `default-src 'none'`, `frame-ancestors 'self'`, `script-src 'self'`, …) plus `X-Content-Type-Options: nosniff`, `Cross-Origin-Resource-Policy: same-origin`, `Permissions-Policy` locking off camera/mic/geolocation.
-- Every host RPC re-validates the `(ns, method)` against `manifest.ui.host_api`. Unauthorised calls return `permission_denied` without ever reaching the handler.
+- Every Host API method is available to an installed, enabled App — installing is the consent, the user's CU quota is the usage gate. The only manifest-driven checks are the three [capability declarations](/developers/apps/app-manifest#capability-declarations) (`credentials` providers, cross-app `storage.scopes`, local-device `agent.tools`); a call outside them returns `permission_denied` without reaching the handler.
 
 ## Where to next
 
 Build it in this order:
 
-1. [App UI Manifest](/developers/apps/app-ui-manifest) — declare `ui.bundle`, `ui.views`, `ui.host_api`.
+1. [App UI Manifest](/developers/apps/app-ui-manifest) — declare `ui.bundle`, `ui.views` (and `ui.host_api.credentials` / `agent.tools` if you need them).
 2. [App UI Bundle Pipeline](/developers/apps/app-ui-bundle) — upload your static SPA via `bundle/init` → file PUT → `bundle/finalize`.
 3. [App UI SDK](/developers/apps/app-ui-sdk) — wire `AnnaAppRuntime.connect()` inside your `index.html`.
-4. [App UI Host API](/developers/apps/app-ui-host-api) — full RPC namespace reference + ACL & per-app grants.
+4. [App UI Host API](/developers/apps/app-ui-host-api) — full RPC namespace reference.
 5. [App UI Windows](/developers/apps/app-ui-windows) — window lifecycle, persistence, multi-device sync, dock, sizing.
 6. [App UI LLM Integration](/developers/apps/app-ui-llm) — `open_app_view` / `update_app_view` / `close_app_view`, SSE events, chat ↔ window patterns.

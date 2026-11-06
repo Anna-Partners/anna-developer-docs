@@ -4,18 +4,14 @@ description: "RPC namespaces and methods your iframe can call on the host, with 
 section: apps
 slug: app-ui-host-api
 order: 14
-updated: 2026-10-23
+updated: 2026-11-02
 estimated_minutes: 6
 category: "App UI"
 ---
 
-Every call from your iframe goes through `postMessage → Host Bridge → POST /api/v1/anna-apps/runtime/rpc → anna_app_rpc_dispatcher.dispatch`. The dispatcher does three things in order:
+Every call from your iframe goes through `postMessage → Host Bridge → POST /api/v1/anna-apps/runtime/rpc → anna_app_rpc_dispatcher.dispatch`. The dispatcher authenticates the call — `decode_window_token(t)` against the JWT bound to `(window_uuid, user_id, app_id, version_id)` (TTL 120s, audience `anna-app-window`) — then dispatches to the namespace handler.
 
-1. **Auth.** `decode_window_token(t)` against the JWT bound to `(window_uuid, user_id, app_id, version_id, scopes)` (TTL 120s, audience `anna-app-window`).
-2. **ACL.** `host_api_allows(manifest, ns, method)` checks `manifest.ui.host_api[ns]` (with `*` and `<id>` wildcards). `window.*` is always allowed. Top-level `permissions` is **never** consulted (display-only legacy; rejected at `schema: 3`).
-3. **Per-app grants.** Some namespaces are additionally gated by a user-controlled grant enforced inside the handler/facade: `image_grant`, `media_grant` (`video.*` / `music.*` / `audio.*`), `upload_grant`, `web_grant`, `credentials_grant`, and the install-time `storage_token` scopes for `storage`/`files`.
-
-Then it dispatches to the namespace handler. Any failure returns `{ ok: false, error: { code, message, details? } }`.
+**There is no method-level ACL and no per-app user grant.** Every method below is available to an installed, enabled App; the user's CU quota is the only usage gate. The only manifest-driven checks are the three [capability declarations](/developers/apps/app-manifest#capability-declarations): `credentials.*` for undeclared providers, `storage.*` / `files.*` for undeclared cross-app scopes, and `tools.invoke` for an Executa outside `required_executas` / `optional_executas` all fail with `permission_denied`. Any failure returns `{ ok: false, error: { code, message, details? } }`.
 
 ## RPC envelope
 
@@ -51,7 +47,7 @@ Status legend:
 - ✅ implemented
 - ⏳ stub (defined; returns `not_implemented`)
 
-### `window` *(always granted)*
+### `window`
 
 | method | status | args | result |
 |---|---|---|---|
@@ -69,14 +65,14 @@ Status legend:
 
 | method | status | args | result |
 |---|---|---|---|
-| `list` | ✅ | `{}` | `{ tools: [{ tool_id, plugin_name, tool_name, description, input_schema }] }` filtered to your `host_api.tools` allow-list |
+| `list` | ✅ | `{}` | `{ tools: [{ tool_id, plugin_name, tool_name, description, input_schema }] }` — the Executas in `required_executas` / `optional_executas` |
 | `invoke` | ✅ | `{ tool_id, method?, args, timeoutMs? }` | `{ result }` — routes via NATS to the user's online Anna Agent; `timeoutMs` clamped to **1–180 s** (default 65 s) |
 | `invokeAsync` | ✅ | `{ tool_id, method?, args?, timeoutMs?, clientTag? }` | `{ jobId, state: "queued", deadlineMs }` — returns immediately; see [Async tool jobs](#async-tool-jobs-invokeasync) |
 | `getJob` | ✅ | `{ jobId, sinceSeq?, limit? }` | `JobSnapshot` — authoritative state + incremental progress slice |
 | `cancelJob` | ✅ | `{ jobId, reason? }` | `{ jobId, state, cancelled }` — idempotent |
 | `listJobs` | ✅ | `{ tool_id?, state?, clientTag?, since?, limit? }` | `{ jobs: JobSnapshot[], truncated }` — reload-recovery entry point |
 
-`host_api.tools` is an **optional narrowing** allow-list. When omitted (or empty), the window may invoke **any** `tool_id` declared in `required_executas` / `optional_executas`. Provide explicit refs (e.g. `["required:bundled:foo"]`, `["required:*"]`) only when a window should reach a *subset* of the app's declared executas. Prefer `required:*` over pinning a concrete `tool_id`, since bundled handles are rewritten to concrete ids at publish/dev time and a pinned id will drift.
+The window may invoke **any** `tool_id` declared in `required_executas` / `optional_executas` — those two arrays are the only allow-list (`tool_id` outside them → `permission_denied`). The Executa must be installed and enabled for the user: `required_executas` are installed with the App, `optional_executas` are not. The legacy `host_api.tools` narrowing list is dropped on ingest (refs it named are folded into `optional_executas`).
 
 `method` is **required** when `tool_id` was minted ad-hoc (`tool-{handle}-{slug}-{uniq}` form). For Executas with a registered `(plugin_name, tool_name)`, the dispatcher resolves it from the catalogue and `method` is optional.
 
@@ -307,9 +303,11 @@ In the local-dev harness (`anna-app dev`) these handlers operate on the
 window's 256 KB `runtime_state` blob. In production they are
 overridden at startup to talk to **Anna Persistent Storage (APS)** —
 `scope='app'`, `owner_id=window.app_id` — so values are durable across
-window lifetimes. ACL: `manifest.ui.host_api.storage` must list the called
-method — `storage.get` / `storage.set` / `storage.delete` / `storage.list`
-map to `["get", "set", "delete", "list"]` (or `*`).
+window lifetimes. `storage.get` / `storage.set` / `storage.delete` /
+`storage.list` need no declaration for your own `scope=app` bucket; `scope`
+= `user` / `tool` / another owner's `app` requires the matching
+[`storage.scopes`](/developers/apps/app-manifest#capability-declarations)
+entry (otherwise `permission_denied`).
 
 | method | status | args | result |
 |---|---|---|---|
@@ -328,9 +326,9 @@ concurrent write.
 
 Multi-turn, tool-using agent sessions bound to the user's quota. See
 [LLM & Agent](/developers/apps/llm-and-agent) for the streaming frame shape.
-The ACL is **structured** (`host_api.agent = { session: { auto, fixed }, tools: [...] }`),
-not a flat method list — a session is granted when at least one submode
-(`auto` / `fixed`) is enabled.
+Both submodes are available to every installed App. `host_api.agent.tools`
+only declares the **local-device** (host-kit) tools a session may use —
+server-side tools need no declaration.
 
 | method | status | args | result |
 |---|---|---|---|
@@ -341,20 +339,19 @@ not a flat method list — a session is granted when at least one submode
 | `session.list` | ✅ | `{ include_expired? }` | `{ sessions: […] }` |
 | `session.delete` | ✅ | `{}` | `{ deleted: true }` |
 | `session.refresh` | ✅ | `{}` | `{ … }` — re-mints the session token before expiry |
-| `session.catalog` | ✅ | `{}` | `{ … }` — the tool/model surface available to sessions of this window |
+| `session.catalog` | ✅ | `{}` | `{ platform_tools: [{ name, description, dev_safe, risk_group, declared_in_manifest, eligible, blocked_by? }], manifest_declared: [...], declared_wildcard }` — the tool surface available to sessions of this window |
 
 ### `image`
 
-Host-mediated image generation / editing — no provider key in the bundle.
-Gated by `host_api.image` (method surface) **plus** the per-app
-`image_grant` enforced inside the facade.
+Host-mediated image generation / editing — no provider key in the bundle,
+no declaration needed.
 
 | method | status | args | result |
 |---|---|---|---|
 | `generate` | ✅ | `{ prompt, n?, size?, aspect_ratio?, model?, params?, fit?, reference_image_urls?, modelPreferences? (legacy) }` | `{ images: [{ url, r2_key, width, height, … }], model, requestedSize, size, sizeAdjusted, aspectRatio, fit, params, ignoredParams, usage }` |
 | `edit` | ✅ | `{ prompt, image_url, mask_url?, n?, size?, aspect_ratio?, model?, params?, fit? }` | same shape as `generate` |
 | `generateAsync` | ✅ 0.29.0 | same as `generate` + `{ clientTag?, idempotencyKey? }` | `{ jobId: 'ijob_…', kind: 'image', state: 'queued', estimatedCostCU, deadlineAt, idempotentReplay }` — async job, see [media page](/developers/apps/app-ui-media#image-async-jobs-re-signing) |
-| `editAsync` | ✅ 0.29.0 | same as `edit` + `{ clientTag?, idempotencyKey? }` | same as `generateAsync` (needs `image_grant.allowEdit`) |
+| `editAsync` | ✅ 0.29.0 | same as `edit` + `{ clientTag?, idempotencyKey? }` | same as `generateAsync` |
 | `getJob` | ✅ 0.29.0 | `{ jobId }` | `ImageJobView` — `result.images[].url` re-signed on every call |
 | `cancelJob` | ✅ 0.29.0 | `{ jobId }` | `{ jobId, state: 'cancelled', refunded: true }` \| `{ jobId, state: 'running', cancelPending: false }` |
 | `listJobs` | ✅ 0.29.0 | `{ state?, clientTag?, limit?, cursor? }` | `{ jobs, nextCursor }` — image jobs only |
@@ -390,7 +387,7 @@ default may become `strict` in a future Host API major version.
 compatibility, `params` wins). Values are validated against the model's schema
 (`IMAGE_OPTION_INVALID (-32112)`, `data.{key, reason, allowed}`); keys the model
 does not declare are dropped and listed in `ignoredParams`. `n` above the
-model's `maxN` or your grant's `maxPerCallGenerate` fails with
+model's `maxN` or the platform per-call cap (4) fails with
 `IMAGE_PER_CALL_EXCEEDED (-32107)` and `data.allowed.maxN`.
 
 Catalogue entries also carry `isPlatformDefault` (who the host routes to when
@@ -401,8 +398,7 @@ Models`.
 
 ### `video`
 
-Host-mediated **async** video generation. Gated by `host_api.video` (method
-surface) **plus** the per-app `media_grant.video.enabled`. CU is pre-charged on
+Host-mediated **async** video generation. CU is pre-charged on
 submit and settled / refunded at the terminal state; progress arrives as
 `media_job` SSE events. Full guide: [App UI Media](/developers/apps/app-ui-media).
 
@@ -416,8 +412,7 @@ submit and settled / refunded at the terminal state; progress arrives as
 ### `music`
 
 Host-mediated **async** music generation — the video surface in a different
-modality. Gated by `host_api.music` **plus** the per-app `media_grant.music.enabled`.
-CU is pre-charged on submit (per song / per second / per started minute,
+modality. CU is pre-charged on submit (per song / per second / per started minute,
 whichever unit the model bills in) and settled / refunded at the terminal state;
 progress arrives as the same `media_job` SSE events. Every field is validated
 against the resolved model's catalogue entry and a feature it cannot deliver
@@ -435,9 +430,7 @@ charge. Full guide: [App UI Media → Music](/developers/apps/app-ui-media#music
 ### `audio`
 
 Host-mediated **synchronous** speech synthesis and transcription, plus the
-**realtime voice session**. Gated by `host_api.audio` **plus**
-`media_grant.audio.{enabled, speak, transcribe}` — each sync operation has its
-own user flag; `session` needs **both**. Full guides: [App UI Media](/developers/apps/app-ui-media)
+**realtime voice session**. Full guides: [App UI Media](/developers/apps/app-ui-media)
 (sync) · [App UI Audio Session](/developers/apps/app-ui-audio-session) (realtime).
 
 | method | status | args | result |
@@ -449,18 +442,14 @@ own user flag; `session` needs **both**. Full guides: [App UI Media](/developers
 `session` is not a dispatcher RPC: the SDK posts `audio.session.{open, send,
 flush, context, say, interrupt, close}` and the **host page's bridge** handles
 them locally over its own WebSocket to `/api/v1/anna-apps/runtime/voice`
-(nothing reaches `/runtime/rpc`). Declaring `session` also implies the
-`microphone` browser permission (iframe `allow="microphone 'src'"` +
-`Permissions-Policy: microphone=(self)`); `llm: 'agent'` additionally
-requires a `host_api.agent.session` submode. Recording for `transcribe`
-without a session needs an explicit `"browser_permissions": ["microphone"]`
-in `manifest.ui` — `host_api` is the RPC ACL, browser features are declared
-separately. See [App UI Browser Permissions](/developers/apps/app-ui-browser-permissions).
+(nothing reaches `/runtime/rpc`). Any microphone use — the session or
+recording for `transcribe` — needs `"browser_permissions": ["microphone"]`
+in `manifest.ui` (iframe `allow="microphone 'src'"` +
+`Permissions-Policy: microphone=(self)`). See [App UI Browser Permissions](/developers/apps/app-ui-browser-permissions).
 
 ### `upload`
 
-Invoke-scoped, transient artifact upload to host R2. Gated by
-`host_api.upload` (method surface) **plus** the per-app `upload_grant`.
+Invoke-scoped, transient artifact upload to host R2.
 
 | method | status | args | result |
 |---|---|---|---|
@@ -468,43 +457,25 @@ Invoke-scoped, transient artifact upload to host R2. Gated by
 | `negotiate` | ✅ | `{ mime, purpose, size_bytes }` | `{ upload_url, file_ref }` |
 | `confirm` | ✅ | `{ file_ref }` | `{ url, … }` |
 
-### `artifact`, `fs`, `prefs`
+### `artifact`
 
-Declared in the dispatcher but stubbed today (`not_implemented`). Plan for Phase 3:
+Declared in the dispatcher but stubbed today (`not_implemented`): `artifact.create` / `update` / `delete`. The former `fs.*` / `prefs.get` / `chat.read_history` placeholders were removed from the dispatcher table.
 
-- `artifact.create` / `update` / `delete`
-- `fs.read` / `fs.write` (R2-backed workspace, mirrors the Anna Agent FS)
-- `prefs.get` (read user preference keys)
+`llm.complete` / `llm.stream` / `llm.embed` are **implemented** (host-side calls bound to the user's quota) — see [LLM & Agent](/developers/apps/llm-and-agent); `llm.catalog` (media capability / CU-pricing discovery) is covered in [App UI Media](/developers/apps/app-ui-media#discover-before-you-call). `files.*` (APS object storage), `web.*` (host-managed search/fetch), `apps.*` (launcher) and `credentials.*` (platform accounts — providers listed in `ui.host_api.credentials`) are implemented nexus-side; `mobile.*` executes only inside the anna-mobile shell.
 
-`llm.complete` / `llm.stream` / `llm.embed` are **implemented** (host-side calls bound to the user's quota) — see [LLM & Agent](/developers/apps/llm-and-agent); `llm.catalog` (media capability / CU-pricing discovery, returns only the service types this App is granted) is covered in [App UI Media](/developers/apps/app-ui-media#discover-before-you-call). `files.*` (APS object storage), `web.*` (host-managed search/fetch), `apps.*` (launcher) and `credentials.*` (platform accounts) are implemented nexus-side; `mobile.*` executes only inside the anna-mobile shell. See the namespace table in [App UI Manifest](/developers/apps/app-ui-manifest#host_api) for their method lists.
+## What gates a call
 
-## ACL & per-app grants
+1. **Installed and enabled.** The App must be installed by the user and not disabled (`is_enabled`); otherwise the window token is not minted in the first place. Quota exhaustion surfaces as the facade's quota error, not as a permission error.
+2. **The three declarations**, enforced from the manifest projected onto the window's bound version row: `credentials.*` provider ∈ `ui.host_api.credentials`; `storage.*` / `files.*` cross-app scope ∈ `storage.scopes`; `tools.*` `tool_id` ∈ `required_executas` ∪ `optional_executas` (and that Executa installed and enabled). Each failure is `permission_denied`.
 
-What actually gates a call, in order:
-
-1. **`ui.host_api.<ns>`** must list the method name (or `*`); `window.*` is always allowed; `agent` uses an object spec (`session.auto` / `session.fixed`).
-2. **Per-app user grants** for some namespaces, enforced inside the facade: `image_grant` (`image.*`), `media_grant` (`video.*` / `music.*` / `audio.*`), `upload_grant` (`upload.*`), `web_grant` (`web.*`), `credentials_grant` (`credentials.*`), and the install-time `storage_token` `allowed_scopes` claim for non-default `storage`/`files` scopes.
-
-The top-level manifest `permissions` list is **not** part of this chain — it has zero enforcement sites, is display-only on `schema ≤ 2`, and is rejected at `schema: 3` (permission display is derived from `ui.host_api` + the storage declaration instead).
-
-Anything not declared is rejected with `permission_denied` before reaching the handler.
-
-**Which manifest supplies the ACL?** The one projected onto the window's
-bound version row. For published installs that is the installed (frozen)
-version. For **working-draft installs** (`0.0.0-draft`) the manifest is
-re-projected on every `anna-app apps push` — newly declared `ui.host_api`
-methods take effect immediately for already-open draft windows, no
-reinstall or refresh needed. Per-app **grants** (llm / image / upload /
-executa installs) are still written only at `apps install`, so a brand-new
-grant-backed namespace needs one install even though the ACL gate already
-passes.
+For **working-draft installs** (`0.0.0-draft`) the manifest is re-projected on every `anna-app apps push`, so a newly declared provider / scope / executa takes effect immediately for already-open draft windows — no reinstall needed (a newly added `required_executas` entry still needs the Executa installed, which `apps install` does).
 
 ## Error codes
 
 | Code | When |
 |---|---|
 | `invalid_token` | JWT expired, signature mismatch, or `wid` does not match `window_uuid` |
-| `permission_denied` | `(ns, method)` not in `host_api`, per-app grant disabled, or `tool_id` not in `host_api.tools` allow-list |
+| `permission_denied` | `credentials` provider not in `ui.host_api.credentials`; storage scope not in `storage.scopes`; `tools.*` `tool_id` not in `required_executas` / `optional_executas` |
 | `invalid_arg` | Pydantic validation failure on `args` |
 | `not_found` | window closed; storage key missing |
 | `agent_unavailable` | `tools.invoke` could not route to the user's Anna Agent (no NATS listener) |

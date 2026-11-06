@@ -115,7 +115,7 @@
         },
         {
           "code": "permission_denied",
-          "summary": "`files.upload_init` is not listed in `manifest.ui.host_api.files` — that list is the ONLY ACL gate (`host_api_allows`). `manifest.permissions[]` is display/audit metadata and is never consulted by the dispatcher, and the default app-scoped files bucket needs no `host_capabilities` entry."
+          "summary": "Cross-app scope not declared in manifest `storage.scopes` (the default app bucket never triggers this)."
         },
         {
           "code": "quota_exceeded",
@@ -140,7 +140,7 @@
         "Presigned URL is single-use; refreshing requires a fresh `upload_init` call (and re-reserves quota).",
         "`pending` rows reserve quota until `ttl_seconds` elapses; aggressive UI retries can transiently exhaust quota — surface `quota_exceeded` as a retry-after-delay error.",
         "Availability: the iframe-facing `anna.files.*` surface is served by APS handlers that are only installed when the APS backend is wired. The local-dev CLI harness (`anna-app dev`) returns `not_implemented` for `files.*` unless run with APS forwarding — in that mode apps usually reach object storage indirectly through an Executa's `aps.files` capability instead.",
-        "Authoring caveat: the current `@anna-ai/app-schema` does not yet expose a `files` key under `ui.host_api`, so `anna-app validate` rejects manifests that declare `ui.host_api.files` directly. The Python runtime accepts it, but until the schema catches up most apps use `ui.host_api.tools` plus an Executa that performs the APS files reverse-RPC."
+        "Nothing to declare: `files.*` is available to every installed App; `anna-app validate` warns about legacy `ui.host_api.files` method lists (they are dropped on ingest)."
       ]
     },
     {
@@ -323,7 +323,7 @@
         },
         {
           "code": "permission_denied",
-          "summary": "`files.download_url` is not listed in `manifest.ui.host_api.files` — that list is the ONLY ACL gate (`host_api_allows`). `manifest.permissions[]` is display/audit metadata and is never consulted by the dispatcher, and the default app-scoped files bucket needs no `host_capabilities` entry."
+          "summary": "Cross-app scope not declared in manifest `storage.scopes` (the default app bucket never triggers this)."
         }
       ],
       "example": "const u = await anna.files.download_url({ path: 'images/abc.png', ttl_seconds: 900 });\nimg.src = u.get_url;\n// Force a download instead of inline render:\nconst dl = await anna.files.download_url({\n  path: 'reports/q3.pdf',\n  disposition: 'attachment; filename=\"q3.pdf\"'\n});\nlocation.href = dl.get_url;",
@@ -424,10 +424,10 @@
         },
         {
           "code": "permission_denied",
-          "summary": "`files.download` (or `\"*\"`) is not listed in `manifest.ui.host_api.files`."
+          "summary": "Cross-app scope not declared in manifest `storage.scopes`."
         }
       ],
-      "example": "// Manifest: ui.host_api.files must include \"download\".\nconst r = await anna.files.download({\n  path: 'exports/q3-deck.pptx',\n  filename: 'Q3 業績報告.pptx'\n});\n// r = { ok: true, filename: 'Q3 業績報告.pptx', size_bytes: …, … }\n// The browser save dialog was opened by the HOST page; r.get_url does not exist.",
+      "example": "const r = await anna.files.download({\n  path: 'exports/q3-deck.pptx',\n  filename: 'Q3 業績報告.pptx'\n});\n// r = { ok: true, filename: 'Q3 業績報告.pptx', size_bytes: …, … }\n// The browser save dialog was opened by the HOST page; r.get_url does not exist.",
       "limitations": [
         "Direct in-iframe downloads (Blob URLs, `<a download>`) additionally require the iframe sandbox `allow-downloads` token — present on hosts ≥ 1.1.0-beta.97. `files.download` works on those hosts without relying on the token.",
         "The download is triggered by a programmatic top-level anchor click; browsers may coalesce/deny rapid repeated downloads without fresh user gestures — call it from a click handler.",
@@ -524,7 +524,7 @@
         },
         {
           "code": "permission_denied",
-          "summary": "`files.list` is not listed in `manifest.ui.host_api.files` — that list is the ONLY ACL gate (`host_api_allows`). `manifest.permissions[]` is display/audit metadata and is never consulted by the dispatcher, and the default app-scoped files bucket needs no `host_capabilities` entry."
+          "summary": "Cross-app scope not declared in manifest `storage.scopes` (the default app bucket never triggers this)."
         }
       ],
       "example": "let cursor = null;\nconst all = [];\ndo {\n  const page = await anna.files.list({ prefix: 'images/', cursor, limit: 200 });\n  all.push(...page.items);\n  cursor = page.next_cursor;\n} while (cursor);\nconsole.log(`${all.length} images`);",
@@ -584,7 +584,7 @@
         },
         {
           "code": "permission_denied",
-          "summary": "`files.delete` is not listed in `manifest.ui.host_api.files` — that list is the ONLY ACL gate (`host_api_allows`). `manifest.permissions[]` is display/audit metadata and is never consulted by the dispatcher, and the default app-scoped files bucket needs no `host_capabilities` entry."
+          "summary": "Cross-app scope not declared in manifest `storage.scopes` (the default app bucket never triggers this)."
         }
       ],
       "example": "// Safe delete: refuse if someone re-uploaded since we last looked\nconst page = await anna.files.list({ prefix: 'images/', limit: 1 });\nconst { path, etag } = page.items[0];\ntry {\n  await anna.files.delete({ path, if_match: etag });\n} catch (e) {\n  if (e.code === 'precondition_failed') {\n    // someone else rewrote it; reload and re-confirm with the user\n  } else {\n    throw e;\n  }\n}",

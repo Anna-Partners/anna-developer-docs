@@ -4,7 +4,7 @@ description: "Ask the host to generate short videos and music (async jobs), synt
 section: tools
 slug: executa-media
 order: 13
-updated: 2026-10-23
+updated: 2026-11-02
 estimated_minutes: 12
 ---
 
@@ -15,24 +15,14 @@ Available from Executa protocol **v2** onward; companion to [Image Generation](/
 > [!NOTE]
 > **Video and music are asynchronous.** Unlike `image/generate` (seconds), they render for minutes. `video/generate` / `music/generate` return a **job** immediately; you then poll `video/get_job` / `music/get_job` until a terminal state (or let the SDK's `generate_await` / `music_generate_await` helpers do it). `audio/speak` and `audio/transcribe` stay synchronous.
 
-## Three pre-conditions
+## One pre-condition
 
-End-to-end media generation requires **all** of:
+End-to-end media generation requires **v2 negotiation**: the host sends `initialize`; the plugin replies with `protocolVersion: "2.0"` and lists `client_capabilities.video` / `client_capabilities.music` (and `audio.speak` / `audio.transcribe` for the audio methods).
 
-1. **v2 negotiation.** The host sends `initialize`; the plugin replies with `protocolVersion: "2.0"` and lists `client_capabilities.video` / `client_capabilities.music` (and `audio.speak` / `audio.transcribe` for the audio methods).
-2. **Manifest declaration.** Your published manifest declares the capabilities it intends to use:
-   ```json
-   {
-     "host_capabilities": ["llm.video", "llm.music", "llm.audio.speak", "llm.audio.transcribe"]
-   }
-   ```
-   The publish validator rejects unknown capability strings. Each audio method has its **own** capability — declaring `llm.audio.speak` does not unlock `audio/transcribe`.
-3. **User grant.** The end user enabled the **media grant** (`media_grant.audio.enabled = true`, with the `speak` / `transcribe` sub-toggles; `media_grant.video.enabled` for video; `media_grant.music.enabled` for music) for this Executa in their Anna Admin panel.
-
-If any pre-condition is missing, the host returns `VIDEO_NOT_GRANTED (-32120)` / `MUSIC_NOT_GRANTED (-32160)` / `AUDIO_NOT_GRANTED (-32140)` and the reverse-RPC never reaches a provider. There are **no per-feature rate caps** beyond that — the user's CU quota pool is the only user-level gate; a small **per-invoke budget** (TTS characters, STT seconds) protects against a runaway single invoke. Video and music jobs have no per-invoke cap: every job is pre-charged in CU before submission.
+There is no manifest declaration and no user toggle: the host mints a `media_token` on **every** invoke of every installed, enabled Executa. `VIDEO_NOT_GRANTED (-32120)` / `MUSIC_NOT_GRANTED (-32160)` / `AUDIO_NOT_GRANTED (-32140)` in production mean the Executa is not installed or the user disabled it. There are **no per-feature rate caps** beyond that — the user's CU quota pool is the only user-level gate; a small **per-invoke budget** (TTS characters, STT seconds) protects against a runaway single invoke. Video and music jobs have no per-invoke cap: every job is pre-charged in CU before submission.
 
 > [!NOTE]
-> `audio/transcribe` requires host **matrix ≥ 2026-10-12** (`METHOD_AUDIO_TRANSCRIBE`); `music/*` requires **matrix ≥ 2026-10-19 / nexus dispatcher 0.28.0** (`METHOD_MUSIC_GENERATE`). On an older host the SDK call fails with `method_not_found`, which the SDKs surface as `AUDIO_NOT_GRANTED` / `MUSIC_NOT_GRANTED` — treat it as "feature unavailable", not as a user-permission problem.
+> `audio/transcribe` requires host **matrix ≥ 2026-10-12** (`METHOD_AUDIO_TRANSCRIBE`); `music/*` requires **matrix ≥ 2026-10-19 / nexus dispatcher 0.28.0** (`METHOD_MUSIC_GENERATE`). On an older host the SDK call fails with `method_not_found`, which the SDKs surface as `AUDIO_NOT_GRANTED` / `MUSIC_NOT_GRANTED` — treat it as "feature unavailable".
 
 ## Billing: pre-charge + refund
 
@@ -343,7 +333,7 @@ stt, err := c.TranscribeBytes(wavBytes, "wav", "zh", 90*time.Second)
 
 | Code     | Constant                     | Meaning |
 | -------- | ---------------------------- | ------- |
-| `-32120` | `VIDEO_NOT_GRANTED`          | User has not enabled the media grant's video toggle for this Executa. |
+| `-32120` | `VIDEO_NOT_GRANTED`          | Executa not installed or disabled by the user. |
 | `-32121` | `VIDEO_QUOTA_EXCEEDED`       | User's CU pool cannot cover `estimatedCostCU`. |
 | `-32122` | `VIDEO_INVALID_REQUEST`      | Bad `durationSec` / `resolution` / `aspectRatio`, empty prompt, etc. `error.data` carries the allowed range. |
 | `-32123` | `VIDEO_PROVIDER_ERROR`       | Upstream provider 5xx / render failure (CU hold refunded). |
@@ -352,7 +342,7 @@ stt, err := c.TranscribeBytes(wavBytes, "wav", "zh", 90*time.Second)
 | `-32126` | `VIDEO_JOB_NOT_CANCELLABLE`  | Job already terminal. |
 | `-32127` | `VIDEO_CONCURRENCY_EXCEEDED` | **Reserved, not raised.** There is no per-invoke or platform-wide video job cap: every job is pre-charged in CU before submission, so the user's CU pool is the only gate. (The former `max_video_jobs` per-invoke counter was removed on 2026-10-19.) |
 | `-32128` | `VIDEO_CONTENT_REJECTED`     | Provider safety system rejected the prompt/image. |
-| `-32140` | `AUDIO_NOT_GRANTED`          | Media token / manifest / user grant does not allow this audio method (`speak` and `transcribe` are gated separately). Also what SDKs report when the host is too old to know `audio/transcribe`. |
+| `-32140` | `AUDIO_NOT_GRANTED`          | Executa not installed or disabled by the user. Also what SDKs report when the host is too old to know `audio/transcribe`. |
 | `-32141` | `AUDIO_QUOTA_EXCEEDED`       | CU pool cannot cover the character-count / duration price. |
 | `-32142` | `AUDIO_TEXT_TOO_LONG`        | `text` exceeds the model's per-call character cap, **or** the per-invoke character budget (`max_audio_chars`, default 8000) is exhausted — the message says which. |
 | `-32143` | `AUDIO_TOO_LONG`             | Input audio exceeds the transcription caps: > 10 MB inline, > 25 MB by URL, or > 600 s (`wav`). `error.data.allowed` carries the cap. |
@@ -361,7 +351,7 @@ stt, err := c.TranscribeBytes(wavBytes, "wav", "zh", 90*time.Second)
 | `-32146` | `AUDIO_MODEL_UNAVAILABLE`    | No active TTS/STT model matches the request. |
 | `-32147` | `AUDIO_CONTENT_REJECTED`     | Provider safety system rejected the text. |
 | `-32148` | `AUDIO_INVOKE_BUDGET_EXCEEDED` | Per-invoke transcription seconds budget exhausted (`max_audio_seconds`, default 600, per `tool_invoke_id`). |
-| `-32160` | `MUSIC_NOT_GRANTED`          | Manifest lacks `llm.music`, `media_grant.music.enabled` is off, or the token claim `allow_music` is false. Also what SDKs report when the host is too old to know `music/*`. |
+| `-32160` | `MUSIC_NOT_GRANTED`          | Executa not installed or disabled by the user. Also what SDKs report when the host is too old to know `music/*`. |
 | `-32161` | `MUSIC_PROVIDER_ERROR`       | Upstream music provider failure (CU hold refunded). |
 | `-32162` | `MUSIC_INVALID_REQUEST`      | Malformed field (prompt too short/long, non-integer `durationSec`, unknown `options` key, bad `idempotencyKey` / `referenceImageUrl`). `error.data.allowed` carries the model's space. |
 | `-32163` | `MUSIC_MODEL_UNAVAILABLE`    | Hinted model is not active, or no text-to-music model is configured. |

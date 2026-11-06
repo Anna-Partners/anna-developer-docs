@@ -4,7 +4,7 @@ description: "Develop apps that call llm.complete or anna.agent.session against 
 section: apps
 slug: local-dev-llm
 order: 17
-updated: 2026-06-07
+updated: 2026-11-02
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -161,11 +161,10 @@ in dev" placeholder).
 |---|---|---|
 | `no PAT on disk` | Never logged in for this host | `anna-app login --host …` |
 | `PAT expired` | Default 90-day TTL elapsed | Re-login |
-| `session.mint failed: HTTP 403` | Manifest doesn't grant the requested kind/submode | Check `host_api.llm` / `host_api.agent.session` |
+| `session.mint failed: HTTP 403` | PAT does not own this app, or `fixed_client_id` belongs to another user | Check `anna-app whoami` and the client id |
 | `APP_SESSION_EXPIRED` on run/refresh | Session crossed its idle (30 min agent) or hard (24 h) deadline | Create a fresh session; expired ones auto-release quota |
 | `APP_SESSION_TOKEN_EXPIRED` | Capability token lapsed but session is alive | Retry — the harness self-heals the token; or call `session.refresh` |
 | Session can't be deleted after restart | Lost the in-memory token handle | Use token-free `session.delete` (PAT) or `POST /dev/session/revoke` with the uuid |
-| `permission_denied` from the iframe | Manifest grant missing | Same as above |
 | Tokens you didn't expect | Apps you forgot leaving sessions open | `revoke-all` (`only_expired:true`) or revoke the PAT |
 
 

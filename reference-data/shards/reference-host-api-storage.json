@@ -39,8 +39,8 @@
           "summary": "Visibility scope. `app` (default) reads the calling App's per-user bucket; `user` reads the user's cross-App bucket; `tool` is reserved (not yet exposed to iframes).",
           "notes": [
             "`invalid_arg` if not one of `user` / `app` / `tool`.",
-            "PRIMARY gate: calling `storage.*` at all requires the method to be listed in `manifest.ui.host_api.storage` (e.g. `[\"get\",\"set\",\"delete\",\"list\"]`) — this is what `host_api_allows` checks. `manifest.permissions[]` is display/audit only and is NEVER consulted by the dispatcher.",
-            "The default `(scope=app, owner=self)` bucket needs NO further grant once `ui.host_api.storage` allows the method. Only NON-default scopes/owners require an extra `aps.scope.<scope>.<read|write>` (or `aps.scope.admin`) entry in `manifest.host_capabilities`.",
+            "`storage.*` itself needs no declaration — every installed App may call it.",
+            "The default `(scope=app, owner=self)` bucket needs NO declaration. Only NON-default scopes/owners require the matching entry in the top-level manifest `storage.scopes` (`{user | app | tool: \"r\" | \"w\" | \"rw\"}`; legacy `aps.scope.<scope>.<read|write>` strings normalize to it).",
             "Any non-default scope (e.g. `scope=user`) requires the manifest to declare `aps.scope.user.read` (or `aps.scope.admin`); the gate is enforced by `_check_storage_scope` *before* the handler runs.",
             "`scope=tool` raises `not_implemented` today."
           ]
@@ -94,7 +94,7 @@
         "Hot-path read: no per-call rate limit, but every miss still hits Postgres. Cache locally in the bundle if you poll on a timer.",
         "TTL-expired rows are treated as missing on read but the underlying row may still consume bytes until the next GC sweep. `size_bytes` quota is released eagerly on `delete`.",
         "`metadata` and `tags` are not returned by `get` (use `list` to project them).",
-        "Cross-owner reads (`scope=app`, `owner=<other-app>`) are still gated on a future implementation; today they raise `not_implemented` even when the manifest grants `aps.scope.app.read`."
+        "Cross-owner reads (`scope=app`, `owner=<other-app>`) are still gated on a future implementation; today they raise `not_implemented` even when the manifest declares `storage.scopes.app`."
       ]
     },
     {
@@ -256,7 +256,7 @@
         {
           "name": "not_granted",
           "code": "not_granted",
-          "desc": "User has not granted the App APS access at all (admin-level revoke)."
+          "desc": "App not installed, disabled by the user, or no active subscription."
         },
         {
           "name": "not_implemented",

@@ -8,7 +8,7 @@
       "group": "Embeddings",
       "since": "protocol v2.0 · 2026-05",
       "direction": "Plugin → Matrix Agent → Nexus `POST /api/v1/copilot/embeddings` → embedding registry → provider",
-      "summary": "Compute one or more dense embedding vectors **on the user's behalf** from a stdio Executa plugin — no provider API key, no model name leaked to the plugin, no per-plugin billing. The host owns the registry; the plugin only sees a stable alias (`anna-managed-v1` → 1536-dim) and gets back an OpenAI-compatible envelope. Independent from `sampling/createMessage` and `agent/*`: shares the same `sampling_token` mint flow but bills against an **independent embed surface** (`LLMRequestType.EXECUTA_EMBED`) — exhausting your LLM quota does not block embeddings and vice-versa.\n\n**Pre-requisites** (all four required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.embed = {}` (or `client_capabilities.sampling = {}` — the same token is reused) on `initialize`. Without v2 the reverse-RPC returns `EMBED_NOT_NEGOTIATED` (-32507).\n2. **Manifest declaration.** `host_capabilities: [\"llm.embed\"]`. Missing this → `EMBED_NOT_GRANTED` (-32501) at first call.\n3. **User grant.** End user has the Executa enabled (`UserExecuta.is_enabled=true`). Optional explicit opt-out via `UserExecuta.custom_config.embed_grant = {enabled: false}` → `EMBED_USER_DENIED` (-32508). Default when omitted: enabled.\n4. **Platform switch.** `EMBED_API_ENABLED = true` (default). Setting to `false` shuts down **both** the iframe `llm.embed` path and the plugin `embeddings/create` path with `EMBED_NOT_NEGOTIATED`.\n\n**Auth chain.** Plugin only ever holds a `sampling_token` — the same token Matrix Agent injected for `sampling/createMessage`. The Agent forwards the reverse-RPC body to Nexus `POST /api/v1/copilot/embeddings` with `Authorization: Bearer <sampling_token>`; Nexus decodes the token claims (`user_id`, `executa_tool_id`, `tool_invoke_id`), enforces equality with the body fields, then dispatches into the embedding registry. The plugin never sees a bearer to a provider, never sees a real model name, and cannot impersonate another user.",
+      "summary": "Compute one or more dense embedding vectors **on the user's behalf** from a stdio Executa plugin — no provider API key, no model name leaked to the plugin, no per-plugin billing. The host owns the registry; the plugin only sees a stable alias (`anna-managed-v1` → 1536-dim) and gets back an OpenAI-compatible envelope. Independent from `sampling/createMessage` and `agent/*`: shares the same `sampling_token` mint flow but bills against an **independent embed surface** (`LLMRequestType.EXECUTA_EMBED`) — exhausting your LLM quota does not block embeddings and vice-versa.\n\n**Pre-requisites** (all three required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.embed = {}` (or `client_capabilities.sampling = {}` — the same token is reused) on `initialize`. Without v2 the reverse-RPC returns `EMBED_NOT_NEGOTIATED` (-32507).\n2. **Installed and enabled.** `UserExecuta.is_enabled=true`; a disabled Executa → `EMBED_NOT_GRANTED` (-32501). There is no manifest declaration and no user toggle beyond disable / uninstall — the `sampling_token` is minted on every invoke.\n3. **Platform switch.** `EMBED_API_ENABLED = true` (default). Setting to `false` shuts down **both** the iframe `llm.embed` path and the plugin `embeddings/create` path with `EMBED_NOT_NEGOTIATED`.\n\n**Auth chain.** Plugin only ever holds a `sampling_token` — the same token Matrix Agent injected for `sampling/createMessage`. The Agent forwards the reverse-RPC body to Nexus `POST /api/v1/copilot/embeddings` with `Authorization: Bearer <sampling_token>`; Nexus decodes the token claims (`user_id`, `executa_tool_id`, `tool_invoke_id`), enforces equality with the body fields, then dispatches into the embedding registry. The plugin never sees a bearer to a provider, never sees a real model name, and cannot impersonate another user.",
       "wire": {
         "json_rpc_method": "embeddings/create",
         "transport": "stdio JSON-RPC 2.0 (line-delimited)",
@@ -69,7 +69,7 @@
         {
           "name": "EMBED_NOT_GRANTED",
           "code": -32501,
-          "desc": "Sampling token missing from handler `ctx`, `UserExecuta` row not found / disabled for the calling user, or manifest does not declare `host_capabilities: [\"llm.embed\"]`. Same code is reused for all three to keep the failure surface terse — read `data` / `message` for the discriminator."
+          "desc": "`UserExecuta` row not found / disabled for the calling user (or, outside production, the `sampling_token` is missing from handler `ctx`). Read `data` / `message` for the discriminator."
         },
         {
           "name": "EMBED_QUOTA_EXCEEDED",
@@ -104,7 +104,7 @@
         {
           "name": "EMBED_USER_DENIED",
           "code": -32508,
-          "desc": "`UserExecuta.custom_config.embed_grant = {enabled: false}` — user explicitly opted out for this Executa. Distinct from `NOT_GRANTED` (which is a missing grant) and from `NOT_NEGOTIATED` (which is a missing capability)."
+          "desc": "Retained wire code; no longer raised — the per-Executa embed opt-out was removed together with the user grant layer. Disable the Executa instead."
         }
       ],
       "limitations": [

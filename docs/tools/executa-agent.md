@@ -4,7 +4,7 @@ description: "Drive stateful, tool-using Anna Agent sessions from a stdio plugin
 section: tools
 slug: executa-agent
 order: 10
-updated: 2026-05-15
+updated: 2026-11-02
 estimated_minutes: 8
 ---
 
@@ -23,15 +23,7 @@ L1 is a convenience wrapper — if you only need single-turn text, prefer plain 
 
 ## Pre-conditions
 
-End-to-end agent sessions need **all** of:
-
-1. **v2 negotiation.** Same handshake as sampling — see [Lifecycle](/developers/tools/executa-lifecycle#v2-capability-handshake).
-2. **Manifest declares both grants:**
-   ```json
-   { "host_capabilities": ["llm.sample", "llm.agent.auto"] }
-   ```
-   `llm.sample` unlocks L1 (`agent/complete`); `llm.agent.auto` unlocks L2 (`agent/session.*`). Without `llm.agent.auto` the host returns `-32041 AGENT_NOT_GRANTED`.
-3. **User grant.** The end user enabled the agent capability for this Executa in Anna Admin. The grant carries the same per-invoke token caps as sampling, plus a `granted_tools` whitelist.
+End-to-end agent sessions need only **v2 negotiation** — the same handshake as sampling; see [Lifecycle](/developers/tools/executa-lifecycle#v2-capability-handshake). There is nothing to declare in the manifest and no user toggle: every installed, enabled Executa receives a `sampling_token` on each invoke, and that token is what unlocks both L1 (`agent/complete`) and L2 (`agent/session.*`). Per-invoke caps are platform constants.
 
 ## Auth chain (no bearer token in the plugin)
 
@@ -56,7 +48,7 @@ This is **symmetric to sampling** — the plugin is never trusted with a long-TT
 
 | Method                  | Purpose                                              |
 |-------------------------|------------------------------------------------------|
-| `agent/session.create`  | Mint an app session, return `{app_session_uuid, thread_id, agent_submode, granted_tools}` |
+| `agent/session.create`  | Mint an app session, return `{app_session_uuid, thread_id, agent_submode, granted_tools}` (`granted_tools` = the session's effective tool set) |
 | `agent/session.run`     | Send a user message, receive an array of frames     |
 | `agent/session.cancel`  | Abort an in-flight `run_id`                         |
 | `agent/session.history` | (deferred — returns `[]` until v2.2)                |
@@ -91,14 +83,14 @@ Hard cap: **4096 frames per run**. Exceeding returns `-32047 AGENT_RUN_TOO_LARGE
 
 | Code     | Name                              | Meaning                                        |
 |----------|-----------------------------------|------------------------------------------------|
-| `-32041` | `AGENT_NOT_GRANTED`               | Manifest missing `llm.agent.auto`              |
+| `-32041` | `AGENT_NOT_GRANTED`               | No `sampling_token` in the invoke context — cannot happen for an installed, enabled Executa |
 | `-32042` | `AGENT_INVALID_SUBMODE`           | `kind=agent` without a valid submode           |
 | `-32043` | `AGENT_FIXED_REQUIRES_CLIENT_ID`  | `kind=fixed` without `fixed_client_id`         |
 | `-32044` | `AGENT_UNKNOWN_SESSION`           | `app_session_uuid` not in the host cache       |
 | `-32045` | `AGENT_INVALID_UUID`              | uuid not owned by `(this user, this plugin)`   |
 | `-32046` | `AGENT_NEXUS_ERROR`               | Upstream nexus failure                         |
 | `-32047` | `AGENT_RUN_TOO_LARGE`             | Run exceeded the 4096-frame buffer cap         |
-| `-32048` | `AGENT_TOOL_NOT_GRANTED`          | Requested a tool not in `granted_tools`        |
+| `-32048` | `AGENT_TOOL_NOT_GRANTED`          | Requested a tool outside the session's effective tool set (`granted_tools`) |
 
 `AgentError` shares its base class with `SamplingError` in the Python / Node SDKs, so a single `except SamplingError` covers both surfaces.
 
@@ -135,11 +127,11 @@ if not agent.dispatch_response(msg):
     sampling.dispatch_response(msg)
 ```
 
-For a polished version (manifest, grant flags, both tools `ask_agent` and `ask_complete`), see the upstream [`examples/python/executa-agent-demo/`](https://github.com/whtcjdtc2007/anna-executa-examples/tree/main/examples/python/executa-agent-demo).
+For a polished version (manifest, both tools `ask_agent` and `ask_complete`), see the upstream [`examples/python/executa-agent-demo/`](https://github.com/whtcjdtc2007/anna-executa-examples/tree/main/examples/python/executa-agent-demo).
 
 ## Symmetry with anna-app
 
-Same lifecycle, same frame shapes, same grant gating — only the transport differs (postMessage in iframe, stdio JSON-RPC in plugin):
+Same lifecycle, same frame shapes — only the transport differs (postMessage in iframe, stdio JSON-RPC in plugin):
 
 ```ts
 // inside an anna-app iframe

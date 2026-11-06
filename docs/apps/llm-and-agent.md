@@ -4,7 +4,7 @@ description: "Call llm.complete and run a multi-turn agent session from inside y
 section: apps
 slug: llm-and-agent
 order: 16
-updated: 2026-10-26
+updated: 2026-11-02
 estimated_minutes: 9
 category: "App UI"
 ---
@@ -19,13 +19,17 @@ category: "App UI"
 This page covers what runs **inside the iframe**. For the auto-injected
 UI orchestration tools (`open_app_view` / `update_app_view`), see
 [App UI LLM Integration](app-ui-llm.md) — that's a separate, host-side
-mechanism and does not require any host_api grant.
+mechanism.
 
 ---
 
-## 1. Manifest grants
+## 1. What you declare
 
-The host enforces ACL by `manifest.ui.host_api`. Two independent grants:
+`anna.llm.*` and `anna.agent.session(...)` — both submodes, `auto` and
+`fixed` — are available to every installed, enabled App. There is no
+`host_api` method list and no user toggle; the user's CU quota is the usage
+gate. The one declaration that matters here is the **local-device tool
+list** for sandbox agent sessions:
 
 ```json
 {
@@ -33,25 +37,15 @@ The host enforces ACL by `manifest.ui.host_api`. Two independent grants:
     "bundle": { "entry": "index.html" },
     "views": [{ "name": "main", "default": true }],
     "host_api": {
-      "llm": ["complete"],
-      "agent": {
-        "session": { "auto": true, "fixed": null },
-        "tools":   ["doc_read", "fs_read_file"]
-      }
+      "agent": { "tools": ["fs_read_file", "exec_run"] }
     }
   }
 }
 ```
 
-| Field | Effect |
-|---|---|
-| `llm: ["complete"]` | Allows `anna.llm.complete(...)` from the iframe |
-| `agent.session.auto: true` | Allows `anna.agent.session({ submode: "auto" })` |
-| `agent.session.fixed: { client_ids: ["..."] }` | Allows `submode: "fixed"` with a pinned executa client_id |
-| `agent.tools` | Platform tools the agent session may use (`["*"]` = all platform tools) |
-
-If neither `auto` nor `fixed` is set, **all** `agent.session.*` calls
-return `permission_denied` regardless of namespace.
+`fixed` sessions bind to one of the **current user's** registered Anna
+Agent clients — `fixed_client_id` must belong to the user (otherwise
+`-32004 invalid request`); an offline client is accepted with a warning.
 
 ### 1.1 Tool surface — declaration is consent
 
@@ -59,30 +53,27 @@ The effective tool set of a sandbox agent session is a pure intersection,
 identical for every user of the same app version:
 
 ```
-effective = platform registry ∩ ui.host_api.agent.tools ∩ quotaCaps/per-run allowed_tools
+effective = requested ∩ (server_side ∪ (host_kit ∩ ui.host_api.agent.tools))
 ```
 
-- **Declared is enough.** There is no per-tool user grant: once the user
-  approves the single **Agent** item on the app's permission gate (which
-  displays your declared tool list, host-kit tools flagged ⚠), every
-  declared tool resolves. You never have to ask users to toggle
-  individual tools.
-- **`["*"]` wildcard.** Declaring `"tools": ["*"]` (must be the sole
-  element) expands to the full platform registry at session-create time —
-  new platform tools are included automatically. Prefer enumerating the
-  tools you actually use: a minimal declaration means a smaller consent
-  surface and more precise `agent.session.catalog` diagnostics.
-- **Risk groups.** Server-side tools (`doc_read`, `sheet_read`,
-  `web_search` — the latter also requires the user's Web permission) have
-  no local side effects. Host-kit tools (`fs_*`, `exec_run*`,
-  `browser_*`) execute on the user's own machine and are flagged ⚠ in the
-  permission gate; they also need the user's agent to be online.
+- **Server-side tools need no declaration.** `doc_read`, `sheet_read`,
+  `web_search`, … run on the platform and have no local side effects; every
+  session can request them.
+- **Host-kit tools must be declared.** `fs_*`, `exec_run*`, `browser_*`
+  execute on the user's own machine; only those listed in `agent.tools`
+  resolve. They also need the user's agent to be online. Declaring any of
+  them adds a *Local device access* line to the App's Store summary and is
+  what reviewers look at.
+- **`["*"]` wildcard.** `"tools": ["*"]` (must be the sole element) means
+  every host-kit tool, present and future. Prefer enumerating the tools you
+  actually use — a smaller surface and more precise `agent.session.catalog`
+  diagnostics.
 - **`inherit_host_tools` is retired for app sessions.** Requests carrying
   it are accepted and ignored (the run emits an `INHERIT_IGNORED` warning
   frame). Declare the tools you need instead.
-- **Debugging `granted_tools: []`.** If a session resolves zero tools,
-  check the manifest declaration (`agent.session.catalog()` shows
-  `blocked_by: "manifest"` per tool) — the user grant is *not* the cause.
+- **Debugging an empty tool set.** `agent.session.catalog()` returns
+  `{ platform_tools: [{ name, description, dev_safe, risk_group, declared_in_manifest, eligible, blocked_by? }], manifest_declared, declared_wildcard }` —
+  a host-kit tool you forgot to declare shows `blocked_by: "manifest"`.
 
 ---
 
@@ -135,7 +126,7 @@ reasons fall back to `"endTurn"`.
 
 ### 2.0 Output caps — sync 8 192 / stream 65 536
 
-There is no per-app "max tokens" grant to configure. The effective output
+There is no per-app "max tokens" setting to configure. The effective output
 cap is resolved per call:
 
 ```
@@ -165,7 +156,6 @@ and resolves with the identical single-result shape.
 
 | `error.code` | When |
 |---|---|
-| `permission_denied` | Manifest doesn't include `llm: ["complete"]` |
 | `not_implemented` | Host runtime didn't wire this method (e.g. local harness with `--no-llm`) |
 | `quota_exceeded` | User has hit their daily/per-app cap |
 | `invalid_arg` | Missing/empty `messages`, bad role, etc. |
@@ -577,7 +567,7 @@ timeout — it frees the slot immediately.
 1. App calls `anna.agent.session(...)` → host mints an
    `app_session_token` (JWT, audience `aps-llm`, type
    `anna_app_session`, ~10 min TTL).
-2. Token includes the `app_session_uuid` and the submode/fixed grant.
+2. Token includes the `app_session_uuid` and the submode (plus the fixed client id).
 3. `sess.run()` posts to `/api/v1/copilot/app/agent` with that token.
 4. The **token TTL is decoupled from the session lifetime** (§3.0). The
    token is a short-lived *capability*; the `AnnaAppSession` row is the
@@ -604,16 +594,18 @@ Branch on `error.name` (the stable string), not the numeric code.
 
 ## 6. Quick reference
 
-| Iframe call | Host endpoint | Manifest grant required |
-|---|---|---|
-| `anna.llm.complete(req)` | `POST /api/v1/copilot/app/complete` | `llm: ["complete"]` |
-| `anna.llm.catalog({serviceType?})` | `/runtime/rpc` only (dispatcher `llm.catalog`, no standalone HTTP route) — see [App UI Media](/developers/apps/app-ui-media#discover-before-you-call) | `llm: ["catalog"]` |
-| `anna.agent.session({...})` | `POST /api/v1/copilot/app/sessions` | `agent.session.auto` or `.fixed` |
-| `sess.run({content, maxTokens?, thinking?})` | `POST /api/v1/copilot/app/agent` (SSE) | (covered by session grant) |
-| `sess.cancel(runId)` | `POST /api/v1/copilot/app/agent/cancel` | (covered) |
-| `sess.refresh()` | `POST /api/v1/copilot/app/sessions/{uuid}/refresh` | (covered) |
-| `sess.delete()` | `DELETE /api/v1/copilot/app/sessions/{uuid}` | (covered) |
-| `anna.agent.list({...})` | `GET /api/v1/copilot/app/sessions` | (covered) |
+| Iframe call | Host endpoint |
+|---|---|
+| `anna.llm.complete(req)` | `POST /api/v1/copilot/app/complete` |
+| `anna.llm.catalog({serviceType?})` | `/runtime/rpc` only (dispatcher `llm.catalog`, no standalone HTTP route) — see [App UI Media](/developers/apps/app-ui-media#discover-before-you-call) |
+| `anna.agent.session({...})` | `POST /api/v1/copilot/app/sessions` |
+| `sess.run({content, maxTokens?, thinking?})` | `POST /api/v1/copilot/app/agent` (SSE) |
+| `sess.cancel(runId)` | `POST /api/v1/copilot/app/agent/cancel` |
+| `sess.refresh()` | `POST /api/v1/copilot/app/sessions/{uuid}/refresh` |
+| `sess.delete()` | `DELETE /api/v1/copilot/app/sessions/{uuid}` |
+| `anna.agent.list({...})` | `GET /api/v1/copilot/app/sessions` |
+
+No manifest entry is required for any of these.
 
 > The iframe SDK reaches all of these over its `postMessage` → `/runtime/rpc`
 > relay, so the browser never holds an `app_session_token`. The HTTP routes
@@ -677,8 +669,8 @@ once the run completes. The SDK iterates those frames so your code is identical
 to anna-app's `agent.session().run()`. A future protocol bump will switch to
 real-time push without changing the SDK API.
 
-**Manifest**: declare `host_capabilities: ["llm.sample", "llm.agent.auto"]` in
-your plugin manifest so users see exactly what they're authorizing. See the
+**Manifest**: nothing to declare — every installed, enabled Executa receives a
+`sampling_token` on each invoke. See the
 [`executa-agent-demo` example](https://github.com/talentai/anna-executa-examples/tree/main/examples/executa-agent-demo)
 for an end-to-end working plugin.
 

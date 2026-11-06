@@ -106,7 +106,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.music` does not list this method, or the user's `media_grant.music.enabled` is off for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -200,7 +200,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.music` does not list this method, or the user's `media_grant.music.enabled` is off for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -254,7 +254,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.music` does not list this method, or the user's `media_grant.music.enabled` is off for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -337,7 +337,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.music` does not list this method, or the user's `media_grant.music.enabled` is off for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {

@@ -151,7 +151,7 @@
             },
             {
               "name": "describe",
-              "desc": "Return the manifest (`name`, `version`, `tools[]`, `credentials[]`, `host_capabilities[]`, `runtime`). Called once per spawn and cached. **Result MUST be the manifest itself**, not wrapped — `from_dict` reads `data[\"name\"]` directly.",
+              "desc": "Return the manifest (`name`, `version`, `tools[]`, `credentials[]`, optional `storage.scopes`, `runtime`). Called once per spawn and cached. **Result MUST be the manifest itself**, not wrapped — `from_dict` reads `data[\"name\"]` directly.",
               "tags": [
                 {
                   "label": "required",
@@ -198,11 +198,11 @@
           "items": [
             {
               "name": "sampling/createMessage",
-              "desc": "Borrow the host's LLM for a single completion. Requires v2 negotiation + manifest `host_capabilities: [\"llm.sample\"]` + user grant. See `executa-sampling`."
+              "desc": "Borrow the host's LLM for a single completion. Requires v2 negotiation only — the `sampling_token` is minted on every invoke of an installed, enabled Executa. See `executa-sampling`."
             },
             {
               "name": "agent/session.create · run · cancel · history · delete",
-              "desc": "Drive multi-turn stateful agent sessions from a plugin. Requires `host_capabilities: [\"llm.agent.auto\"]`. See `executa-agent-sessions`."
+              "desc": "Drive multi-turn stateful agent sessions from a plugin. Rides the same per-invoke `sampling_token`; nothing to declare. See `executa-agent-sessions`."
             },
             {
               "name": "agent/complete",
@@ -272,10 +272,6 @@
             {
               "name": "credentials[]",
               "desc": "Array of `CredentialSchema`. Declares API keys / OAuth tokens the plugin needs; host renders config UI and injects via `context.credentials`. See `executa-credentials`."
-            },
-            {
-              "name": "host_capabilities[]",
-              "desc": "Whitelist of reverse-RPC families this plugin intends to use: `\"llm.sample\"`, `\"llm.agent.auto\"`, `\"storage\"`, …. Missing entries → host rejects the corresponding reverse RPC with `not_negotiated` / `not_granted`."
             },
             {
               "name": "runtime",
@@ -353,7 +349,7 @@
             },
             {
               "name": "params.sampling_token (v2)",
-              "desc": "Short-lived JWT (TTL 600s). Only present when the user granted sampling for this Executa. Required to call `sampling/*` or `agent/*`."
+              "desc": "Short-lived JWT (TTL 600s). Minted on every invoke of an installed, enabled Executa (alongside `storage_token`, `image_token`, `media_token`, `upload_token`). Required to call `sampling/*` or `agent/*`."
             },
             {
               "name": "result.success",
@@ -409,7 +405,7 @@
           "items": [
             {
               "name": "-32001 SAMPLING_NOT_GRANTED",
-              "desc": "User has not enabled sampling grant for this Executa."
+              "desc": "Executa not installed or disabled by the user."
             },
             {
               "name": "-32002 SAMPLING_QUOTA_EXCEEDED",
@@ -437,7 +433,7 @@
             },
             {
               "name": "-32008 SAMPLING_NOT_NEGOTIATED",
-              "desc": "Host didn't negotiate v2 OR manifest is missing `host_capabilities: [\"llm.sample\"]`."
+              "desc": "Host didn't negotiate v2 (plugin skipped or failed `initialize`)."
             },
             {
               "name": "-32009 SAMPLING_USER_DENIED",
@@ -450,7 +446,7 @@
           "items": [
             {
               "name": "-32021 STORAGE_NOT_GRANTED",
-              "desc": "Missing `storage_token` or requested scope not in `allowed_scopes`."
+              "desc": "Executa not installed or disabled by the user. (A scope outside `allowed_scopes` surfaces as `-32029` with the allowed list.)"
             },
             {
               "name": "-32022 NOT_FOUND",
@@ -491,7 +487,7 @@
           "items": [
             {
               "name": "-32041 AGENT_NOT_GRANTED",
-              "desc": "User has not granted plugin → agent access (no `llm.agent.auto`)."
+              "desc": "No `sampling_token` in the invoke context — cannot happen for an installed, enabled Executa."
             },
             {
               "name": "-32042 SESSION_NOT_FOUND",
@@ -519,7 +515,7 @@
             },
             {
               "name": "-32048 TOOL_NOT_GRANTED",
-              "desc": "Tool requested is outside the user's authorised whitelist."
+              "desc": "Tool requested is outside the session's effective tool set."
             }
           ]
         },
@@ -665,7 +661,7 @@
       "id": "executa-sampling",
       "kicker": "Executa · reverse RPC (v2+) · Sampling",
       "title": "Sampling — borrow the host's LLM",
-      "sub": "Let a long-running Executa plugin ask its host (Anna) to perform an LLM completion **on the user's behalf** — no API key, no model selection, no quota tracking in the plugin. Modelled on MCP `sampling/createMessage`.\n\n**Pre-requisites** (all three required):\n1. **v2 protocol negotiation.** The host's `initialize` advertises `protocolVersion: 2.0`; the plugin must respond with the same version and `client_capabilities.sampling = {}`.\n2. **Manifest declaration.** `host_capabilities: [\"llm.sample\"]`. Missing this → `-32008 SAMPLING_NOT_NEGOTIATED`.\n3. **User grant.** The user enables sampling for this Executa in Anna Admin (`UserExecuta.custom_config.sampling_grant.enabled = true` — a single on/off switch; per-invoke limits are platform constants, no longer user-adjustable). Missing this → `-32001 SAMPLING_NOT_GRANTED`.\n\n**Per-invoke caps (platform constants):** `maxTokens` per call caps at **8,192** (`DEFAULT_SAMPLING_MAX_TOKENS_PER_CALL`; the platform additionally clamps to the selected model's output cap and echoes the result in `_meta.maxTokens`); calls per `invoke_id` cap at **8**; cumulative tokens per invoke cap at **32,000**; `sampling_token` TTL **600s**; only `includeContext: \"none\"` is supported in v1.\n\n**Model selection precedence:** `modelPreferences.hints[*].name` (case-insensitive substring; cheapest wins when `costPriority > 0`) → user's saved `preferred_model` → default provider's cheapest active model. Plugins should normally omit `modelPreferences` so user-level preferences apply.\n\n**Common pitfalls:** the same stdin reader receives both agent-initiated requests AND host responses to reverse RPCs (use the SDK's `dispatch_response` helper); never `exit()` after a single invoke (sampling is async); always echo `invoke_id` in `metadata` so Nexus can attribute spend.",
+      "sub": "Let a long-running Executa plugin ask its host (Anna) to perform an LLM completion **on the user's behalf** — no API key, no model selection, no quota tracking in the plugin. Modelled on MCP `sampling/createMessage`.\n\n**Pre-requisite:** **v2 protocol negotiation.** The host's `initialize` advertises `protocolVersion: 2.0`; the plugin must respond with the same version and `client_capabilities.sampling = {}`. Missing this → `-32008 SAMPLING_NOT_NEGOTIATED`. There is no manifest declaration and no user switch — the host mints a `sampling_token` on every invoke of every installed, enabled Executa; `-32001 SAMPLING_NOT_GRANTED` means the Executa is not installed or was disabled by the user.\n\n**Per-invoke caps (platform constants):** `maxTokens` per call caps at **8,192** (`DEFAULT_SAMPLING_MAX_TOKENS_PER_CALL`; the platform additionally clamps to the selected model's output cap and echoes the result in `_meta.maxTokens`); calls per `invoke_id` cap at **8**; cumulative tokens per invoke cap at **32,000**; `sampling_token` TTL **600s**; only `includeContext: \"none\"` is supported in v1.\n\n**Model selection precedence:** `modelPreferences.hints[*].name` (case-insensitive substring; cheapest wins when `costPriority > 0`) → user's saved `preferred_model` → default provider's cheapest active model. Plugins should normally omit `modelPreferences` so user-level preferences apply.\n\n**Common pitfalls:** the same stdin reader receives both agent-initiated requests AND host responses to reverse RPCs (use the SDK's `dispatch_response` helper); never `exit()` after a single invoke (sampling is async); always echo `invoke_id` in `metadata` so Nexus can attribute spend.",
       "detail_source": "/static/data/reference-executa-sampling.json",
       "groups": [
         {
@@ -690,7 +686,7 @@
       "id": "executa-agent-sessions",
       "kicker": "Executa · reverse RPC (v2.1+) · Agent sessions",
       "title": "Agent sessions — multi-turn tool-using runs",
-      "sub": "Drive **stateful, tool-using Anna Agent sessions** from a stdio Executa plugin through reverse JSON-RPC — the same surface area an in-iframe `anna-app` gets, with the same auth boundaries, the same tool-grant model, and the same wire frames. Builds on top of sampling: sampling is single-turn; agent sessions are stateful, support tool calls the host runs, emit streaming frames (`delta`, `tool_call`, `tool_result`, `final`), and support cancellation.\n\n**Pre-requisites.** Manifest must declare **both** grants:\n- `host_capabilities: [\"llm.sample\"]` — unlocks `sampling/*` and `agent/complete` (L1 single-turn).\n- `host_capabilities: [\"llm.agent.auto\"]` — unlocks `agent/session.*` (L2 multi-turn). Missing this → `-32041 AGENT_NOT_GRANTED`.\n\n**Auth chain.** The plugin **never holds a bearer token**. Matrix host owns the secret: the plugin sends `agent/session.create` carrying the per-invoke `sampling_token`; the host mints an `app_session_token` via Nexus `POST /copilot/app/sessions/from_sampling`, caches it keyed by `(user_id, hash(plugin_name))`, and attaches it to outbound HTTP for every `run|cancel|delete`. The token is never returned to the plugin.\n\n**Plugin/anna-app symmetry.** A Python plugin and a TypeScript anna-app should be **drop-in interchangeable** for the same agent workload. The only difference is transport: anna-app uses a postMessage channel, plugin uses stdio JSON-RPC.\n\n**v2 limitations.** `agent/session.run` is **buffered** — host accumulates SSE frames and returns once `done=true`. SDK API (`async for frame`) matches the future real-time path. Hard cap: **4,096 frames per run** → `-32045 QUOTA_EXCEEDED`. `agent/session.history` returns `[]` until a public GET endpoint lands.",
+      "sub": "Drive **stateful, tool-using Anna Agent sessions** from a stdio Executa plugin through reverse JSON-RPC — the same surface area an in-iframe `anna-app` gets, with the same auth boundaries, the same tool model, and the same wire frames. Builds on top of sampling: sampling is single-turn; agent sessions are stateful, support tool calls the host runs, emit streaming frames (`delta`, `tool_call`, `tool_result`, `final`), and support cancellation.\n\n**Pre-requisites.** v2 negotiation only. The per-invoke `sampling_token` (minted for every installed, enabled Executa) unlocks both `agent/complete` (L1 single-turn) and `agent/session.*` (L2 multi-turn) — nothing to declare, no user toggle.\n\n**Auth chain.** The plugin **never holds a bearer token**. Matrix host owns the secret: the plugin sends `agent/session.create` carrying the per-invoke `sampling_token`; the host mints an `app_session_token` via Nexus `POST /copilot/app/sessions/from_sampling`, caches it keyed by `(user_id, hash(plugin_name))`, and attaches it to outbound HTTP for every `run|cancel|delete`. The token is never returned to the plugin.\n\n**Plugin/anna-app symmetry.** A Python plugin and a TypeScript anna-app should be **drop-in interchangeable** for the same agent workload. The only difference is transport: anna-app uses a postMessage channel, plugin uses stdio JSON-RPC.\n\n**v2 limitations.** `agent/session.run` is **buffered** — host accumulates SSE frames and returns once `done=true`. SDK API (`async for frame`) matches the future real-time path. Hard cap: **4,096 frames per run** → `-32045 QUOTA_EXCEEDED`. `agent/session.history` returns `[]` until a public GET endpoint lands.",
       "detail_source": "/static/data/reference-executa-agent-sessions.json",
       "groups": [
         {
@@ -745,7 +741,7 @@
       "id": "executa-persistent-storage",
       "kicker": "Executa · reverse RPC (v2+) · Persistent storage",
       "title": "Anna Persistent Storage (APS) — per-user KV + objects",
-      "sub": "Give an Executa plugin a small, durable, **per-user** key/value + object store hosted by Anna — no cloud account, no DB of its own. Quota and access control are enforced by the host. After `initialize` succeeds, the plugin issues reverse JSON-RPC calls; each call carries the per-invoke `storage_token` minted by Matrix Agent.\n\n**Pre-requisites** (all three required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.storage = {}` on `initialize`.\n2. **Manifest declaration.** `host_capabilities: [\"aps.kv\"]` (KV `storage/*`) and/or `\"aps.files\"` (object `files/*`) — `storage.user` / `storage.app` / `storage.tool` are **not** valid strings. Missing this → no `storage_token` is minted → `-32021 STORAGE_NOT_GRANTED`.\n3. **User grant.** End user enables persistent storage for this Executa in Anna Admin (`UserExecuta.custom_config.storage_grant.scopes = [\"user\", ...]` with `quotaBytes` and `objectMaxBytes` overrides). Missing this → `-32021 STORAGE_NOT_GRANTED`.\n\n**Scopes.** `user` — owned by the end user, visible across every plugin they grant. `app` — owned by the Anna App bundle, **App-side Host API only**: plugin-side `storage_token`s permit `user` + `tool` only (grant default `allowedScopes=[\"user\",\"tool\"]`); a plugin passing `scope='app'` fails with `storage_token does not permit scope='app'; allowed=['tool', 'user']`. `tool` — strictly local to (user × executa). Default to `tool` for transient state; ask for `user` only when the user clearly benefits from cross-tool reuse (e.g. saving a generated PDF into \"My Files\"). The `files/*` namespace covers the granted scopes via the `scope` parameter; the legacy `user_files/*` alias family was removed.\n\n**Best practices.** Prefer `tool` scope unless the data is genuinely user-owned. Keep KV values small — anything bigger than a few KB belongs in `files/upload_begin`. Always pass `if_match` on overwrite to avoid lost updates. Set TTLs on cache-shaped data. Encode metadata in the key (`notes/{noteId}`), not the value — keys are listable, embedded JSON fields are not. Always read back the `etag` from `storage/set` / `files/upload_complete` — never assume your client already knows it.\n\n**Built-in user-storage tools.** For LangChain agents, Nexus auto-registers six high-level wrappers under the `user_storage_*` namespace (`user_storage_get` / `_set` / `_delete` / `_list` / `_files_save_text` / `_files_get_url`). The agent never sees the raw RPC; the tool wraps each call in a soft 5-write / 20-read per-invocation budget. Users may disable the built-in tools per-account via `UserSettings.disable_user_storage_tools`.",
+      "sub": "Give an Executa plugin a small, durable, **per-user** key/value + object store hosted by Anna — no cloud account, no DB of its own. Quota and access control are enforced by the host. After `initialize` succeeds, the plugin issues reverse JSON-RPC calls; each call carries the per-invoke `storage_token` minted by Matrix Agent.\n\n**Pre-requisite:** **v2 protocol negotiation** — plugin advertises `client_capabilities.storage = {}` on `initialize`. The host mints a `storage_token` on every invoke of every installed, enabled Executa; `-32021 STORAGE_NOT_GRANTED` means the Executa is not installed or was disabled by the user. The manifest decides only **which scopes** the token carries: `allowed_scopes = [\"tool\"]` by default, plus `\"user\"` when the manifest declares `storage: { scopes: { user: \"rw\" } }` (legacy `aps.scope.user.read` / `.write` strings normalize to the same thing; `aps.kv` / `aps.files` are ignored).\n\n**Scopes.** `user` — owned by the end user, shared with every plugin that declares it. `app` — owned by the Anna App bundle; reachable from a plugin only when the invoke comes from that App's context (window `tools.invoke` / async job) and the App is installed and enabled — otherwise `storage_token does not permit scope='app'; allowed=['tool', 'user']`. `tool` — strictly local to (user × executa). Default to `tool` for transient state; ask for `user` only when the user clearly benefits from cross-tool reuse (e.g. saving a generated PDF into \"My Files\"). The `files/*` namespace covers the granted scopes via the `scope` parameter; the legacy `user_files/*` alias family was removed.\n\n**Best practices.** Prefer `tool` scope unless the data is genuinely user-owned. Keep KV values small — anything bigger than a few KB belongs in `files/upload_begin`. Always pass `if_match` on overwrite to avoid lost updates. Set TTLs on cache-shaped data. Encode metadata in the key (`notes/{noteId}`), not the value — keys are listable, embedded JSON fields are not. Always read back the `etag` from `storage/set` / `files/upload_complete` — never assume your client already knows it.\n\n**Built-in user-storage tools.** For LangChain agents, Nexus auto-registers six high-level wrappers under the `user_storage_*` namespace (`user_storage_get` / `_set` / `_delete` / `_list` / `_files_save_text` / `_files_get_url`). The agent never sees the raw RPC; the tool wraps each call in a soft 5-write / 20-read per-invocation budget. Users may disable the built-in tools per-account via `UserSettings.disable_user_storage_tools`.",
       "detail_source": "/static/data/reference-executa-persistent-storage.json",
       "groups": [
         {
@@ -921,7 +917,7 @@
       "id": "executa-embed",
       "kicker": "Executa · reverse RPC (v2+) · Embeddings",
       "title": "Embeddings — borrow the host's embedding model",
-      "sub": "Let a long-running Executa plugin ask its host (Anna) to compute dense embedding vectors **on the user's behalf** — no provider API key, no model name leaked to the plugin, no per-plugin billing. Sibling of `sampling/createMessage` but on an **independent billing surface** (`LLMRequestType.EXECUTA_EMBED`), so exhausting your chat quota does not block RAG / semantic-search workloads and vice-versa.\n\n**Pre-requisites** (all four required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.embed = {}` on `initialize` (the existing `client_capabilities.sampling = {}` also works — the same `sampling_token` is reused for both surfaces). Missing → `-32507 EMBED_NOT_NEGOTIATED`.\n2. **Manifest declaration.** `host_capabilities: [\"llm.embed\"]`. Missing → `-32501 EMBED_NOT_GRANTED`.\n3. **User install / grant.** `UserExecuta.is_enabled = true`. Optional explicit opt-out via `UserExecuta.custom_config.embed_grant = {enabled: false}` → `-32508 EMBED_USER_DENIED`. Default when omitted: enabled.\n4. **Platform switch.** `EMBED_API_ENABLED = true` (default). Setting to `false` shuts down both the plugin reverse-RPC path AND the iframe `llm.embed` path with `-32507`.\n\n**Stable alias contract.** The plugin only sees host-stable aliases (`anna-managed-v1` → 1536-dim today). Real provider model name surfaces in `_meta.backendModel` for audit. Dimensions are **immutable per alias** — upgrades go to a new alias (`anna-managed-v2`), never an in-place dimension change. Persist `_meta.alias` + `_meta.dimensions` next to every stored vector so cross-version reads can refuse-or-reindex.\n\n**Reject-not-truncate.** Batch > 64 items or any item > 32 000 chars fails the *whole* request with `-32504 EMBED_INVALID_REQUEST` — chunk client-side and keep an index map. Provider errors are flattened to a single `-32503 EMBED_PROVIDER_ERROR` (upstream status not preserved).\n\n**Local-dev gotcha.** Both the python harness bridge (`anna-app-runtime-local` `SERVER_REQUEST_METHODS`) AND the Node `LlmBridge` (`anna-app-cli/src/harness/server.ts` `HOST_OUTBOUND_ROUTES`) must list `embeddings/create` → `(llm, embed)`. Either missing → `-32601 Method not found`.",
+      "sub": "Let a long-running Executa plugin ask its host (Anna) to compute dense embedding vectors **on the user's behalf** — no provider API key, no model name leaked to the plugin, no per-plugin billing. Sibling of `sampling/createMessage` but on an **independent billing surface** (`LLMRequestType.EXECUTA_EMBED`), so exhausting your chat quota does not block RAG / semantic-search workloads and vice-versa.\n\n**Pre-requisites** (both required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.embed = {}` on `initialize` (the existing `client_capabilities.sampling = {}` also works — the same `sampling_token` is reused for both surfaces). Missing → `-32507 EMBED_NOT_NEGOTIATED`.\n2. **Installed and enabled.** `UserExecuta.is_enabled = true`; a disabled Executa → `-32501 EMBED_NOT_GRANTED`. Nothing to declare in the manifest and no user toggle beyond disable / uninstall.\n\n**Platform switch.** `EMBED_API_ENABLED = true` (default). Setting to `false` shuts down both the plugin reverse-RPC path AND the iframe `llm.embed` path with `-32507`.\n\n**Stable alias contract.** The plugin only sees host-stable aliases (`anna-managed-v1` → 1536-dim today). Real provider model name surfaces in `_meta.backendModel` for audit. Dimensions are **immutable per alias** — upgrades go to a new alias (`anna-managed-v2`), never an in-place dimension change. Persist `_meta.alias` + `_meta.dimensions` next to every stored vector so cross-version reads can refuse-or-reindex.\n\n**Reject-not-truncate.** Batch > 64 items or any item > 32 000 chars fails the *whole* request with `-32504 EMBED_INVALID_REQUEST` — chunk client-side and keep an index map. Provider errors are flattened to a single `-32503 EMBED_PROVIDER_ERROR` (upstream status not preserved).\n\n**Local-dev gotcha.** Both the python harness bridge (`anna-app-runtime-local` `SERVER_REQUEST_METHODS`) AND the Node `LlmBridge` (`anna-app-cli/src/harness/server.ts` `HOST_OUTBOUND_ROUTES`) must list `embeddings/create` → `(llm, embed)`. Either missing → `-32601 Method not found`.",
       "detail_source": "/static/data/reference-executa-embed.json",
       "groups": [
         {
@@ -946,16 +942,6 @@
           "label": "Manifest declaration (plugin side)",
           "items": [
             {
-              "name": "host_capabilities",
-              "desc": "Array including `\"llm.embed\"`. The Agent uses this to decide whether to mint a `sampling_token` carrying embed authority for the invoke.",
-              "tags": [
-                {
-                  "label": "required",
-                  "kind": "req"
-                }
-              ]
-            },
-            {
               "name": "client_capabilities.embed",
               "desc": "Empty object `{}` advertised on `initialize` for v2 negotiation. `client_capabilities.sampling` also works — same token."
             }
@@ -966,7 +952,7 @@
           "items": [
             {
               "name": "EMBED_NOT_GRANTED (-32501)",
-              "desc": "Missing sampling_token, UserExecuta row missing / disabled, or manifest does not declare `llm.embed`."
+              "desc": "Executa not installed or disabled by the user."
             },
             {
               "name": "EMBED_INVALID_REQUEST (-32504)",
@@ -979,10 +965,6 @@
             {
               "name": "EMBED_NOT_NEGOTIATED (-32507)",
               "desc": "Plugin disabled the client (e.g. v1 negotiated) OR platform-wide `EMBED_API_ENABLED=false`."
-            },
-            {
-              "name": "EMBED_USER_DENIED (-32508)",
-              "desc": "User explicitly set `embed_grant.enabled=false` for this Executa."
             }
           ]
         }
@@ -993,7 +975,7 @@
       "id": "executa-image",
       "kicker": "Executa · reverse RPC (v2+) · LLM image",
       "title": "LLM image generation & editing",
-      "sub": "Let an Executa plugin **ask the host's LLM stack to generate or edit images** — no provider key, no R2 credentials, no per-plugin billing. Anna routes to the user's preferred image provider (DALL·E 3 / SDXL / FLUX / …), bills the user's plan, stores the bytes on host R2, and hands the plugin short-lived HTTPS URLs.\n\n**Pre-requisites** (all four required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.image = {}` on `initialize`.\n2. **Manifest declaration.** `host_capabilities: [\"llm.image\"]` for `generate`; add `\"llm.image.edit\"` for `edit`. Missing → `IMAGE_NOT_GRANTED` (`-32101`) at first call.\n3. **User grant.** End user enables image in Anna Admin (`UserExecuta.custom_config.image_grant = {generate: true, edit?: true, max_images_per_day: N, max_per_call: M, model_hints?: [...]}`).\n4. **Active image-capable plan.** User must have ≥ 1 enabled image provider; otherwise → `NO_MODEL_AVAILABLE` (`-32109`).\n\n**Three layered quota gates** (you must handle each distinctly):\n- **Host hard cap** — `_MAX_N = 8` per call.\n- **Per-call grant** — `max_per_call_generate` (default 4) / `max_per_call_edit` (default 1).\n- **Per-invoke rolling cap** — `max_images` (default 4) tracked in Redis `img:invoke:{tool_invoke_id}` with 30-min TTL; shared across all `generate`+`edit` calls inside one `invoke_id`.\n\nAll three surface as `IMAGE_MAX_IMAGES_EXCEEDED` (`-32106`). Returned image URLs expire in ~30 min (`R2_TRANSIENT_PRESIGN_EXPIRY = 1800s`) — `GET` the bytes (or round-trip through `host/uploadFile`) for durable storage.\n\n**Best practices.** Always inject `metadata.executa_invoke_id` so billing rows correlate. Set `timeout ≥ 60s` — cold-start providers (DALL·E 3, FLUX) often need 30–60s. Treat `IMAGE_ERR_PROVIDER_ERROR` with `data.subcall == \"image\"` as 'upstream timeout, do not retry immediately'. Prefer `image/edit` with a single `image_url` over `image/generate` with `reference_image_urls` when you have a source image — better fidelity, no inbound-fetch quota cost.",
+      "sub": "Let an Executa plugin **ask the host's LLM stack to generate or edit images** — no provider key, no R2 credentials, no per-plugin billing. Anna routes to the user's preferred image provider (DALL·E 3 / SDXL / FLUX / …), bills the user's plan, stores the bytes on host R2, and hands the plugin short-lived HTTPS URLs.\n\n**Pre-requisites** (both required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.image = {}` on `initialize`.\n2. **Active image-capable plan.** User must have ≥ 1 enabled image provider; otherwise → `NO_MODEL_AVAILABLE` (`-32109`).\n\nThere is no manifest declaration and no user toggle: the host mints an `image_token` (generate + edit) on every invoke of every installed, enabled Executa; `IMAGE_NOT_GRANTED` (`-32101`) means the Executa is not installed or was disabled by the user.\n\n**Platform caps** (constants, not user-adjustable):\n- **Per-call** — 4 images per `generate`, 1 per `edit` (`IMAGE_PER_CALL_EXCEEDED`).\n- **Per-invoke rolling cap** — 4 images tracked in Redis `img:invoke:{tool_invoke_id}` with 30-min TTL; shared across all `generate`+`edit` calls inside one `invoke_id` (`IMAGE_MAX_IMAGES_EXCEEDED`, `-32106`). Returned image URLs expire in ~30 min (`R2_TRANSIENT_PRESIGN_EXPIRY = 1800s`) — `GET` the bytes (or round-trip through `host/uploadFile`) for durable storage.\n\n**Best practices.** Always inject `metadata.executa_invoke_id` so billing rows correlate. Set `timeout ≥ 60s` — cold-start providers (DALL·E 3, FLUX) often need 30–60s. Treat `IMAGE_ERR_PROVIDER_ERROR` with `data.subcall == \"image\"` as 'upstream timeout, do not retry immediately'. Prefer `image/edit` with a single `image_url` over `image/generate` with `reference_image_urls` when you have a source image — better fidelity, no inbound-fetch quota cost.",
       "detail_source": "/static/data/reference-executa-image.json",
       "groups": [
         {
@@ -1010,28 +992,13 @@
             },
             {
               "name": "image/edit",
-              "desc": "Mutate an existing `image_url` per a text prompt; optional `mask_url` (provider-dependent). Returns new transient URLs — source image is not modified.",
-              "tags": [
-                {
-                  "label": "edit grant"
-                }
-              ]
+              "desc": "Mutate an existing `image_url` per a text prompt; optional `mask_url` (provider-dependent). Returns new transient URLs — source image is not modified."
             }
           ]
         },
         {
           "label": "Manifest declaration (plugin side)",
           "items": [
-            {
-              "name": "host_capabilities",
-              "desc": "Array including `\"llm.image\"` (for generate) and/or `\"llm.image.edit\"` (for edit). The Agent uses these to decide whether to mint an `image_token` for the invoke.",
-              "tags": [
-                {
-                  "label": "required",
-                  "kind": "req"
-                }
-              ]
-            },
             {
               "name": "client_capabilities.image",
               "desc": "Empty object `{}` advertised on `initialize` for v2 negotiation."
@@ -1043,11 +1010,11 @@
           "items": [
             {
               "name": "IMAGE_NOT_GRANTED (-32101)",
-              "desc": "Missing grant, disabled executa, or manifest doesn't declare the capability."
+              "desc": "Executa not installed or disabled by the user."
             },
             {
               "name": "IMAGE_MAX_IMAGES_EXCEEDED (-32106)",
-              "desc": "Host hard-cap (8), per-call grant, or per-invoke rolling counter exhausted."
+              "desc": "Per-invoke rolling counter (4 images) exhausted."
             },
             {
               "name": "IMAGE_PROVIDER_ERROR (-32103)",
@@ -1062,7 +1029,7 @@
       "id": "executa-media",
       "kicker": "Executa · reverse RPC (v2+) · LLM video, music & audio",
       "title": "LLM video, music generation & speech synthesis",
-      "sub": "Let an Executa plugin **generate video and music, synthesize speech and transcribe audio through the host** — no provider key, no R2 credentials, no per-plugin billing — mirroring the LLM image gate 1:1. Methods: `video/generate`, `video/get_job`, `video/cancel_job`, `music/generate`, `music/get_job`, `music/cancel_job`, `audio/speak`, `audio/transcribe` (all non-streaming; `audio/transcribe` since matrix 2026-10-12 / nexus 1.1.0-beta.189; `music/*` since nexus dispatcher 0.28.0, 2026-10-19).\n\n**Pre-requisites** (all three required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.video = {}` / `client_capabilities.music = {}` / `client_capabilities.audio = {}` (`audio.speak` / `audio.transcribe`) on `initialize`.\n2. **Manifest declaration.** `host_capabilities: [\"llm.video\"]`, `[\"llm.music\"]` and/or `[\"llm.audio.speak\"]` / `[\"llm.audio.transcribe\"]` (each audio method has its own capability). Missing → `VIDEO_NOT_GRANTED` (`-32120`) / `MUSIC_NOT_GRANTED` (`-32160`) / `AUDIO_NOT_GRANTED` (`-32140`) at first call.\n3. **User grant.** End user enables `media_grant.video.enabled` / `media_grant.music.enabled` / `media_grant.audio.{enabled, speak, transcribe}` for the plugin in Anna Admin.\n\n**Token.** The Agent attaches a short-lived `media_token` (aud `executa-media`, TTL 10 min, auto-renewed as kind `\"media\"`) to `params.context`; claims `allow_video / allow_music / allow_audio_speak / allow_audio_transcribe / max_audio_chars / max_audio_seconds` are evaluated per call (`allow_music` and the two transcribe claims are optional on older tokens). A Redis per-invoke counter (`media:invoke:{tool_invoke_id}`, 30 min TTL) caps TTS characters and STT seconds **within one tool invocation** — an anti-abuse gate, not a daily quota. Video and music jobs have **no** per-invoke cap: each job is pre-charged in CU, so the user's CU pool is the only gate.\n\n**Billing.** `EXECUTA_VIDEO_GEN` / `EXECUTA_MUSIC_GEN` (pre-charge → settle / refund, same state machine as the App surface; music is priced per song / per second / per started minute by the catalogue's billing unit) `EXECUTA_TTS` (per character) and `EXECUTA_STT` (per audio second). Result URLs are presigned R2 GETs (~30 min); re-`get_job` to re-sign, or `host/uploadFile` for durable storage.\n\n**Errors.** Video `-32120…-32128`, music `-32160…-32169`, audio `-32140…-32148` (same tables as the App surface plus the plugin-only `*_NOT_GRANTED` / `*_QUOTA_EXCEEDED` codes and `AUDIO_INVOKE_BUDGET_EXCEEDED` `-32148`). `VIDEO_CONCURRENCY_EXCEEDED` (`-32127`) is reserved and never raised. Per-invoke counter exhaustion surfaces as `AUDIO_TEXT_TOO_LONG` (`-32142`, claim `max_audio_chars` default 8000) and `AUDIO_INVOKE_BUDGET_EXCEEDED` (`-32148`, claim `max_audio_seconds` default 600). Music never downgrades silently — an unsupported feature is `MUSIC_FEATURE_UNSUPPORTED` (`-32165`) with `data.alternatives`. SDK helpers: python / node / go `media.generate_await()`, `media.music_generate_await()`, `media.speak()` and `media.transcribe()`. Full wire protocol and examples: [Executa media](/docs/tools/executa-media).",
+      "sub": "Let an Executa plugin **generate video and music, synthesize speech and transcribe audio through the host** — no provider key, no R2 credentials, no per-plugin billing — mirroring the LLM image gate 1:1. Methods: `video/generate`, `video/get_job`, `video/cancel_job`, `music/generate`, `music/get_job`, `music/cancel_job`, `audio/speak`, `audio/transcribe` (all non-streaming; `audio/transcribe` since matrix 2026-10-12 / nexus 1.1.0-beta.189; `music/*` since nexus dispatcher 0.28.0, 2026-10-19).\n\n**Pre-requisite:** **v2 protocol negotiation.** Plugin advertises `client_capabilities.video = {}` / `client_capabilities.music = {}` / `client_capabilities.audio = {}` (`audio.speak` / `audio.transcribe`) on `initialize`. There is no manifest declaration and no user toggle: the host mints a `media_token` on every invoke of every installed, enabled Executa; `VIDEO_NOT_GRANTED` (`-32120`) / `MUSIC_NOT_GRANTED` (`-32160`) / `AUDIO_NOT_GRANTED` (`-32140`) mean the Executa is not installed or was disabled by the user.\n\n**Token.** The Agent attaches a short-lived `media_token` (aud `executa-media`, TTL 10 min, auto-renewed as kind `\"media\"`) to `params.context`; its `max_audio_chars` / `max_audio_seconds` claims are platform constants evaluated per call (the former `allow_*` capability bits are gone). A Redis per-invoke counter (`media:invoke:{tool_invoke_id}`, 30 min TTL) caps TTS characters and STT seconds **within one tool invocation** — an anti-abuse gate, not a daily quota. Video and music jobs have **no** per-invoke cap: each job is pre-charged in CU, so the user's CU pool is the only gate.\n\n**Billing.** `EXECUTA_VIDEO_GEN` / `EXECUTA_MUSIC_GEN` (pre-charge → settle / refund, same state machine as the App surface; music is priced per song / per second / per started minute by the catalogue's billing unit) `EXECUTA_TTS` (per character) and `EXECUTA_STT` (per audio second). Result URLs are presigned R2 GETs (~30 min); re-`get_job` to re-sign, or `host/uploadFile` for durable storage.\n\n**Errors.** Video `-32120…-32128`, music `-32160…-32169`, audio `-32140…-32148` (same tables as the App surface plus the plugin-only `*_NOT_GRANTED` / `*_QUOTA_EXCEEDED` codes and `AUDIO_INVOKE_BUDGET_EXCEEDED` `-32148`). `VIDEO_CONCURRENCY_EXCEEDED` (`-32127`) is reserved and never raised. Per-invoke counter exhaustion surfaces as `AUDIO_TEXT_TOO_LONG` (`-32142`, claim `max_audio_chars` default 8000) and `AUDIO_INVOKE_BUDGET_EXCEEDED` (`-32148`, claim `max_audio_seconds` default 600). Music never downgrades silently — an unsupported feature is `MUSIC_FEATURE_UNSUPPORTED` (`-32165`) with `data.alternatives`. SDK helpers: python / node / go `media.generate_await()`, `media.music_generate_await()`, `media.speak()` and `media.transcribe()`. Full wire protocol and examples: [Executa media](/docs/tools/executa-media).",
       "detail_source": "/static/data/reference-executa-media.json",
       "items": []
     },
@@ -1071,7 +1038,7 @@
       "id": "executa-host-upload",
       "kicker": "Executa · reverse RPC (v2+) · Host upload",
       "title": "Host-managed file upload",
-      "sub": "Persist a binary blob to host storage **in the lifetime of one `tool_invoke_id`** without holding R2 credentials. Three modes share one wire method: **`inline`** (base64 round-trip, ≤ 8 MiB), **`negotiate`** (presigned PUT URL for direct R2 upload), **`confirm`** (register the post-PUT object and get a download URL). All return short-lived HTTPS GET URLs (~30 min TTL).\n\n**When to choose this over `files/upload_begin`** (in `executa-persistent-storage`): use `host/uploadFile` for **invoke-scoped, transient** artefacts — image inputs to chain to `image/edit`, screenshots to hand back to the user, intermediate PDFs the LLM should re-fetch within the same turn. The objects are not enumerable, not user-visible in 'My Files', and TTL out of presigned URLs quickly. For durable per-user state, use `files/upload_begin` + `files/upload_complete` instead.\n\n**Pre-requisites** (all four required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.upload = {}` on `initialize`.\n2. **Manifest declaration.** `host_capabilities: [\"host.upload\"]`. Missing → `UPLOAD_NOT_GRANTED` (`-32201`).\n3. **User grant.** `UserExecuta.custom_config.upload_grant = {enabled: true, max_files?: N, max_file_bytes?: B, max_total_bytes?: T, allowed_purposes?: [...]}`. Defaults: 16 files / 20 MiB per file / 80 MiB total per invoke.\n4. **MIME denylist + purpose allowlist.** `purpose` ∈ `{image_input, image_reference, user_artifact}` (`host_upload_service.ALLOWED_PURPOSES`); MIME must pass the host hard denylist only (executables, `image/svg+xml`) — the per-token MIME allowlist was removed (forum #218), any non-blocked type is accepted.\n\n**Per-invoke quotas are shared across all three modes.** Files counter increments on `inline` and `confirm` only (negotiate is free). Exceed → `UPLOAD_MAX_FILES_EXCEEDED` / `UPLOAD_MAX_BYTES_EXCEEDED`.\n\n**Best practices.** Choose `inline` whenever payload is already in memory and ≤ 8 MiB — one round-trip vs three. Use `negotiate`+`confirm` for streaming or large payloads. Always store the returned `r2_key`, not the `download_url` — URLs expire, keys are forever (for the storage lifetime). Catch `UPLOAD_TOO_LARGE` in the SDK pre-check and gracefully fall back to `negotiate`. **Error code numbering diverges** between the Agent-side SDK (`-3220x`) and the Nexus gate; always match on `error_name` strings.",
+      "sub": "Persist a binary blob to host storage **in the lifetime of one `tool_invoke_id`** without holding R2 credentials. Three modes share one wire method: **`inline`** (base64 round-trip, ≤ 8 MiB), **`negotiate`** (presigned PUT URL for direct R2 upload), **`confirm`** (register the post-PUT object and get a download URL). All return short-lived HTTPS GET URLs (~30 min TTL).\n\n**When to choose this over `files/upload_begin`** (in `executa-persistent-storage`): use `host/uploadFile` for **invoke-scoped, transient** artefacts — image inputs to chain to `image/edit`, screenshots to hand back to the user, intermediate PDFs the LLM should re-fetch within the same turn. The objects are not enumerable, not user-visible in 'My Files', and TTL out of presigned URLs quickly. For durable per-user state, use `files/upload_begin` + `files/upload_complete` instead.\n\n**Pre-requisites** (both required):\n1. **v2 protocol negotiation.** Plugin advertises `client_capabilities.upload = {}` on `initialize`.\n2. **MIME denylist + purpose allowlist.** `purpose` ∈ `{image_input, image_reference, user_artifact}` (`host_upload_service.ALLOWED_PURPOSES`); MIME must pass the host hard denylist only (executables, `image/svg+xml`) — the per-token MIME allowlist was removed (forum #218), any non-blocked type is accepted.\n\nThere is no manifest declaration and no user toggle: the host mints an `upload_token` on every invoke of every installed, enabled Executa with the platform caps 16 files / 20 MiB per file / 80 MiB total per invoke; `UPLOAD_NOT_GRANTED` (`-32201`) means the Executa is not installed or was disabled by the user.\n\n**Per-invoke quotas are shared across all three modes.** Files counter increments on `inline` and `confirm` only (negotiate is free). Exceed → `UPLOAD_MAX_FILES_EXCEEDED` / `UPLOAD_MAX_BYTES_EXCEEDED`.\n\n**Best practices.** Choose `inline` whenever payload is already in memory and ≤ 8 MiB — one round-trip vs three. Use `negotiate`+`confirm` for streaming or large payloads. Always store the returned `r2_key`, not the `download_url` — URLs expire, keys are forever (for the storage lifetime). Catch `UPLOAD_TOO_LARGE` in the SDK pre-check and gracefully fall back to `negotiate`. **Error code numbering diverges** between the Agent-side SDK (`-3220x`) and the Nexus gate; always match on `error_name` strings.",
       "detail_source": "/static/data/reference-executa-host-upload.json",
       "groups": [
         {
@@ -1105,16 +1072,6 @@
           "label": "Manifest declaration (plugin side)",
           "items": [
             {
-              "name": "host_capabilities",
-              "desc": "Array including `\"host.upload\"`. Without it the Agent refuses to mint an `upload_token`.",
-              "tags": [
-                {
-                  "label": "required",
-                  "kind": "req"
-                }
-              ]
-            },
-            {
               "name": "client_capabilities.upload",
               "desc": "Empty object `{}` advertised on `initialize` for v2 negotiation."
             }
@@ -1125,7 +1082,7 @@
           "items": [
             {
               "name": "UPLOAD_NOT_GRANTED (-32201)",
-              "desc": "Missing grant, disabled executa, or manifest doesn't declare `host.upload`."
+              "desc": "Executa not installed or disabled by the user."
             },
             {
               "name": "UPLOAD_TOO_LARGE (-32204)",
@@ -1222,7 +1179,7 @@
             },
             {
               "name": "params.context.credentials_token",
-              "desc": "Per-invoke JWT (aud=`executa-credentials`, ~10 min TTL) unlocking the `credentials/*` reverse-RPC surface. Auto-attached whenever your manifest declares a credential name that maps to an **OAuth** provider (`GOOGLE_ACCESS_TOKEN` → `google`, …) — no extra grant. Its `providers` claim whitelists exactly those provider ids; Nexus re-checks per request.",
+              "desc": "Per-invoke JWT (aud=`executa-credentials`, ~10 min TTL) unlocking the `credentials/*` reverse-RPC surface. Auto-attached whenever your manifest declares a credential name that maps to an **OAuth** provider (`GOOGLE_ACCESS_TOKEN` → `google`, …) — minted on every invoke like the other reverse-RPC tokens. Its `providers` claim whitelists exactly those provider ids; Nexus re-checks per request.",
               "tags": [
                 {
                   "label": "multi-account"
@@ -1301,7 +1258,7 @@
             },
             {
               "name": "Error codes",
-              "desc": "`-32061 CREDENTIALS_NOT_GRANTED` (token missing, provider not covered, unknown account, or credential needs re-auth) · `-32062 CREDENTIALS_INVALID_REQUEST` · `-32063 CREDENTIALS_UPSTREAM` · `-32064` SDK-local await timeout.",
+              "desc": "`-32061 CREDENTIALS_NOT_GRANTED` (Executa disabled, provider not declared in the manifest, unknown account, or credential needs re-auth) · `-32062 CREDENTIALS_INVALID_REQUEST` · `-32063 CREDENTIALS_UPSTREAM` · `-32064` SDK-local await timeout.",
               "tags": [
                 {
                   "label": "-32061…-32064"
@@ -1792,6 +1749,108 @@
     },
     {
       "group": "Executa",
+      "id": "executa-platform-runtimes",
+      "kicker": "Executa · runtime environment · Shared runtimes",
+      "title": "Platform runtimes — shared Node.js & Chrome",
+      "sub": "Every Agent (cloud Linux, desktop macOS, desktop Windows) provides a shared Chrome for Testing and a pinned Node 22 LTS so your Executa doesn't have to bundle its own (forum #490). Discovery is **presence-based env vars** injected into every Executa process: a variable is only set when the runtime is ready to run. Declare `runtime.requires` in `executa.json` to turn a missing runtime into a structured install-time failure (`reason_code: runtime_missing`) instead of an invoke-time crash.\n\nPlanning-time versions come from the public `GET /api/v1/platform/runtimes` (per-channel current + announced next); run-time truth is your own process env. Chrome follows the platform Playwright pin — compare majors only, never exact builds. Full contract: the \"Platform runtimes\" page under Build a Tool.",
+      "detail_source": "/static/data/reference-executa-platform-runtimes.json",
+      "groups": [
+        {
+          "label": "Discovery contract",
+          "items": [
+            {
+              "name": "ANNA_CHROME_EXECUTABLE / ANNA_CHROME_VERSION",
+              "desc": "Absolute path + four-part version of the platform Chrome for Testing, resolved by the Agent (never guess `chromium-<rev>` directory names). `ANNA_CHROME_PROVIDER` is always `playwright-cft`. Use `puppeteer-core` + `executablePath`; on Cloud Agents launch with `--no-sandbox --disable-dev-shm-usage`.",
+              "tags": [
+                {
+                  "label": "presence-based"
+                },
+                {
+                  "label": "read-only"
+                }
+              ]
+            },
+            {
+              "name": "ANNA_NODE_EXECUTABLE / ANNA_NODE_VERSION",
+              "desc": "Absolute path + full version of the shared Node 22 LTS (`/opt/anna/node/bin/node` on cloud, `~/.anna/runtimes/node-22/bin/node` on desktop). Lets a binary-distributed Node tool ship a 2-line shell shim instead of an embedded Node (~120 MiB saved).",
+              "tags": [
+                {
+                  "label": "presence-based"
+                },
+                {
+                  "label": "node 22 LTS"
+                }
+              ]
+            },
+            {
+              "name": "ANNA_RUNTIME_PROFILE / ANNA_AGENT_VERSION / ANNA_RUNTIMES_JSON",
+              "desc": "Where you run (`cloud-linux` | `desktop-macos` | `desktop-windows` | `desktop-linux`), the Matrix Agent version for capability gating, and a compact JSON summary of the whole contract.",
+              "tags": []
+            }
+          ]
+        },
+        {
+          "label": "Install-time precheck",
+          "items": [
+            {
+              "name": "runtime.requires",
+              "desc": "Unmet → install fails with `reason_code: runtime_missing` + `missing_runtimes` map. Pure check — a declaration never installs anything; provision the shared Node at agent level (console “Platform” row / `install_runtime shared-node`; baked into Cloud Agent images). Old Agents ignore the block (backwards compatible).",
+              "tags": [
+                {
+                  "label": "executa.json"
+                },
+                {
+                  "label": "tools only"
+                }
+              ]
+            },
+            {
+              "name": "GET /api/v1/platform/runtimes",
+              "desc": "Public, unauthenticated, cacheable version matrix per release channel (current + announced next with `effective_from`). Feeds the docs page generated blocks and `anna-app doctor`.",
+              "tags": [
+                {
+                  "label": "public API"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "label": "Release channels · current versions",
+          "items": [
+            {
+              "name": "Cloud (linux-x86_64)",
+              "desc": "Cloud Agent image (linux-x86_64): shared Node baked in, Chrome for Testing from the platform Playwright pin. Current versions are generated from `GET /api/v1/platform/runtimes` into the detail page.",
+              "tags": [
+                {
+                  "label": "generated"
+                }
+              ]
+            },
+            {
+              "name": "Desktop macOS",
+              "desc": "Desktop macOS Agent: Chrome for Testing under `~/Library/Caches/ms-playwright`, shared Node installed once from the agent console. Current versions are generated into the detail page.",
+              "tags": [
+                {
+                  "label": "generated"
+                }
+              ]
+            },
+            {
+              "name": "Desktop Windows",
+              "desc": "Desktop Windows Agent: same contract, `.cmd` shims as entrypoints. Current versions are generated into the detail page.",
+              "tags": [
+                {
+                  "label": "generated"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "group": "Executa",
       "id": "executa-pitfalls",
       "kicker": "Executa · footguns",
       "title": "Common pitfalls",
@@ -1885,8 +1944,8 @@
           "label": "Sampling (reverse RPC)",
           "items": [
             {
-              "name": "Missing `host_capabilities: [\"llm.sample\"]` declaration",
-              "desc": "Even after v2 capability negotiation, Nexus refuses `sampling/createMessage` unless the *published* manifest also lists `\"llm.sample\"` in `host_capabilities`. Host returns `{ code: -32008, message: \"not_negotiated\" }` (constant `SAMPLING_ERR_NOT_NEGOTIATED` in `src/services/executa_sampling_gate.py`); Agent log says `executa X did not declare host_capabilities['llm.sample']`. Add the field, republish, ask users to update.",
+              "name": "`-32008 not_negotiated` on the first `sampling/createMessage`",
+              "desc": "The plugin did not complete the v2 handshake (answered `initialize` with `Method not found`, timed out, or omitted `capabilities.sampling`), so the Agent downgraded to v1 and never forwards reverse RPCs. There is no manifest declaration to add — every installed, enabled Executa receives a `sampling_token` on each invoke. Fix the `initialize` reply (the SDKs do this for you).",
               "tags": [
                 {
                   "label": "-32008"
@@ -2030,7 +2089,7 @@
       "items": [
         {
           "name": "schema",
-          "desc": "Manifest schema version. Integer in [1, 2]. Defaults to 1.",
+          "desc": "Manifest schema version. Integer in [1, 4]; `4` is current. Schema 1–3 manifests are accepted at every ingest point and normalized to 4 (`permissions` dropped, `host_capabilities` `aps.scope.*` folded into `storage.scopes`, `ui.host_api` method lists dropped, `audio ∋ \"session\"` → `browser_permissions += microphone`, stray `host_api.tools` refs → `optional_executas`).",
           "tags": [
             {
               "label": "int"
@@ -2048,28 +2107,10 @@
         },
         {
           "name": "optional_executas",
-          "desc": "Executas the App can use if installed but does not require. Same shape as `required_executas`.",
+          "desc": "Executas the App can use if installed but does not require. Same shape as `required_executas`. Together with `required_executas` this is the only allow-list for `tools.invoke` from the bundle.",
           "tags": [
             {
               "label": "ManifestExecutaRef[]"
-            }
-          ]
-        },
-        {
-          "name": "host_capabilities",
-          "desc": "Strict allow-list of host-mediated capability strings (validated against `_ALLOWED_HOST_CAPABILITIES`): `aps.kv`, `aps.files`, `aps.scope.*`, `llm.sample`, `llm.complete`, `llm.embed`, `llm.agent.*`, `llm.image`, `web.*`, `host.upload`. Each bundled Executa must also declare its own `host_capabilities`; per-invoke tokens are gated on the Executa declaration + the user's grant.",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "permissions",
-          "desc": "Coarse permission tokens shown to the user at install time and enforced at the dispatcher.",
-          "tags": [
-            {
-              "label": "string[]"
             }
           ]
         },
@@ -2102,7 +2143,7 @@
         },
         {
           "name": "ui",
-          "desc": "UI bundle section: declares bundle entry, views, host_api grants, CSP overrides. See \"UI manifest\".",
+          "desc": "UI bundle section: bundle entry, views, the `credentials` / `agent.tools` capability declarations, `browser_permissions`, CSP overrides. See \"UI manifest\".",
           "tags": [
             {
               "label": "UiManifestSection"
@@ -2124,7 +2165,7 @@
         },
         {
           "name": "storage",
-          "desc": "Structured APS storage declaration (schema 3, design aps-authorization-simplification §6.1): `{kv?: bool, files?: bool, scopes?: {…}}`. Replaces the legacy `aps.*` capability strings in `host_capabilities` — the two forms are mutually exclusive (validator-enforced). Normalization lives in `storage_decl.py`.",
+          "desc": "Cross-app data declaration: `{ scopes: { user | app | tool: \"r\" | \"w\" | \"rw\" } }`. Your own `scope=app` bucket needs no declaration; listed scopes are enforced by the iframe `storage.*` / `files.*` scope gate (`permission_denied` otherwise). Legacy `aps.scope.*` strings normalize to the same shape; `storage.kv` / `storage.files` (schema 3) are dropped on ingest.",
           "tags": [
             {
               "label": "schema 3"
@@ -2140,8 +2181,8 @@
       "group": "Anna App",
       "id": "ui-manifest",
       "kicker": "Manifest · ui section",
-      "title": "UI manifest — windows, views, grants",
-      "sub": "The `ui` block describes the iframe bundle, the windows it can open, and which Host API namespaces the bundle is allowed to call.",
+      "title": "UI manifest — windows, views, declarations",
+      "sub": "The `ui` block describes the iframe bundle, the windows it can open, the browser features it needs, and the two capability declarations (`credentials`, `agent.tools`) that involve a second principal. The Host API itself needs no declaration.",
       "groups": [
         {
           "label": "Bundle (UiBundleSection)",
@@ -2278,10 +2319,28 @@
             },
             {
               "name": "host_api",
-              "desc": "Whitelist of Host API methods the UI bundle may invoke, per namespace. See \"Host API grants\".",
+              "desc": "Capability declarations: `credentials` (third-party account provider ids) and `agent.tools` (local-device host-kit tools). Not a method allow-list — every Host API method is available to an installed App. See \"Capability declarations\".",
               "tags": [
                 {
                   "label": "UiHostApiSpec"
+                }
+              ]
+            },
+            {
+              "name": "browser_permissions",
+              "desc": "Browser features (Permissions Policy) delegated to the iframe: `microphone`, `camera`, `geolocation`, `display-capture`, `clipboard-read`, `fullscreen`, `autoplay`, `picture-in-picture`, `screen-wake-lock`, `web-share`. A realtime voice session needs `microphone` here (legacy `host_api.audio ∋ \"session\"` is normalized to it).",
+              "tags": [
+                {
+                  "label": "string[]"
+                }
+              ]
+            },
+            {
+              "name": "form_factors",
+              "desc": "Containers the App supports: `\"desktop\"` / `\"mobile\"`. Defaults to `[\"desktop\"]`.",
+              "tags": [
+                {
+                  "label": "string[]"
                 }
               ]
             }
@@ -2292,115 +2351,13 @@
     {
       "group": "Anna App",
       "id": "ui-host-api",
-      "kicker": "Manifest · ui.host_api",
-      "title": "UI Host API grants",
-      "sub": "Declare which Host API methods your iframe bundle may call, per namespace. Tokens are method names (e.g. `set`, `list`); the dispatcher refuses ungranted calls.",
+      "kicker": "Manifest · capability declarations",
+      "title": "Capability declarations",
+      "sub": "Installing an App is the consent: every Host API method (`llm.*`, `image.*`, `video.*`, `music.*`, `audio.*`, `web.*`, `upload.*`, `files.*`, own-scope `storage.*`, `chat.*`, `artifact.*`, `window.*`, `apps.*`, `mobile.*`, `agent.session.*`, `tools.*` for declared Executas) is available to an installed, enabled App without a manifest entry or user toggle; the user's CU quota is the only usage gate. Exactly three things are declared because they touch a second principal. Schema ≤ 3 manifests with the old `ui.host_api` method tables are normalized on ingest.",
       "items": [
         {
-          "name": "host_api.storage",
-          "desc": "Per-method grants for storage namespace (`get`, `set`, `list`, `delete`).",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "host_api.chat",
-          "desc": "Grants for chat operations: `write_message`, `read_history`, `append_artifact`.",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "host_api.window",
-          "desc": "Window control surface: `open_view`, `close`, `focus`, `set_title`, `resize`. NOTE: `window.*` is ALWAYS granted by the dispatcher ACL (`host_api_allows`) — declaring it is optional/documentary.",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "host_api.tools",
-          "desc": "Direct tool invocation from the UI: `list`, `invoke`.",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "host_api.llm",
-          "desc": "LLM access from the UI bundle: `complete`, `stream` (token-by-token, dispatcher ≥ 0.12.0), `embed`.",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "host_api.agent",
-          "desc": "Agent session control — see `AgentHostApiSpec` for session submode + `tools[]` shape.",
-          "tags": [
-            {
-              "label": "AgentHostApiSpec"
-            }
-          ]
-        },
-        {
-          "name": "host_api.files",
-          "desc": "Per-method grants for the implemented files object-storage namespace (`upload_init`, `upload_finalize`, `download_url`, `download`, `list`, `delete`). `download` (dispatcher ≥ 0.17.0) is the host-mediated save — see files.download.",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "host_api.image",
-          "desc": "Host-mediated image generation/editing: `generate`, `edit`. Additionally gated by the user-controlled per-app `image_grant`.",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "host_api.video",
-          "desc": "`string[]` of `video.*` methods the bundle may call: `generate`, `getJob`, `cancelJob`, `listJobs`. Pair with the user's `media_grant.video.enabled`. Async jobs, CU pre-charged on submit."
-        },
-        {
-          "name": "host_api.music",
-          "desc": "`string[]` of `music.*` methods the bundle may call: `generate`, `getJob`, `cancelJob`, `listJobs`. Pair with the user's `media_grant.music.enabled`. Async jobs (`mjob_…`), CU pre-charged on submit, `idempotencyKey` replay within 24h."
-        },
-        {
-          "name": "host_api.audio",
-          "desc": "`string[]` of `audio.*` surfaces: `speak` (sync TTS), `transcribe` (sync STT) and `session` (realtime voice session relayed by the host bridge — `anna.audio.session()`; declaring it also gives the iframe `allow=\"microphone\"`). Pair with the user's `media_grant.audio.{enabled, speak, transcribe}` — each sync operation needs its own flag; `session` needs **both**. `session` with `llm:'agent'` additionally requires `host_api.agent.session`."
-        },
-        {
-          "name": "host_api.upload",
-          "desc": "Host-mediated user-artifact uploads: `inline`, `negotiate`, `confirm`. Additionally gated by the per-app `upload_grant`.",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "host_api.web",
-          "desc": "Host-managed web search & fetch: `search`, `fetch`, `image_search`, `image_fetch` (or `*`). Additionally gated by the user-controlled per-app `web_grant` (default DISABLED).",
-          "tags": [
-            {
-              "label": "string[]"
-            }
-          ]
-        },
-        {
-          "name": "host_api.credentials",
-          "desc": "Platform-credential access. UNLIKE other namespaces this list holds PROVIDER IDS (e.g. `[\"google\"]`), not method names — a non-empty list opens `list_accounts` + `get_token` for the declared providers. Additionally gated by the per-app `credentials_grant`.",
+          "name": "ui.host_api.credentials",
+          "desc": "Provider ids (e.g. `[\"google\"]`) whose connected accounts the bundle may read via `credentials.list_accounts` / `credentials.get_token`. The user must also have connected the provider. Undeclared provider → `permission_denied`. Store summary: *Connects to: Gmail*.",
           "tags": [
             {
               "label": "provider ids",
@@ -2409,8 +2366,8 @@
           ]
         },
         {
-          "name": "host_api.apps",
-          "desc": "Installed-apps launcher surface: `list`, `search`, `get`, `launch`, `deck.list`, `deck.add`, `deck.remove`, `deck.reorder`.",
+          "name": "ui.host_api.agent.tools",
+          "desc": "Host-kit tools that run on the user's machine (`fs_*`, `exec_*`, `browser_*`) which sandbox agent sessions created by this App may use; `[\"*\"]` = every host-kit tool. Server-side tools (`doc_read`, `web_search`, …) never need declaring. Effective set = `requested ∩ (server_side ∪ (host_kit ∩ declared))`. Store summary: *Local device access*.",
           "tags": [
             {
               "label": "string[]"
@@ -2418,11 +2375,29 @@
           ]
         },
         {
-          "name": "host_api.fs / artifact / prefs",
-          "desc": "Reserved namespaces; methods are stubs (see Host API methods table for current status).",
+          "name": "storage.scopes (top level)",
+          "desc": "`{ user | app | tool: \"r\" | \"w\" | \"rw\" }` — data shared with the user's other apps. Your own `scope=app` bucket needs no declaration; an undeclared scope → `permission_denied`. For a bundled Executa the plugin `storage_token.allowed_scopes` is `[\"tool\"]` + `\"user\"` iff the Executa manifest declares it. Store summary: *Reads/writes data shared with your other apps*.",
+          "tags": [
+            {
+              "label": "object"
+            }
+          ]
+        },
+        {
+          "name": "ui.browser_permissions",
+          "desc": "Browser-mandated, not a platform capability: Permissions-Policy features (`microphone`, `camera`, …) the iframe document needs. See \"UI manifest\".",
           "tags": [
             {
               "label": "string[]"
+            }
+          ]
+        },
+        {
+          "name": "required_executas / optional_executas",
+          "desc": "Dependencies, not permissions — together they are the only allow-list for `tools.invoke` / `tools.list`; the Executa must also be installed and enabled for the user (`required_executas` are installed with the App).",
+          "tags": [
+            {
+              "label": "ManifestExecutaRef[]"
             }
           ]
         }
@@ -2433,7 +2408,7 @@
       "id": "platform-tools",
       "kicker": "Anna App · agent tools",
       "title": "Platform tools — the agent-session tool universe",
-      "sub": "What can an App agent session actually call? Declaration is consent — the resolved surface is a pure intersection, identical for every user of the same app version:\n\n`AppToolRegistry.public_set ∩ manifest.ui.host_api.agent.tools ∩ quotaCaps.allowed_tools [∩ dev_safe on harness PAT sessions]`.\n\nEvery built-in below is INDIVIDUALLY declarable — e.g. declaring `[\"fs_read_file\"]` yields a read-only-filesystem agent that cannot write or exec (forum #192); declaring `[\"*\"]` (sole element, validator-enforced) expands to the full registry at create time. There is NO per-tool user grant: the user's single Agent consent on the permission gate covers the declared list (host-kit tools are flagged ⚠ there). Host-kit tools (fs / exec / browser) execute on the session's platform-pinned agent client: `fixed` submode targets `fixed_client_id`, `auto` targets the user's default agent — the pinned `client_id` always overrides anything the model supplies, so an App can never aim side effects at an arbitrary machine. Any name outside the registry or the declaration is **silently dropped** (no error); an empty result means a TEXT-ONLY agent — side-effect claims in its output would be hallucinated (the run emits a `NO_TOOLS_AVAILABLE` warning frame). Use `agent.session.catalog()` to see the registry universe and per-tool `blocked_by` / `risk_group` diagnostics BEFORE creating a session. Per-run `allowed_tools` further narrows a sandbox session's surface for that run.\n\n**`inherit_host_tools` is retired for app sessions** (requests are accepted-and-ignored with an `INHERIT_IGNORED` run warning; `granted_tools: [\"*\"]` can no longer occur for apps). The inherit regime — the user's full copilot kit including every installed Executa — remains available only to Executa (plugin) sessions, where it is the default.\n\nThe sandbox registry below is drift-checked against `src/services/app_tool_registry.py` in CI — registering a tool without updating this section fails the build.",
+      "sub": "What can an App agent session actually call? Declaration is consent — the resolved surface is a pure intersection, identical for every user of the same app version:\n\n`requested ∩ (server_side ∪ (host_kit ∩ manifest.ui.host_api.agent.tools)) [∩ dev_safe on harness PAT sessions]`.\n\nServer-side tools (`doc_read`, `sheet_read`, `web_search`, …) need no declaration. Host-kit tools (`fs_*` / `exec_*` / `browser_*`) resolve only when declared — e.g. declaring `[\"fs_read_file\"]` yields a read-only-filesystem agent that cannot write or exec (forum #192); declaring `[\"*\"]` (sole element, validator-enforced) expands to every host-kit tool. There is NO per-tool user toggle: declaring a host-kit tool adds a *Local device access* line to the App's Store summary, which is what reviewers check. Host-kit tools (fs / exec / browser) execute on the session's platform-pinned agent client: `fixed` submode targets `fixed_client_id`, `auto` targets the user's default agent — the pinned `client_id` always overrides anything the model supplies, so an App can never aim side effects at an arbitrary machine. Any name outside the registry or the declaration is **silently dropped** (no error); an empty result means a TEXT-ONLY agent — side-effect claims in its output would be hallucinated (the run emits a `NO_TOOLS_AVAILABLE` warning frame). Use `agent.session.catalog()` to see the registry universe and per-tool `blocked_by` / `risk_group` diagnostics BEFORE creating a session. Per-run `allowed_tools` further narrows a sandbox session's surface for that run.\n\n**`inherit_host_tools` is retired for app sessions** (requests are accepted-and-ignored with an `INHERIT_IGNORED` run warning; `granted_tools: [\"*\"]` can no longer occur for apps). The inherit regime — the user's full copilot kit including every installed Executa — remains available only to Executa (plugin) sessions, where it is the default.\n\nThe sandbox registry below is drift-checked against `src/services/app_tool_registry.py` in CI — registering a tool without updating this section fails the build.",
       "source": "platform_tools",
       "groups": [
         {
@@ -2441,13 +2416,10 @@
           "items": [
             {
               "name": "web_search",
-              "desc": "Search the public web (or news) and return concise, provider-agnostic snippets. Same capability as the Host API `anna.web.search` — shared provider routing, `web_grant` gating, result cache and billing (an agent-side call books an `APP_WEB_SEARCH` ledger entry against the session), so the agent surface cannot bypass Host API quota.",
+              "desc": "Search the public web (or news) and return concise, provider-agnostic snippets. Same capability as the Host API `anna.web.search` — shared provider routing, result cache and billing (an agent-side call books an `APP_WEB_SEARCH` ledger entry against the session), so the agent surface cannot bypass Host API quota.",
               "tags": [
                 {
                   "label": "server-side"
-                },
-                {
-                  "label": "web_grant"
                 }
               ]
             },
@@ -2784,13 +2756,13 @@
       "id": "host-api-agent",
       "kicker": "Host API · agent.*",
       "title": "agent.* — agent sessions",
-      "sub": "Spin up, drive, and inspect **LangGraph-backed agent runs** from your bundle. `session.create` mints an `AnnaAppSession` (kind=`agent`) and caches the underlying `app_session_token` in `_aps_token_cache[uuid]` — the iframe never holds capability credentials; it threads the `app_session_uuid` (`aps_…`) through every subsequent call.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_agent_session_*` (dispatcher) → `SqlAlchemyWindowStore.agent_session_*` (store) → `app_llm_facade.agent_session_*` → LangGraph runner via `src.services.app_runner._copilot_unified`.\n\n**Two-layer ACL (the dispatcher checks ui.host_api, NOT permissions):**\n1. The dispatcher gate `host_api_allows` for the `agent` namespace reads ONLY `manifest.ui.host_api.agent` — `manifest.permissions[]` is display/audit metadata and is NEVER consulted.\n2. `manifest.ui.host_api.agent.session.{auto, fixed: {client_ids: []}}` is **submode-aware**: each submode is `false` until explicitly enabled. Fixed mode further validates `fixed_client_id` against the allow-list (empty list = any user-owned Executa).\n3. `manifest.ui.host_api.agent.tools` is the AUTHORIZATION face (declaration-is-consent): the session's sandbox surface is `platform registry ∩ agent.tools ([\"*\"] = full registry) ∩ quotaCaps.allowed_tools` — there is no per-tool user grant.\n\n**Submodes**\n• `auto` — LangGraph runner uses the declared platform-tool surface; host-kit tools target the user's default agent.\n• `fixed` — pin the run to one Executa by `client_id`. Use this for deterministic flows or scoped access (e.g. read-only tools).\n\n**Streaming model.** `agent.session.run` returns SYNCHRONOUSLY with `{stream_id, run_id}`; the dispatcher allocates `stream_id`, enqueues the run, and the agent worker publishes each frame directly to a per-stream NATS subject, delivered to the iframe over the `rpc.stream` event topic — `{stream_id, window_uuid, seq, payload, done}`. The SDK's `AgentRunStream` reassembles by `seq` (out-of-order frames are buffered until the missing seq arrives) into an `AsyncIterable`. The pump ALWAYS emits a terminal `{event:'end', run_id}` with `done:true`, even on cancellation or crash.\n\n**Session lifecycle.** `create` → cached uuid for `expires_in` seconds (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early) → many `run` calls → optional `cancel(run_id)` / `history(limit)` → `delete` revokes + pops cache. After `delete` or TTL eviction, subsequent calls fail `session_expired` / `APP_SESSION_NOT_FOUND`.\n\n**Quotas + caps.** `quotaCaps.allowed_tools` on `create` narrows within the manifest-declared set; `inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (inherit requests emit an `INHERIT_IGNORED` run warning) — output caps are resolved per call as `min(model output cap, 65 536)` ∩ context-budget reserve (10 % of context, ≤ 65 536); the effective value is disclosed in `run_meta.max_output_tokens`, `run({maxTokens})` can only lower it (dispatcher ≥ 0.30.0), and `task_complete.truncated` flags a final message cut by that cap (host ≥ 1.1.0-beta.200). Between host beta.179 and beta.199 the effective cap was a fixed 8 192 with no signal (forum #403). `APP_QUOTA_EXCEEDED` may be raised pre-stream (synchronously) OR mid-stream as an in-band `{event:'error'}` frame.\n\n**SDK ergonomics.** Prefer the high-level helper `await anna.agent.session({submode, ...})` — it returns an `AgentSession` instance with `.run({content})` / `.cancel(runId)` / `.history({limit})` / `.delete()` methods bound to the new uuid, so apps never thread `app_session_uuid` manually. Per-namespace timeout default is **300 000 ms** (ack-only — long streams keep the iterator alive until `done`).",
+      "sub": "Spin up, drive, and inspect **LangGraph-backed agent runs** from your bundle. `session.create` mints an `AnnaAppSession` (kind=`agent`) and caches the underlying `app_session_token` in `_aps_token_cache[uuid]` — the iframe never holds capability credentials; it threads the `app_session_uuid` (`aps_…`) through every subsequent call.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_agent_session_*` (dispatcher) → `SqlAlchemyWindowStore.agent_session_*` (store) → `app_llm_facade.agent_session_*` → LangGraph runner via `src.services.app_runner._copilot_unified`.\n\n**Access.** Both submodes are available to every installed, enabled App — no `host_api` entry, no user toggle. `fixed_client_id` must be one of the current user's registered Agent clients (otherwise `-32004`). The one declaration is `manifest.ui.host_api.agent.tools` (declaration-is-consent for **local-device** tools): the session's sandbox surface is `requested ∩ (server_side ∪ (host_kit ∩ agent.tools))` — server-side tools never need declaring, `[\"*\"]` = every host-kit tool.\n\n**Submodes**\n• `auto` — LangGraph runner uses the declared platform-tool surface; host-kit tools target the user's default agent.\n• `fixed` — pin the run to one Executa by `client_id`. Use this for deterministic flows or scoped access (e.g. read-only tools).\n\n**Streaming model.** `agent.session.run` returns SYNCHRONOUSLY with `{stream_id, run_id}`; the dispatcher allocates `stream_id`, enqueues the run, and the agent worker publishes each frame directly to a per-stream NATS subject, delivered to the iframe over the `rpc.stream` event topic — `{stream_id, window_uuid, seq, payload, done}`. The SDK's `AgentRunStream` reassembles by `seq` (out-of-order frames are buffered until the missing seq arrives) into an `AsyncIterable`. The pump ALWAYS emits a terminal `{event:'end', run_id}` with `done:true`, even on cancellation or crash.\n\n**Session lifecycle.** `create` → cached uuid for `expires_in` seconds (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early) → many `run` calls → optional `cancel(run_id)` / `history(limit)` → `delete` revokes + pops cache. After `delete` or TTL eviction, subsequent calls fail `session_expired` / `APP_SESSION_NOT_FOUND`.\n\n**Quotas + caps.** `quotaCaps.allowed_tools` on `create` narrows the effective set; `inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (inherit requests emit an `INHERIT_IGNORED` run warning) — output caps are resolved per call as `min(model output cap, 65 536)` ∩ context-budget reserve (10 % of context, ≤ 65 536); the effective value is disclosed in `run_meta.max_output_tokens`, `run({maxTokens})` can only lower it (dispatcher ≥ 0.30.0), and `task_complete.truncated` flags a final message cut by that cap (host ≥ 1.1.0-beta.200). Between host beta.179 and beta.199 the effective cap was a fixed 8 192 with no signal (forum #403). `APP_QUOTA_EXCEEDED` may be raised pre-stream (synchronously) OR mid-stream as an in-band `{event:'error'}` frame.\n\n**SDK ergonomics.** Prefer the high-level helper `await anna.agent.session({submode, ...})` — it returns an `AgentSession` instance with `.run({content})` / `.cancel(runId)` / `.history({limit})` / `.delete()` methods bound to the new uuid, so apps never thread `app_session_uuid` manually. Per-namespace timeout default is **300 000 ms** (ack-only — long streams keep the iterator alive until `done`).",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-agent.json",
       "items": [
         {
           "name": "agent.session.create",
-          "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Validates `submode` against the manifest grant and `fixed_client_id` against the allow-list; optional `systemPrompt` overrides the agent's system prompt. Tool surface is declaration-is-consent: `AppToolRegistry ∩ manifest ui.host_api.agent.tools (`[\"*\"]` = full registry) ∩ quotaCaps.allowed_tools` — no per-tool user grant exists. `quotaCaps.inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (accepted, never 400; inherit requests emit an `INHERIT_IGNORED` run warning). Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is the resolved intersection; `inherit_host_tools` is always `false` for app sessions).",
+          "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Both submodes are available to every installed App; `fixed_client_id` must be one of the current user's registered Agent clients (otherwise `-32004`; offline is accepted with a warning). Optional `systemPrompt` overrides the agent's system prompt. Tool surface is declaration-is-consent: `requested ∩ (server_side ∪ (host_kit ∩ manifest ui.host_api.agent.tools))` — server-side tools never need declaring, host-kit tools (`fs_*` / `exec_*` / `browser_*`) only resolve when declared (`[\"*\"]` = every host-kit tool). `quotaCaps.inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (accepted, never 400; inherit requests emit an `INHERIT_IGNORED` run warning). Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is the resolved set; `inherit_host_tools` is always `false` for app sessions).",
           "tags": [
             {
               "label": "submode"
@@ -2808,7 +2780,7 @@
         },
         {
           "name": "agent.session.catalog",
-          "desc": "Pre-create discovery of the platform-tool universe: which names are legal in create-time `quotaCaps.allowed_tools` / per-run `allowed_tools`, and whether they would resolve for THIS app. Returns `{platform_tools: [{name, description, dev_safe, risk_group, declared_in_manifest, user_granted, eligible, blocked_by?}], inherit_host_tools_granted, manifest_declared, declared_wildcard, user_granted}`. Declaration-is-consent: the only `blocked_by` value is `manifest` (= not declared in `ui.host_api.agent.tools` — declare it, or declare `[\"*\"]`, and republish); `risk_group` separates server-side tools from host-kit tools (⚠ local side effects). `user_granted` / `inherit_host_tools_granted` are deprecated echoes kept one release. Read-only — mints no session, consumes no quota.",
+          "desc": "Pre-create discovery of the platform-tool universe: which names are legal in create-time `quotaCaps.allowed_tools` / per-run `allowed_tools`, and whether they would resolve for THIS app. Returns `{platform_tools: [{name, description, dev_safe, risk_group, declared_in_manifest, eligible, blocked_by?}], manifest_declared, declared_wildcard}`. The only `blocked_by` value is `manifest` (= a host-kit tool not declared in `ui.host_api.agent.tools` — declare it, or declare `[\"*\"]`, and republish); `risk_group` separates server-side tools from host-kit tools (⚠ local side effects). Read-only — mints no session, consumes no quota.",
           "tags": [
             {
               "label": "discovery"
@@ -2936,7 +2908,7 @@
       "id": "host-api-chat",
       "kicker": "Host API · chat.*",
       "title": "chat.* — write back into the conversation",
-      "sub": "Post messages and artifacts back into the user-facing chat thread from your App. **ACL:** the dispatcher gate is `manifest.ui.host_api.chat` — a `string[]` that must list each called method (`write_message` / `read_history` / `append_artifact`), or `*`; `manifest.permissions[]` is display/audit only and is NEVER checked. **Status:** `append_artifact` is fully implemented; `write_message` is a Phase-3 functional stub (emits a `chat_message_from_app` event but does NOT persist); `read_history` is a Phase-3 stub that raises `not_implemented`.",
+      "sub": "Post messages and artifacts back into the user-facing chat thread from your App. Available to every installed App — nothing to declare. **Status:** `append_artifact` is fully implemented; `write_message` is a Phase-3 functional stub (emits a `chat_message_from_app` event but does NOT persist); the former `read_history` placeholder was removed from the dispatcher table.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-chat.json",
       "items": [
@@ -2953,16 +2925,6 @@
               "kind": "stub"
             }
           ]
-        },
-        {
-          "name": "chat.read_history",
-          "desc": "Read prior turns of the chat thread. **Phase-3 stub — raises `not_implemented`.**",
-          "tags": [
-            {
-              "label": "stub",
-              "kind": "stub"
-            }
-          ]
         }
       ]
     },
@@ -2971,13 +2933,13 @@
       "id": "host-api-llm",
       "kicker": "Host API · llm.*",
       "title": "llm.* — host LLM access",
-      "sub": "Borrow the host's **user-configured** LLM provider for stateless single-shot completions. Your bundle never sees an API key, never hard-codes a model name, and the request is billed against the user's existing quota — `modelPreferences` only nudges the selector between providers the user *actually enabled*.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_llm_complete` (dispatcher) → `SqlAlchemyWindowStore.llm_complete` → `_decode_or_mint_complete` lazy-mints an `AnnaAppSession` (kind=`complete`) cached by `complete:{window_uuid}` → `app_llm_facade.complete` → `LLMProviderService.select_model_by_preferences` → LangChain `ChatOpenAI`.\n\n**ACL.** The only dispatcher gate is `host_api_allows` for the `llm` namespace: `manifest.ui.host_api.llm` (a `string[]`) must contain the method — `complete` / `stream` / `embed` — or `*`. `manifest.permissions[]` is display/audit metadata and is NEVER checked.\n\n**MCP-shaped.** Both request (`messages`, `maxTokens`, `temperature`, `modelPreferences`, `systemPrompt`, `stopSequences`) and response (`role`, `content:{type:'text', text}`, `model`, `stopReason`, `usage`, `_meta`) mirror MCP `sampling/createMessage` so the same payload works against MCP samplers too.\n\n**Quota model.**\n• Per-call cap `quota_caps.max_tokens_per_call` (default **4096**) — `maxTokens > cap` is **silently clamped down**; read back `usage.outputTokens` to detect.\n• Pre-flight `check_quota_available` + post-call `check_and_consume_quota_with_redis` both raise `APP_QUOTA_EXCEEDED` (the latter raises *after* the model returns, dropping the response — never double-charges).\n• `_meta.quotaConsumed` reports the actual debited amount (provider cost × `cost_multiplier`).\n\n**Stateless.** No conversation state between calls. The lazy-minted `app_session_uuid` is reused server-side only for token caching, NOT for prompt history — callers MUST resend full `messages` every call. For multi-turn / tool-using workflows use `agent.*` instead.\n\n**Non-streaming.** The `complete` response arrives in a single chunk after the provider finishes. For token-by-token UI use `llm.stream` (same request shape, async-iterable `RpcStream`; SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0) or `agent.session.run` (LangGraph streaming over `rpc.stream`). SDK per-namespace timeout default is **180 000 ms**.",
+      "sub": "Borrow the host's **user-configured** LLM provider for stateless single-shot completions. Your bundle never sees an API key, never hard-codes a model name, and the request is billed against the user's existing quota — `modelPreferences` only nudges the selector between providers the user *actually enabled*.\n\n**Path:** Bundle (postMessage) → `POST /api/v1/anna-apps/runtime/rpc` → `_h_llm_complete` (dispatcher) → `SqlAlchemyWindowStore.llm_complete` → `_decode_or_mint_complete` lazy-mints an `AnnaAppSession` (kind=`complete`) cached by `complete:{window_uuid}` → `app_llm_facade.complete` → `LLMProviderService.select_model_by_preferences` → LangChain `ChatOpenAI`.\n\n**Access.** Available to every installed, enabled App — nothing to declare; `APP_NOT_GRANTED` only means not installed / disabled / no subscription.\n\n**MCP-shaped.** Both request (`messages`, `maxTokens`, `temperature`, `modelPreferences`, `systemPrompt`, `stopSequences`) and response (`role`, `content:{type:'text', text}`, `model`, `stopReason`, `usage`, `_meta`) mirror MCP `sampling/createMessage` so the same payload works against MCP samplers too.\n\n**Quota model.**\n• Per-call cap `quota_caps.max_tokens_per_call` (default **4096**) — `maxTokens > cap` is **silently clamped down**; read back `usage.outputTokens` to detect.\n• Pre-flight `check_quota_available` + post-call `check_and_consume_quota_with_redis` both raise `APP_QUOTA_EXCEEDED` (the latter raises *after* the model returns, dropping the response — never double-charges).\n• `_meta.quotaConsumed` reports the actual debited amount (provider cost × `cost_multiplier`).\n\n**Stateless.** No conversation state between calls. The lazy-minted `app_session_uuid` is reused server-side only for token caching, NOT for prompt history — callers MUST resend full `messages` every call. For multi-turn / tool-using workflows use `agent.*` instead.\n\n**Non-streaming.** The `complete` response arrives in a single chunk after the provider finishes. For token-by-token UI use `llm.stream` (same request shape, async-iterable `RpcStream`; SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0) or `agent.session.run` (LangGraph streaming over `rpc.stream`). SDK per-namespace timeout default is **180 000 ms**.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-llm.json",
       "items": [
         {
           "name": "llm.complete",
-          "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ model output cap, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
+          "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ model output cap, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences` and the user's preferences. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED` (App not installed / disabled / no subscription), `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
           "tags": [
             {
               "label": "MCP-shaped"
@@ -2995,7 +2957,7 @@
         },
         {
           "name": "llm.stream",
-          "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); omitted `maxTokens` defaults to the model's own output cap (host ≥ 1.1.0-beta.200 — the worst-case precheck follows, so low-balance users should pass a smaller `maxTokens`); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
+          "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); omitted `maxTokens` defaults to the model's own output cap (host ≥ 1.1.0-beta.200 — the worst-case precheck follows, so low-balance users should pass a smaller `maxTokens`); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Nothing to declare; same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
           "tags": [
             {
               "label": "MCP-shaped"
@@ -3010,7 +2972,7 @@
         },
         {
           "name": "llm.catalog",
-          "desc": "Capability discovery: `{serviceType?: 'video_gen'|'image_gen'|'image_edit'|'tts'|'stt'}` → `{models:[{modelName, displayName, serviceTypes, isUserPreferred, capabilities, pricing}], quota:{remainingCU}}`. Only service types the App is **granted** are returned (ungranted → empty list, never an error) so you can feature-detect and degrade. Prices are in CU; TTS entries carry `voices`/`defaultVoice`/`options`/`maxCharsPerCall`, video entries carry `duration`/`resolutions`/`aspectRatios`/`imageToVideo`/`audio`."
+          "desc": "Capability discovery: `{serviceType?: 'video_gen'|'image_gen'|'image_edit'|'tts'|'stt'}` → `{models:[{modelName, displayName, serviceTypes, isUserPreferred, capabilities, pricing}], quota:{remainingCU}}`. A service type with no routable model yields an empty list, never an error, so you can feature-detect and degrade. Prices are in CU; TTS entries carry `voices`/`defaultVoice`/`options`/`maxCharsPerCall`, video entries carry `duration`/`resolutions`/`aspectRatios`/`imageToVideo`/`audio`."
         }
       ]
     },
@@ -3019,7 +2981,7 @@
       "id": "host-api-image",
       "kicker": "Host API · image.*",
       "title": "image.* — host-managed image generation & editing",
-      "sub": "Generate or edit images from the **anna-app bundle** without ever touching a provider key. The host owns the provider credentials, the user's image plan, R2 storage, and quota — your bundle just describes the picture.\n\n**Auth chain.** Bundle calls `anna.image.{generate,edit}(...)` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_image_*` handler → `SqlAlchemyWindowStore.image_{generate,edit}` → `app_llm_facade.image_{generate,edit}` → user's preferred image provider (DALL·E 3 / SDXL / FLUX / …) → R2.\n\n**ACL is two-layer.** (a) The dispatcher gate is `manifest.ui.host_api.image` — a `string[]` that must contain `generate` (and `edit` for `image.edit`), or `*`; `manifest.permissions[]` is display/audit only and is NEVER checked. (b) Anna Admin user-grant `UserExecuta.custom_config.image_grant = {enabled, allowGenerate, allowEdit, maxPerCallGenerate, maxPerCallEdit, …}`. Missing either side → `APP_NOT_GRANTED`. Edit grant defaults to **off** — `enabled = true` alone is not enough.\n\n**Quota model.** Three layers: (1) per-call cap `maxPerCallGenerate` (default 4) / `maxPerCallEdit` (default 1) — exceed → `APP_INVALID_REQUEST`. (2) Plan-wide quota via `check_and_consume_quota_with_redis` — exceed → `APP_QUOTA_EXCEEDED` (HTTP 429). (3) Provider errors (safety refusals, 5xx, upstream timeout) → `APP_PROVIDER_ERROR` (HTTP 502 underneath). Per-invoke rolling cap used by Executa plugins is **not** applied to App-side calls.\n\n**URL lifetime.** Returned `images[].url` are presigned R2 GETs with **~30 min TTL** (`R2_TRANSIENT_PRESIGN_EXPIRY = 1800s`). Never persist them — store nothing or round-trip through `upload.inline`/`upload.confirm` to get a durable `r2_key`. CSP must allow the R2 host (`csp_overrides.img-src: [\"https:\"]`); if you enable COEP `require-corp`, R2 must serve `Cross-Origin-Resource-Policy: cross-origin` or images break with a confusing `ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep`.",
+      "sub": "Generate or edit images from the **anna-app bundle** without ever touching a provider key. The host owns the provider credentials, the user's image plan, R2 storage, and quota — your bundle just describes the picture.\n\n**Auth chain.** Bundle calls `anna.image.{generate,edit}(...)` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_image_*` handler → `SqlAlchemyWindowStore.image_{generate,edit}` → `app_llm_facade.image_{generate,edit}` → user's preferred image provider (DALL·E 3 / SDXL / FLUX / …) → R2.\n\n**Access.** `generate` and `edit` are available to every installed, enabled App — nothing to declare, no user toggle; `APP_NOT_GRANTED` only means not installed / disabled / no subscription.\n\n**Quota model.** Three layers: (1) platform per-call cap 4 images per `generate` / 1 per `edit` — exceed → `IMAGE_PER_CALL_EXCEEDED`. (2) Plan-wide quota via `check_and_consume_quota_with_redis` — exceed → `APP_QUOTA_EXCEEDED` (HTTP 429). (3) Provider errors (safety refusals, 5xx, upstream timeout) → `APP_PROVIDER_ERROR` (HTTP 502 underneath). Per-invoke rolling cap used by Executa plugins is **not** applied to App-side calls.\n\n**URL lifetime.** Returned `images[].url` are presigned R2 GETs with **~30 min TTL** (`R2_TRANSIENT_PRESIGN_EXPIRY = 1800s`). Never persist them — store nothing or round-trip through `upload.inline`/`upload.confirm` to get a durable `r2_key`. CSP must allow the R2 host (`csp_overrides.img-src: [\"https:\"]`); if you enable COEP `require-corp`, R2 must serve `Cross-Origin-Resource-Policy: cross-origin` or images break with a confusing `ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep`.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-image.json",
       "items": [
@@ -3029,12 +2991,7 @@
         },
         {
           "name": "image.edit",
-          "desc": "Restyle / mask-edit an existing `image_url` per a text `prompt`. Optional `mask_url` for inpainting where the provider supports it. Source is not modified; results land in fresh R2 objects. Provider safety rejections now surface as `IMAGE_CONTENT_REJECTED` (-32115) instead of `APP_PROVIDER_ERROR`; artifacts stay re-signable via `image.resign`.",
-          "tags": [
-            {
-              "label": "edit grant"
-            }
-          ]
+          "desc": "Restyle / mask-edit an existing `image_url` per a text `prompt`. Optional `mask_url` for inpainting where the provider supports it. Source is not modified; results land in fresh R2 objects. Provider safety rejections now surface as `IMAGE_CONTENT_REJECTED` (-32115) instead of `APP_PROVIDER_ERROR`; artifacts stay re-signable via `image.resign`."
         },
         {
           "name": "image.generateAsync",
@@ -3053,7 +3010,7 @@
         },
         {
           "name": "image.editAsync",
-          "desc": "Submit an **async** edit job with the body of `image.edit` (`image_url`, optional `mask_url`) plus `clientTag?` / `idempotencyKey?` → `{jobId:'ijob_…', …}`. Requires `image_grant.allowEdit`; a `mask_url` on a model without `capabilities.edit.mask` fails with `IMAGE_EDIT_MASK_UNSUPPORTED` (-32312) — never a silent whole-image edit. Input images are re-hosted by the platform before submission so an expiring presigned input URL cannot break a queued job.",
+          "desc": "Submit an **async** edit job with the body of `image.edit` (`image_url`, optional `mask_url`) plus `clientTag?` / `idempotencyKey?` → `{jobId:'ijob_…', …}`. A `mask_url` on a model without `capabilities.edit.mask` fails with `IMAGE_EDIT_MASK_UNSUPPORTED` (-32312) — never a silent whole-image edit. Input images are re-hosted by the platform before submission so an expiring presigned input URL cannot break a queued job.",
           "tags": [
             {
               "label": "async job"
@@ -3085,7 +3042,7 @@
         },
         {
           "name": "image.resign",
-          "desc": "`{r2Keys: string[]}` (1–20) → `{urls:[{r2Key, url, expiresIn}]}` in input order: re-sign **already-paid** artifacts — `images[].r2_key` from a sync `image.generate` / `image.edit` response or `result.images[].r2Key` from a job — for up to 7 days after creation, instead of losing them after the 30-min URL TTL. Also accepts your own video / music artifact keys. Free, no quota. Any key that is not yours (or malformed) fails the **whole call** with `IMAGE_ASSET_NOT_FOUND` (-32117, `data.index`); no partial success. Needs only `image_grant.enabled`.",
+          "desc": "`{r2Keys: string[]}` (1–20) → `{urls:[{r2Key, url, expiresIn}]}` in input order: re-sign **already-paid** artifacts — `images[].r2_key` from a sync `image.generate` / `image.edit` response or `result.images[].r2Key` from a job — for up to 7 days after creation, instead of losing them after the 30-min URL TTL. Also accepts your own video / music artifact keys. Free, no quota. Any key that is not yours (or malformed) fails the **whole call** with `IMAGE_ASSET_NOT_FOUND` (-32117, `data.index`); no partial success. Available to every installed App.",
           "tags": [
             {
               "label": "re-sign"
@@ -3102,7 +3059,7 @@
       "id": "host-api-video",
       "kicker": "Host API · video.*",
       "title": "video.* — host-managed async video generation",
-      "sub": "Generate short videos (text-to-video / image-to-video) from the **anna-app bundle** through the host's fal-hosted catalogue (Kling v3 Pro, MiniMax H3 Max / Turbo, Seedance 2.5) without provider keys or storage credentials. Video is **asynchronous**: `generate` returns a `jobId` in ~1s, progress arrives as `media_job` SSE events, and `getJob` is the single source of truth.\n\n**Auth chain.** Bundle calls `anna.video.*` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_video_*` → `app_media_facade.video_*` → fal queue (webhook + poller) → R2. Equivalent HTTP: `POST /api/v1/copilot/app/video/generate`, `GET …/video/jobs[/{job_id}]`, `POST …/video/jobs/{job_id}/cancel` (app_session_token).\n\n**ACL is two-layer.** (a) manifest `ui.host_api.video` must list the methods you call (`generate`, `getJob`, `cancelJob`, `listJobs`); (b) the user's `media_grant.video.enabled` for your App. Missing either → `APP_NOT_GRANTED`.\n\n**Billing is pre-charge → settle → refund.** `estimatedCostCU` is held on submit (from the catalogue's per-second / per-resolution pricing, min-billed seconds apply); on `succeeded` the hold is settled to `billedCostCU`; on `failed` / cancelled-while-queued the hold is **fully refunded**; cancelling a `running` job does not refund. There is no platform-side daily / concurrency cap — the CU quota pool is the only gate (`APP_QUOTA_EXCEEDED`, HTTP 429).\n\n**URL lifetime.** `result.url` is a presigned R2 GET with a ~30 min TTL (`MEDIA_RESULT_PRESIGN_EXPIRY`, `expiresIn` in the response). Re-calling `getJob` re-signs it; for permanent storage fetch the bytes and go through `upload.negotiate`/`confirm` (counts toward App storage). Terminal objects are cleaned up after 7 days; job rows are kept 30 days for billing.\n\n**Discover before you call.** `llm.catalog({serviceType:'video_gen'})` returns each model's `duration` / `resolutions` / `aspectRatios` / `imageToVideo` / `audio` and CU pricing — parameters outside that space fail with `VIDEO_INVALID_REQUEST` (`data.allowed` echoes the space).\n\n**Errors.** `-32122 VIDEO_INVALID_REQUEST` · `-32123 VIDEO_PROVIDER_ERROR` (retryable) · `-32124 VIDEO_MODEL_UNAVAILABLE` · `-32125 VIDEO_JOB_NOT_FOUND` · `-32126 VIDEO_JOB_NOT_CANCELLABLE` · `-32128 VIDEO_CONTENT_REJECTED`; grant / quota failures surface as the generic `APP_NOT_GRANTED` / `APP_QUOTA_EXCEEDED`. Every error's `data` carries `{errorName, retryable, docs}`.",
+      "sub": "Generate short videos (text-to-video / image-to-video) from the **anna-app bundle** through the host's fal-hosted catalogue (Kling v3 Pro, MiniMax H3 Max / Turbo, Seedance 2.5) without provider keys or storage credentials. Video is **asynchronous**: `generate` returns a `jobId` in ~1s, progress arrives as `media_job` SSE events, and `getJob` is the single source of truth.\n\n**Auth chain.** Bundle calls `anna.video.*` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_video_*` → `app_media_facade.video_*` → fal queue (webhook + poller) → R2. Equivalent HTTP: `POST /api/v1/copilot/app/video/generate`, `GET …/video/jobs[/{job_id}]`, `POST …/video/jobs/{job_id}/cancel` (app_session_token).\n\n**Access.** Available to every installed, enabled App — nothing to declare; `APP_NOT_GRANTED` only means not installed / disabled / no subscription.\n\n**Billing is pre-charge → settle → refund.** `estimatedCostCU` is held on submit (from the catalogue's per-second / per-resolution pricing, min-billed seconds apply); on `succeeded` the hold is settled to `billedCostCU`; on `failed` / cancelled-while-queued the hold is **fully refunded**; cancelling a `running` job does not refund. There is no platform-side daily / concurrency cap — the CU quota pool is the only gate (`APP_QUOTA_EXCEEDED`, HTTP 429).\n\n**URL lifetime.** `result.url` is a presigned R2 GET with a ~30 min TTL (`MEDIA_RESULT_PRESIGN_EXPIRY`, `expiresIn` in the response). Re-calling `getJob` re-signs it; for permanent storage fetch the bytes and go through `upload.negotiate`/`confirm` (counts toward App storage). Terminal objects are cleaned up after 7 days; job rows are kept 30 days for billing.\n\n**Discover before you call.** `llm.catalog({serviceType:'video_gen'})` returns each model's `duration` / `resolutions` / `aspectRatios` / `imageToVideo` / `audio` and CU pricing — parameters outside that space fail with `VIDEO_INVALID_REQUEST` (`data.allowed` echoes the space).\n\n**Errors.** `-32122 VIDEO_INVALID_REQUEST` · `-32123 VIDEO_PROVIDER_ERROR` (retryable) · `-32124 VIDEO_MODEL_UNAVAILABLE` · `-32125 VIDEO_JOB_NOT_FOUND` · `-32126 VIDEO_JOB_NOT_CANCELLABLE` · `-32128 VIDEO_CONTENT_REJECTED`; install-state / quota failures surface as the generic `APP_NOT_GRANTED` / `APP_QUOTA_EXCEEDED`. Every error's `data` carries `{errorName, retryable, docs}`.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-video.json",
       "items": [
@@ -3137,7 +3094,7 @@
       "id": "host-api-music",
       "kicker": "Host API · music.*",
       "title": "music.* — host-managed async music generation",
-      "sub": "Generate music (text-to-music, optionally with lyrics) from the **anna-app bundle** through the host's fal-hosted catalogue (MiniMax Music 2.6, Lyria 3 / 3 Pro, ElevenLabs Music, Stable Audio 2.5, ACE-Step) without provider keys or storage credentials. Music is the **same kind of surface as video, in a different modality**: `generate` returns a `mjob_…` job in ~1s, progress arrives as `media_job` SSE events, and `getJob` is the single source of truth.\n\n**Auth chain.** Bundle calls `anna.music.*` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_music_*` → `app_media_facade.music_*` → fal queue (webhook + poller) → R2. Equivalent HTTP: `POST /api/v1/copilot/app/music/generate`, `GET …/music/jobs[/{job_id}]`, `POST …/music/jobs/{job_id}/cancel` (app_session_token).\n\n**ACL is two-layer.** (a) manifest `ui.host_api.music` must list the methods you call (`generate`, `getJob`, `cancelJob`, `listJobs`); (b) the user's `media_grant.music.enabled` for your App. Missing either → `APP_NOT_GRANTED`.\n\n**Billing is pre-charge → settle → refund** (`APP_MUSIC_GEN`). `estimatedCostCU` is held on submit from the catalogue price in the provider's own unit — `cuPerSong` (MiniMax, Lyria, Stable Audio), `cuPerSecond` (ACE-Step) or `cuPerMinute` rounded **up** to whole minutes (ElevenLabs); on `succeeded` the hold is settled to `billedCostCU`; on `failed` / cancelled-while-queued it is **fully refunded**; cancelling a `running` job does not refund. There is no platform-side daily / concurrency cap — the CU quota pool is the only gate (`APP_QUOTA_EXCEEDED`, HTTP 429).\n\n**Idempotency.** Pass `idempotencyKey` (≤64 chars) on `generate`: the same key within 24 h returns the existing job with `idempotentReplay:true` and is never charged twice. Use it for retry-safe buttons and reload recovery.\n\n**No silent downgrade.** Models differ a lot (lyrics vs. instrumental-only, fixed vs. range length, mp3 vs. wav, reference image). Read `llm.catalog({serviceType:'music_gen'})` — `capabilities.{lyrics, lyricsMode, lyricsMaxChars, instrumentalOnly, duration, formats, defaultFormat, referenceImage, promptMinChars, promptMaxChars, options}` — and build your form from it. A feature the resolved model cannot deliver fails with `MUSIC_FEATURE_UNSUPPORTED` (`-32165`) whose `data.alternatives` lists models that can; the host never swaps the request for something lesser.\n\n**URL lifetime.** `result.url` is a presigned R2 GET with a ~30 min TTL (`expiresIn`). Re-calling `getJob` re-signs it; for permanent storage fetch the bytes and go through `upload.negotiate`/`confirm`. Terminal objects are cleaned up after 7 days; job rows are kept 30 days for billing.\n\n**Errors.** `-32161 MUSIC_PROVIDER_ERROR` (retryable) · `-32162 MUSIC_INVALID_REQUEST` · `-32163 MUSIC_MODEL_UNAVAILABLE` · `-32164 MUSIC_JOB_NOT_FOUND` · `-32165 MUSIC_FEATURE_UNSUPPORTED` · `-32166 MUSIC_LYRICS_TOO_LONG` · `-32167 MUSIC_JOB_NOT_CANCELLABLE` · `-32168 MUSIC_CONTENT_REJECTED`; grant / quota failures surface as the generic `APP_NOT_GRANTED` / `APP_QUOTA_EXCEEDED` (`-32160` / `-32169` are used only by the Executa reverse RPC). Every error's `data` carries `{errorName, retryable, docs}`.",
+      "sub": "Generate music (text-to-music, optionally with lyrics) from the **anna-app bundle** through the host's fal-hosted catalogue (MiniMax Music 2.6, Lyria 3 / 3 Pro, ElevenLabs Music, Stable Audio 2.5, ACE-Step) without provider keys or storage credentials. Music is the **same kind of surface as video, in a different modality**: `generate` returns a `mjob_…` job in ~1s, progress arrives as `media_job` SSE events, and `getJob` is the single source of truth.\n\n**Auth chain.** Bundle calls `anna.music.*` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_music_*` → `app_media_facade.music_*` → fal queue (webhook + poller) → R2. Equivalent HTTP: `POST /api/v1/copilot/app/music/generate`, `GET …/music/jobs[/{job_id}]`, `POST …/music/jobs/{job_id}/cancel` (app_session_token).\n\n**Access.** Available to every installed, enabled App — nothing to declare; `APP_NOT_GRANTED` only means not installed / disabled / no subscription.\n\n**Billing is pre-charge → settle → refund** (`APP_MUSIC_GEN`). `estimatedCostCU` is held on submit from the catalogue price in the provider's own unit — `cuPerSong` (MiniMax, Lyria, Stable Audio), `cuPerSecond` (ACE-Step) or `cuPerMinute` rounded **up** to whole minutes (ElevenLabs); on `succeeded` the hold is settled to `billedCostCU`; on `failed` / cancelled-while-queued it is **fully refunded**; cancelling a `running` job does not refund. There is no platform-side daily / concurrency cap — the CU quota pool is the only gate (`APP_QUOTA_EXCEEDED`, HTTP 429).\n\n**Idempotency.** Pass `idempotencyKey` (≤64 chars) on `generate`: the same key within 24 h returns the existing job with `idempotentReplay:true` and is never charged twice. Use it for retry-safe buttons and reload recovery.\n\n**No silent downgrade.** Models differ a lot (lyrics vs. instrumental-only, fixed vs. range length, mp3 vs. wav, reference image). Read `llm.catalog({serviceType:'music_gen'})` — `capabilities.{lyrics, lyricsMode, lyricsMaxChars, instrumentalOnly, duration, formats, defaultFormat, referenceImage, promptMinChars, promptMaxChars, options}` — and build your form from it. A feature the resolved model cannot deliver fails with `MUSIC_FEATURE_UNSUPPORTED` (`-32165`) whose `data.alternatives` lists models that can; the host never swaps the request for something lesser.\n\n**URL lifetime.** `result.url` is a presigned R2 GET with a ~30 min TTL (`expiresIn`). Re-calling `getJob` re-signs it; for permanent storage fetch the bytes and go through `upload.negotiate`/`confirm`. Terminal objects are cleaned up after 7 days; job rows are kept 30 days for billing.\n\n**Errors.** `-32161 MUSIC_PROVIDER_ERROR` (retryable) · `-32162 MUSIC_INVALID_REQUEST` · `-32163 MUSIC_MODEL_UNAVAILABLE` · `-32164 MUSIC_JOB_NOT_FOUND` · `-32165 MUSIC_FEATURE_UNSUPPORTED` · `-32166 MUSIC_LYRICS_TOO_LONG` · `-32167 MUSIC_JOB_NOT_CANCELLABLE` · `-32168 MUSIC_CONTENT_REJECTED`; install-state / quota failures surface as the generic `APP_NOT_GRANTED` / `APP_QUOTA_EXCEEDED` (`-32160` / `-32169` are used only by the Executa reverse RPC). Every error's `data` carries `{errorName, retryable, docs}`.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-music.json",
       "items": [
@@ -3175,7 +3132,7 @@
       "id": "host-api-audio",
       "kicker": "Host API · audio.*",
       "title": "audio.* — host-managed TTS, STT & realtime voice session",
-      "sub": "Synchronous text-to-speech and speech-to-text from the **anna-app bundle**. The host owns provider credentials (DashScope Qwen TTS, fal-hosted ElevenLabs / MiniMax / xAI TTS; Gemini-class STT), the user's model preferences, storage and quota.\n\n**Auth chain.** `anna.audio.{speak,transcribe}` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` → `_h_audio_*` → `app_media_facade.audio_*`. Equivalent HTTP: `POST /api/v1/copilot/app/audio/speak`, `POST /api/v1/copilot/app/audio/transcribe` (app_session_token).\n\n**ACL is two-layer.** (a) manifest `ui.host_api.audio` lists `speak` and/or `transcribe`; (b) the user's `media_grant.audio = {enabled, speak, transcribe}` for your App — `enabled` alone is not enough, the per-operation flag must also be on. Missing either → `APP_NOT_GRANTED`.\n\n**Models and voices are catalogue-driven.** The user's preferred TTS / STT model (Model Settings → Specialized Models) is used unless you pass a `model` hint that the user is allowed to use. Voices, `speed`/`format` options and `maxCharsPerCall` differ per model — read them from `llm.catalog({serviceType:'tts'})` instead of hard-coding. Knobs a model does not support (e.g. `speed` on ElevenLabs) are ignored, never surcharged.\n\n**Billing.** `speak` is billed per character (`APP_TTS`, min 1 CU); `transcribe` per audio second (`APP_STT`). Both are synchronous (HTTP timeout 120s) — long narration should be split into sentences; there is no job API for audio (a future `audio.speakAsync` would be additive; `speak` will never change to return a `jobId`).\n\n**Realtime voice session (`anna.audio.session`).** Streaming ASR → LLM → streaming TTS with barge-in, the same full-duplex pipeline as the main-chat voice mode, opened from the bundle via `await anna.audio.session({llm:'agent'|'none', context?, system?, voice?, language?, speed?, maxDurationSec?})`. It is **not** a dispatcher RPC: the host page's bridge owns the `wss://…/api/v1/anna-apps/runtime/voice?window_uuid=` socket and relays `audio.session.{open,send,flush,context,say,interrupt,close}` locally — the iframe never holds a token or opens a network connection. Gate: manifest `ui.host_api.audio ∋ \"session\"` (which also grants the iframe `allow=\"microphone\"`) **plus** `media_grant.audio.{enabled, speak, transcribe}` (both flags); `llm:'agent'` additionally requires `host_api.agent.session.{auto|fixed}`. Billing is the same `APP_STT` per recognised second / `APP_TTS` per synthesised character — only audio you `sendAudio()` is billed, so gate the microphone behind push-to-talk. Guide: [App UI Audio Session](/developers/apps/app-ui-audio-session).\n\n**Errors.** `-32142 AUDIO_TEXT_TOO_LONG` (echoes `maxCharsPerCall`) · `-32143 AUDIO_TOO_LONG` (>10 min / >25 MB) · `-32144 AUDIO_PROVIDER_ERROR` (retryable) · `-32145 AUDIO_VOICE_INVALID` (echoes valid voices) · `-32146 AUDIO_MODEL_UNAVAILABLE` · `-32147 AUDIO_CONTENT_REJECTED`; invalid shapes → `-32122 VIDEO_INVALID_REQUEST` (shared validation code).",
+      "sub": "Synchronous text-to-speech and speech-to-text from the **anna-app bundle**. The host owns provider credentials (DashScope Qwen TTS, fal-hosted ElevenLabs / MiniMax / xAI TTS; Gemini-class STT), the user's model preferences, storage and quota.\n\n**Auth chain.** `anna.audio.{speak,transcribe}` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` → `_h_audio_*` → `app_media_facade.audio_*`. Equivalent HTTP: `POST /api/v1/copilot/app/audio/speak`, `POST /api/v1/copilot/app/audio/transcribe` (app_session_token).\n\n**Access.** `speak`, `transcribe` and the realtime session are available to every installed, enabled App — nothing to declare; `APP_NOT_GRANTED` only means not installed / disabled / no subscription. Recording in the iframe needs `ui.browser_permissions: [\"microphone\"]`.\n\n**Models and voices are catalogue-driven.** The user's preferred TTS / STT model (Model Settings → Specialized Models) is used unless you pass a `model` hint that the user is allowed to use. Voices, `speed`/`format` options and `maxCharsPerCall` differ per model — read them from `llm.catalog({serviceType:'tts'})` instead of hard-coding. Knobs a model does not support (e.g. `speed` on ElevenLabs) are ignored, never surcharged.\n\n**Billing.** `speak` is billed per character (`APP_TTS`, min 1 CU); `transcribe` per audio second (`APP_STT`). Both are synchronous (HTTP timeout 120s) — long narration should be split into sentences; there is no job API for audio (a future `audio.speakAsync` would be additive; `speak` will never change to return a `jobId`).\n\n**Realtime voice session (`anna.audio.session`).** Streaming ASR → LLM → streaming TTS with barge-in, the same full-duplex pipeline as the main-chat voice mode, opened from the bundle via `await anna.audio.session({llm:'agent'|'none', context?, system?, voice?, language?, speed?, maxDurationSec?})`. It is **not** a dispatcher RPC: the host page's bridge owns the `wss://…/api/v1/anna-apps/runtime/voice?window_uuid=` socket and relays `audio.session.{open,send,flush,context,say,interrupt,close}` locally — the iframe never holds a token or opens a network connection. Declare `ui.browser_permissions: [\"microphone\"]` so the iframe gets `allow=\"microphone\"` (legacy `host_api.audio ∋ \"session\"` is normalized to it). Billing is the same `APP_STT` per recognised second / `APP_TTS` per synthesised character — only audio you `sendAudio()` is billed, so gate the microphone behind push-to-talk. Guide: [App UI Audio Session](/developers/apps/app-ui-audio-session).\n\n**Errors.** `-32142 AUDIO_TEXT_TOO_LONG` (echoes `maxCharsPerCall`) · `-32143 AUDIO_TOO_LONG` (>10 min / >25 MB) · `-32144 AUDIO_PROVIDER_ERROR` (retryable) · `-32145 AUDIO_VOICE_INVALID` (echoes valid voices) · `-32146 AUDIO_MODEL_UNAVAILABLE` · `-32147 AUDIO_CONTENT_REJECTED`; invalid shapes → `-32122 VIDEO_INVALID_REQUEST` (shared validation code).",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-audio.json",
       "items": [
@@ -3190,7 +3147,7 @@
         },
         {
           "name": "audio.transcribe",
-          "desc": "**Synchronous** STT: `{audioUrl | audioBase64 (+format), language?, model?}` → `{text, language, billedCostCU}`. Inline audio ≤10 MB, URL fetch ≤25 MB, duration ≤10 min (`AUDIO_TOO_LONG`). Routed to the user's preferred speech-to-text model; billed as `APP_STT`. For **live** recognition with partial results use the realtime `anna.audio.session()` surface instead (manifest `host_api.audio ∋ \"session\"`, same `media_grant` flags).",
+          "desc": "**Synchronous** STT: `{audioUrl | audioBase64 (+format), language?, model?}` → `{text, language, billedCostCU}`. Inline audio ≤10 MB, URL fetch ≤25 MB, duration ≤10 min (`AUDIO_TOO_LONG`). Routed to the user's preferred speech-to-text model; billed as `APP_STT`. For **live** recognition with partial results use the realtime `anna.audio.session()` surface instead (declare `ui.browser_permissions: [\"microphone\"]`).",
           "tags": [
             {
               "label": "sync ≤120s"
@@ -3204,7 +3161,7 @@
       "id": "host-api-upload",
       "kicker": "Host API · upload.*",
       "title": "upload.* — persist files without S3 credentials",
-      "sub": "Put binary blobs into Anna's R2 bucket using only the iframe's session token. The host signs URLs, validates purpose against `upload_grant` (MIME passes the host hard denylist only — the allowlist was removed), charges quota, and namespaces objects under a per-(user, App) prefix. Your bundle holds zero AWS keys.\n\n**Auth chain.** Bundle calls `anna.upload.{inline,negotiate,confirm}(...)` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_upload_*` handler → `SqlAlchemyWindowStore.upload_*` → `app_llm_facade.upload_*` → `host_upload_service` → R2.\n\n**ACL is two-layer.** (a) The dispatcher gate is `manifest.ui.host_api.upload` — a `string[]` that must contain the called method (`inline` / `negotiate` / `confirm`), or `*`; `manifest.permissions[]` is display/audit only and is NEVER checked. (b) Anna Admin user-grant `UserExecuta.custom_config.upload_grant = {enabled, maxFileBytes (default 20 MiB), allowedPurposes}`. Missing either side → `APP_NOT_GRANTED`. Default per-purpose set is `{image_input, image_reference, user_artifact}`; the grant `allowedPurposes` (if set) narrows that further.\n\n**Three modes, one budget.** Pick `inline` for ≤ 8 MiB payloads in memory (one round-trip); pick `negotiate` + `confirm` for large/streaming uploads (bytes flow direct browser→R2). Both flows charge the same per-day file counter on **success** (`inline` on completion, `negotiate`+`confirm` on `confirm`); a bare `negotiate` without `confirm` is free but leaves an orphan R2 object that lifecycle policy will reap.\n\n**URL lifetime & key durability.** `download_url` is a presigned GET with TTL = `expires_in` seconds (~30 min). The **`r2_key` is durable** — persist it (`anna.storage.set`) and re-mint URLs by calling `upload.confirm({r2_key})` on each refresh. SVG payloads are forced to `application/octet-stream` (attachment download) to prevent active content; plan your renderer accordingly.",
+      "sub": "Put binary blobs into Anna's R2 bucket using only the iframe's session token. The host signs URLs, validates `purpose` (MIME passes the host hard denylist only — the allowlist was removed), charges quota, and namespaces objects under a per-(user, App) prefix. Your bundle holds zero AWS keys.\n\n**Auth chain.** Bundle calls `anna.upload.{inline,negotiate,confirm}(...)` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_upload_*` handler → `SqlAlchemyWindowStore.upload_*` → `app_llm_facade.upload_*` → `host_upload_service` → R2.\n\n**Access.** Available to every installed, enabled App — nothing to declare; `APP_NOT_GRANTED` only means not installed / disabled / no subscription. Platform caps: 20 MiB per file, 16 files / 80 MiB per invoke; `purpose` ∈ `{image_input, image_reference, user_artifact}`.\n\n**Three modes, one budget.** Pick `inline` for ≤ 8 MiB payloads in memory (one round-trip); pick `negotiate` + `confirm` for large/streaming uploads (bytes flow direct browser→R2). Both flows charge the same per-day file counter on **success** (`inline` on completion, `negotiate`+`confirm` on `confirm`); a bare `negotiate` without `confirm` is free but leaves an orphan R2 object that lifecycle policy will reap.\n\n**URL lifetime & key durability.** `download_url` is a presigned GET with TTL = `expires_in` seconds (~30 min). The **`r2_key` is durable** — persist it (`anna.storage.set`) and re-mint URLs by calling `upload.confirm({r2_key})` on each refresh. SVG payloads are forced to `application/octet-stream` (attachment download) to prevent active content; plan your renderer accordingly.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-upload.json",
       "items": [
@@ -3237,7 +3194,7 @@
       "id": "host-api-storage",
       "kicker": "Host API · storage.*",
       "title": "storage.* — per-App key-value state (APS)",
-      "sub": "Durable JSON key-value store backed by Anna Persistent Storage (APS) — Postgres rows under a per-(user, App) bucket with quotas, optimistic concurrency, TTLs, and metadata / tag annotations. Your bundle ships zero DB credentials and zero schema migrations.\n\n**Auth chain.** Bundle calls `anna.storage.{get,set,delete,list}(...)` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_aps_storage_*` handler in `src/services/anna_app_rpc_handlers/storage.py` → `StorageService.kv_*` → Postgres (`aps_entries`, row-locked with `SELECT FOR UPDATE`) + Redis Lua quota reserve. At startup `main.py` calls `anna_app_rpc_handlers.install()` which monkey-patches `_DISPATCH` so the APS handlers shadow the legacy `runtime_state` ones for `storage.get` / `storage.set` / `storage.delete` / `storage.list`.\n\n**Two backends, one surface.** (a) **APS-backed (production)** is the canonical path — per-row etag (`W/\"<gen>-<digest>\"`), per-user byte / entry quota, `if_match` optimistic concurrency, `ttl_seconds`, `metadata` / `tags`, and the rich `StorageErrorCode` enum (`not_found`, `precondition_failed`, `invalid_path`, `value_too_large`, `quota_exceeded`, `forbidden_scope`, `not_granted`, `pending_upload`, `rate_limited`, `internal_error`). (b) **Legacy `runtime_state` (fallback)** lives in `anna-app-core/dispatcher.py` and keeps the whole bucket in `AnnaAppWindowSession.runtime_state` (single JSON column, hard cap **256 KiB** = `MAX_RUNTIME_STATE_BYTES`); it emits a `runtime_state_synced` event on every `set` / `delete` for cross-tab sync but does NOT support `if_match`, `metadata`, `tags`, or `ttl_seconds`. Apps that only ran against the legacy backend will silently lose live cross-window sync on the APS path — fall back to polling `storage.get` on focus.\n\n**ACL is two-layer.** (a) The PRIMARY dispatcher gate is `manifest.ui.host_api.storage` — a `string[]` that must contain the called method (`get` / `set` / `delete` / `list`), or `*`; `manifest.permissions[]` is display/audit only and is NEVER checked. (b) Capability strings in `host_capabilities` only gate NON-default scope/owner pairs (the default `scope=app, owner=self` bucket needs none) and decide *which* scope/owner pairs are reachable: `aps.kv` / `aps` (legacy: only `scope=app, owner=self`), `aps.scope.<user|app|tool>.<read|write>` (fine-grained), or `aps.scope.admin` (everything). The gate `_check_storage_scope` rejects with `permission_denied` *before* the handler runs; cross-owner `scope=app` and `scope=tool` raise `not_implemented` today regardless of capability.\n\n**Key & value rules.** `key`: ≤ **1024 chars**, ≤ **128 chars per `/`-segment**, no leading `/`, no empty / `.` / `..` segments, no ASCII control / `\\` / zero-width / bidi chars, no leading-or-trailing whitespace per segment — enforced by `validate_kv_key` in `storage_service.py`. `value`: any JSON-serialisable type (functions / BigInts / cycles rejected at `postMessage`); `null` is legal and round-trips — **always branch on `cur.exists`**, not `cur.value`, when distinguishing absent from stored-null. `etag` is opaque; treat as a black-box token.",
+      "sub": "Durable JSON key-value store backed by Anna Persistent Storage (APS) — Postgres rows under a per-(user, App) bucket with quotas, optimistic concurrency, TTLs, and metadata / tag annotations. Your bundle ships zero DB credentials and zero schema migrations.\n\n**Auth chain.** Bundle calls `anna.storage.{get,set,delete,list}(...)` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_aps_storage_*` handler in `src/services/anna_app_rpc_handlers/storage.py` → `StorageService.kv_*` → Postgres (`aps_entries`, row-locked with `SELECT FOR UPDATE`) + Redis Lua quota reserve. At startup `main.py` calls `anna_app_rpc_handlers.install()` which monkey-patches `_DISPATCH` so the APS handlers shadow the legacy `runtime_state` ones for `storage.get` / `storage.set` / `storage.delete` / `storage.list`.\n\n**Two backends, one surface.** (a) **APS-backed (production)** is the canonical path — per-row etag (`W/\"<gen>-<digest>\"`), per-user byte / entry quota, `if_match` optimistic concurrency, `ttl_seconds`, `metadata` / `tags`, and the rich `StorageErrorCode` enum (`not_found`, `precondition_failed`, `invalid_path`, `value_too_large`, `quota_exceeded`, `forbidden_scope`, `not_granted`, `pending_upload`, `rate_limited`, `internal_error`). (b) **Legacy `runtime_state` (fallback)** lives in `anna-app-core/dispatcher.py` and keeps the whole bucket in `AnnaAppWindowSession.runtime_state` (single JSON column, hard cap **256 KiB** = `MAX_RUNTIME_STATE_BYTES`); it emits a `runtime_state_synced` event on every `set` / `delete` for cross-tab sync but does NOT support `if_match`, `metadata`, `tags`, or `ttl_seconds`. Apps that only ran against the legacy backend will silently lose live cross-window sync on the APS path — fall back to polling `storage.get` on focus.\n\n**Access.** The methods themselves need no declaration. The default `scope=app, owner=self` bucket is always reachable; any other scope (`user`, `tool`, another owner's `app`) must be declared in the top-level manifest `storage.scopes` (`{scope: \"r\" | \"w\" | \"rw\"}` — legacy `aps.scope.<scope>.<read|write>` strings normalize to it). The gate `_check_storage_scope` rejects with `permission_denied` *before* the handler runs; cross-owner `scope=app` and `scope=tool` raise `not_implemented` today regardless of declaration.\n\n**Key & value rules.** `key`: ≤ **1024 chars**, ≤ **128 chars per `/`-segment**, no leading `/`, no empty / `.` / `..` segments, no ASCII control / `\\` / zero-width / bidi chars, no leading-or-trailing whitespace per segment — enforced by `validate_kv_key` in `storage_service.py`. `value`: any JSON-serialisable type (functions / BigInts / cycles rejected at `postMessage`); `null` is legal and round-trips — **always branch on `cur.exists`**, not `cur.value`, when distinguishing absent from stored-null. `etag` is opaque; treat as a black-box token.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-storage.json",
       "items": [
@@ -3282,7 +3239,7 @@
       "id": "host-api-embed",
       "kicker": "Host API · llm.embed",
       "title": "llm.embed — host-managed embeddings (RAG / semantic search)",
-      "sub": "Compute dense embedding vectors from the **anna-app bundle (iframe)** with zero provider credentials, zero hard-coded model names, and **independent billing** from `llm.complete`. Your bundle gets an OpenAI-compatible `{model, data:[{index,embedding}], usage, _meta}` envelope so RAG / semantic-search / clustering code lifted straight from any OpenAI tutorial drops in.\n\n**Auth chain.** Bundle calls `anna.llm.embed({input, model?, user?})` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_llm_embed` handler in `anna_app_core.dispatcher` → `SqlAlchemyWindowStore.llm_embed` (mints / reuses the `kind=complete` `app_session_token`, **same token as `llm.complete`** since the two are billed against distinct `LLMRequestType`s) → `app_embed_facade.embed` → `EmbeddingRegistry.client_for(spec).embed(inputs)` → provider.\n\n**Two-surface billing isolation.** `llm.complete` debits `APP_LLM` quota; `llm.embed` debits `APP_EMBED` quota via `LLMTokenUsageService.record_usage(request_type=APP_EMBED, ...)`. Exhausting one does NOT block the other. The 2026-05-28 simplification removed the daily token pool and per-invoke token cap — embed is now purely pay-per-token through the standard usage table.\n\n**ACL.** The dispatcher gate is `manifest.ui.host_api.llm` — it must include `embed` (or `*`); `manifest.permissions[]` is display/audit only and is NEVER checked. (c) `UserAnnaApp.custom_config.embed_grant` defaults to `{enabled: true}` when absent — **opt-out**, not opt-in (rationale: embed is near-universally needed for RAG; the real risk is token spend which the billing surface already governs). Users can disable per-app via `embed_grant: {enabled: false}` → `APP_NOT_GRANTED`.\n\n**Stable alias contract.** Only host-stable aliases are exposed (`anna-managed-v1` = `openai/text-embedding-3-small`, 1536-dim). Real provider model name surfaces in `_meta.backendModel` for audit. **Dimensions are immutable per alias** — upgrades go to a new alias (`anna-managed-v2`); never an in-place dim change. Persist `_meta.alias` + `_meta.dimensions` next to every stored vector or you risk silent dim drift after a registry rotation.\n\n**Limits & rejection policy.** Batch ≤ `min(spec.max_inputs_per_request, EMBED_MAX_INPUTS_PER_REQUEST=64)` items, each ≤ `EMBED_MAX_CHARS_PER_INPUT=32_000` chars. **Reject-not-truncate**: any single oversize item or one-too-many batch fails the whole request with `APP_INVALID_REQUEST` — chunk client-side and keep an index map. Provider errors are flattened to a single `APP_PROVIDER_ERROR`; the upstream code is NOT preserved.",
+      "sub": "Compute dense embedding vectors from the **anna-app bundle (iframe)** with zero provider credentials, zero hard-coded model names, and **independent billing** from `llm.complete`. Your bundle gets an OpenAI-compatible `{model, data:[{index,embedding}], usage, _meta}` envelope so RAG / semantic-search / clustering code lifted straight from any OpenAI tutorial drops in.\n\n**Auth chain.** Bundle calls `anna.llm.embed({input, model?, user?})` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_llm_embed` handler in `anna_app_core.dispatcher` → `SqlAlchemyWindowStore.llm_embed` (mints / reuses the `kind=complete` `app_session_token`, **same token as `llm.complete`** since the two are billed against distinct `LLMRequestType`s) → `app_embed_facade.embed` → `EmbeddingRegistry.client_for(spec).embed(inputs)` → provider.\n\n**Two-surface billing isolation.** `llm.complete` debits `APP_LLM` quota; `llm.embed` debits `APP_EMBED` quota via `LLMTokenUsageService.record_usage(request_type=APP_EMBED, ...)`. Exhausting one does NOT block the other. The 2026-05-28 simplification removed the daily token pool and per-invoke token cap — embed is now purely pay-per-token through the standard usage table.\n\n**Access.** Available to every installed, enabled App — nothing to declare, no user toggle (the real risk is token spend, which the billing surface already governs); `APP_NOT_GRANTED` only means not installed / disabled / no subscription.\n\n**Stable alias contract.** Only host-stable aliases are exposed (`anna-managed-v1` = `openai/text-embedding-3-small`, 1536-dim). Real provider model name surfaces in `_meta.backendModel` for audit. **Dimensions are immutable per alias** — upgrades go to a new alias (`anna-managed-v2`); never an in-place dim change. Persist `_meta.alias` + `_meta.dimensions` next to every stored vector or you risk silent dim drift after a registry rotation.\n\n**Limits & rejection policy.** Batch ≤ `min(spec.max_inputs_per_request, EMBED_MAX_INPUTS_PER_REQUEST=64)` items, each ≤ `EMBED_MAX_CHARS_PER_INPUT=32_000` chars. **Reject-not-truncate**: any single oversize item or one-too-many batch fails the whole request with `APP_INVALID_REQUEST` — chunk client-side and keep an index map. Provider errors are flattened to a single `APP_PROVIDER_ERROR`; the upstream code is NOT preserved.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-embed.json",
       "items": [
@@ -3308,7 +3265,7 @@
       "id": "host-api-files",
       "kicker": "Host API · files.*",
       "title": "files.* — per-App blob storage (APS objects + R2)",
-      "sub": "Durable **object** storage backed by Anna Persistent Storage (APS): a `aps_entries` row in Postgres for metadata + a presigned-URL handle on Cloudflare R2 for the bytes. Your bundle never proxies bytes through nexus — browser PUTs directly to R2 on upload, browser GETs directly from R2 on read. Server-side stays cheap; large files don't pin a request worker.\n\n**Auth chain.** Bundle calls `anna.files.{upload_init,upload_finalize,download_url,list,delete}(...)` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_files_*` handler in `src/services/anna_app_rpc_handlers/files.py` → `StorageService.object_*` → Postgres (`aps_entries`) + R2 presign (PUT/GET) + Redis Lua quota. At startup `main.py` calls `anna_app_rpc_handlers.install()` which monkey-patches `_DISPATCH` so these handlers shadow the legacy `_h_not_implemented` stubs declared in `anna-app-core/dispatcher.py` (necessary so the AST-generated `methods.json` knows the methods exist).\n\n**Two-phase upload.** `files.upload_init` reserves the row (status `pending`), counts bytes against quota, and returns a single-use R2 presigned PUT URL. The browser streams the file directly to R2. Then `files.upload_finalize` calls R2 `HEAD` to verify bytes-and-etag, flips the row to `active`, and commits the quota reservation. Orphaned `pending` rows expire after `ttl_seconds` and free quota automatically — no manual cleanup. This is the *only* upload pattern; there is no synchronous `files.put(bytes)`.\n\n**ACL.** The ONLY dispatcher gate is `manifest.ui.host_api.files` — a `string[]` that must list each called method (or `*`). `manifest.permissions[]` is display/audit only and is NEVER checked, and the `files.*` handlers always operate at `scope=app, owner=window.app_id`, so `host_capabilities` (`aps.*`) is NOT consulted for the iframe files surface. The dispatch ACL gate runs *before* the handler.\n\n**Concurrency.** Every `active` row carries an opaque `etag` (`W/\"<gen>-<digest>\"`). `upload_init` and `delete` accept `if_match` for optimistic-concurrency writes against an existing entry — mismatch raises `precondition_failed`. `download_url` / `list` return the current `etag` so callers can carry it forward.\n\n**Limits.** Per-object byte cap (`APS_OBJECT_MAX_BYTES`), per-user byte + entry quota, presigned URL TTL clamped to `APS_PRESIGN_{PUT,GET}_TTL_MAX_S`. Errors share the storage `StorageErrorCode` enum: `not_found`, `precondition_failed`, `invalid_path`, `value_too_large`, `quota_exceeded`, `forbidden_scope`, `not_granted`, `pending_upload`, `rate_limited`, `internal_error`.",
+      "sub": "Durable **object** storage backed by Anna Persistent Storage (APS): a `aps_entries` row in Postgres for metadata + a presigned-URL handle on Cloudflare R2 for the bytes. Your bundle never proxies bytes through nexus — browser PUTs directly to R2 on upload, browser GETs directly from R2 on read. Server-side stays cheap; large files don't pin a request worker.\n\n**Auth chain.** Bundle calls `anna.files.{upload_init,upload_finalize,download_url,list,delete}(...)` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` → `_h_files_*` handler in `src/services/anna_app_rpc_handlers/files.py` → `StorageService.object_*` → Postgres (`aps_entries`) + R2 presign (PUT/GET) + Redis Lua quota. At startup `main.py` calls `anna_app_rpc_handlers.install()` which monkey-patches `_DISPATCH` so these handlers shadow the legacy `_h_not_implemented` stubs declared in `anna-app-core/dispatcher.py` (necessary so the AST-generated `methods.json` knows the methods exist).\n\n**Two-phase upload.** `files.upload_init` reserves the row (status `pending`), counts bytes against quota, and returns a single-use R2 presigned PUT URL. The browser streams the file directly to R2. Then `files.upload_finalize` calls R2 `HEAD` to verify bytes-and-etag, flips the row to `active`, and commits the quota reservation. Orphaned `pending` rows expire after `ttl_seconds` and free quota automatically — no manual cleanup. This is the *only* upload pattern; there is no synchronous `files.put(bytes)`.\n\n**Access.** Nothing to declare for the default `scope=app, owner=window.app_id` bucket. Cross-app scopes (`user`, `tool`, another owner's `app` via `owner`) require the matching top-level `storage.scopes` entry; the scope gate runs *before* the handler and rejects with `permission_denied`.\n\n**Concurrency.** Every `active` row carries an opaque `etag` (`W/\"<gen>-<digest>\"`). `upload_init` and `delete` accept `if_match` for optimistic-concurrency writes against an existing entry — mismatch raises `precondition_failed`. `download_url` / `list` return the current `etag` so callers can carry it forward.\n\n**Limits.** Per-object byte cap (`APS_OBJECT_MAX_BYTES`), per-user byte + entry quota, presigned URL TTL clamped to `APS_PRESIGN_{PUT,GET}_TTL_MAX_S`. Errors share the storage `StorageErrorCode` enum: `not_found`, `precondition_failed`, `invalid_path`, `value_too_large`, `quota_exceeded`, `forbidden_scope`, `not_granted`, `pending_upload`, `rate_limited`, `internal_error`.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-files.json",
       "items": [
@@ -3365,7 +3322,7 @@
         },
         {
           "name": "files.list",
-          "desc": "Page metadata-only rows under an optional `prefix`. Returns `path`, `etag`, `size_bytes`, `content_type`, `metadata`, `tags`, `updated_at`. Cursor-based. Optional `scope`/`owner` args (default: own app scope): with manifest `host_capabilities: [\"aps.scope.app.read\"]`, `owner` may reference ANOTHER app by its public ref (`@handle/slug` or numeric id — bare slugs rejected, slugs are only unique per developer namespace) to browse the objects it stores under the calling user (e.g. `anna.web.image_fetch` artifacts). Rows are always filtered by the calling user's id.",
+          "desc": "Page metadata-only rows under an optional `prefix`. Returns `path`, `etag`, `size_bytes`, `content_type`, `metadata`, `tags`, `updated_at`. Cursor-based. Optional `scope`/`owner` args (default: own app scope): with manifest `storage.scopes.app` (`r` or `rw`), `owner` may reference ANOTHER app by its public ref (`@handle/slug` or numeric id — bare slugs rejected, slugs are only unique per developer namespace) to browse the objects it stores under the calling user (e.g. `anna.web.image_fetch` artifacts). Rows are always filtered by the calling user's id.",
           "tags": [
             {
               "label": "paginated"
@@ -3394,17 +3351,17 @@
       "id": "host-api-tools",
       "kicker": "Host API · tools.*",
       "title": "tools.* — call Executa tools from the UI (sync + async jobs)",
-      "sub": "Drive any installed Executa tool directly from the **anna-app bundle** (iframe), bypassing the LLM. Useful for deterministic UI actions — \"click this button → run this tool\" — where you don't want the model in the loop.\n\n**Auth chain.** Bundle calls `anna.tools.{list,invoke}(...)` from the SDK proxy → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` (minted by `window.create`) + session cookie → `_h_tools_*` handler in `anna_app_core.dispatcher`. The token is never exposed to JS that didn't go through the SDK.\n\n**ACL is two-layer.** A tool must be (a) declared in `manifest.required_executas` or `optional_executas`, AND (b) matched by an entry in `manifest.ui.host_api.tools` (`\"required:*\"`, `\"optional:*\"`, the bare `tool_id`, or any `<prefix>:<tool_id>`). `tools.list` returns exactly the intersection; `tools.invoke` re-checks per call and rejects with `permission_denied`.\n\n**Timeout policy** (`tools.invoke` only). Caller-supplied `timeoutMs` is clamped to `[ANNA_APP_TOOLS_INVOKE_TIMEOUT_MIN_MS, _MAX_MS]` (defaults **1 s / 90 s**). When omitted, the Agent falls back to the plugin's manifest `tool_def.timeout`, or `_DEFAULT_MS` (**65 s**). Host wall-clock wait is `clamped + GRACE_MS` (default **2 s**) so an in-flight ack/cancel has room to land before `tool_timeout` fires. See RFC `docs/design/anna-app-tools-invoke-timeout.md`. Work that may exceed 90 s must use the **async job channel** — `tools.invokeAsync` returns a `jobId` immediately (no held-open HTTP request anywhere); progress arrives via `tool_job` window events + `tools.getJob` polling; `tools.cancelJob` / `tools.listJobs` complete the lifecycle. RFC `docs/design/anna-app-tools-invoke-async-jobs.md`.\n\n**Envelope stripping.** The raw NATS reply is `{success, data:{success, data:<payload>, error?}}`. The host unwraps both layers: outer-layer failure → `executa_unavailable`, inner-layer failure → `tool_failed`, otherwise the plugin payload (forced to `object`) lands on the iframe Promise.",
+      "sub": "Drive any installed Executa tool directly from the **anna-app bundle** (iframe), bypassing the LLM. Useful for deterministic UI actions — \"click this button → run this tool\" — where you don't want the model in the loop.\n\n**Auth chain.** Bundle calls `anna.tools.{list,invoke}(...)` from the SDK proxy → postMessage → `POST /api/v1/anna-apps/runtime/rpc` with `X-Anna-App-Token` (minted by `window.create`) + session cookie → `_h_tools_*` handler in `anna_app_core.dispatcher`. The token is never exposed to JS that didn't go through the SDK.\n\n**Access.** A tool must be declared in `manifest.required_executas` or `optional_executas` and be installed and enabled for the user — that is the whole allow-list (the legacy `ui.host_api.tools` narrowing list is dropped on ingest; stray refs become `optional_executas`). `tools.list` returns exactly that set; `tools.invoke` re-checks per call and rejects with `permission_denied`.\n\n**Timeout policy** (`tools.invoke` only). Caller-supplied `timeoutMs` is clamped to `[ANNA_APP_TOOLS_INVOKE_TIMEOUT_MIN_MS, _MAX_MS]` (defaults **1 s / 90 s**). When omitted, the Agent falls back to the plugin's manifest `tool_def.timeout`, or `_DEFAULT_MS` (**65 s**). Host wall-clock wait is `clamped + GRACE_MS` (default **2 s**) so an in-flight ack/cancel has room to land before `tool_timeout` fires. See RFC `docs/design/anna-app-tools-invoke-timeout.md`. Work that may exceed 90 s must use the **async job channel** — `tools.invokeAsync` returns a `jobId` immediately (no held-open HTTP request anywhere); progress arrives via `tool_job` window events + `tools.getJob` polling; `tools.cancelJob` / `tools.listJobs` complete the lifecycle. RFC `docs/design/anna-app-tools-invoke-async-jobs.md`.\n\n**Envelope stripping.** The raw NATS reply is `{success, data:{success, data:<payload>, error?}}`. The host unwraps both layers: outer-layer failure → `executa_unavailable`, inner-layer failure → `tool_failed`, otherwise the plugin payload (forced to `object`) lands on the iframe Promise.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-tools.json",
       "items": [
         {
           "name": "tools.list",
-          "desc": "Project the manifest's tool grants. Returns `{tools: [{tool_id, status?}]}` filtered through the `host_api.tools` whitelist; the optional `status` (`available` / `deploying` / `unavailable`, dispatcher ≥ 0.14.0) reflects live deploy-reconciliation facts — disable buttons before a click fails, and pair with `anna.tools.onChanged(cb)` (SDK ≥ 0.12.0) to re-list when `tools.changed` fires after a deploy lands. Pure ACL — no Agent / NATS round-trip; safe to call at bundle boot to decide which buttons to render."
+          "desc": "List the Executas the bundle may invoke — `required_executas` ∪ `optional_executas`. Returns `{tools: [{tool_id, status?}]}`; the optional `status` (`available` / `deploying` / `unavailable`, dispatcher ≥ 0.14.0) reflects live deploy-reconciliation facts — disable buttons before a click fails, and pair with `anna.tools.onChanged(cb)` (SDK ≥ 0.12.0) to re-list when `tools.changed` fires after a deploy lands. Pure manifest projection — no Agent / NATS round-trip; safe to call at bundle boot to decide which buttons to render."
         },
         {
           "name": "tools.invoke",
-          "desc": "Call one tool by id with structured `args` and an optional clamped `timeoutMs` (**max 90 s** — the public edge's held-request ceiling). Routes through the user's online Executa Agent over NATS, strips two envelope layers, and returns the plugin payload — or a stable error code (`tool_timeout`, `tool_failed`, `executa_unavailable`, `agent_unavailable`, `permission_denied`, `invalid_arg`). Calls that may outlive 90 s belong on `tools.invokeAsync`.",
+          "desc": "Call one tool by id with structured `args` and an optional clamped `timeoutMs` (**max 90 s** — the public edge's held-request ceiling). Routes through the user's online Executa Agent over NATS, strips two envelope layers, and returns the plugin payload — or a stable error code (`tool_timeout`, `tool_failed`, `executa_unavailable`, `agent_unavailable`, `permission_denied` (`tool_id` not in `required_executas` / `optional_executas`, or the Executa not installed / disabled), `invalid_arg`). Calls that may outlive 90 s belong on `tools.invokeAsync`.",
           "tags": [
             {
               "label": "timeoutMs"
@@ -3457,7 +3414,7 @@
       "id": "host-api-credentials",
       "kicker": "Host API · credentials.*",
       "title": "credentials.* — multi-account platform authorizations",
-      "sub": "Read the user's **platform-authorized accounts** (multi-account unified authorizations) straight from the anna-app bundle: enumerate connected accounts for a provider and exchange short-lived access tokens per account — without running your own OAuth flow or ever seeing a refresh token.\n\n**ACL is two-layer.** (a) The dispatcher gate is `manifest.ui.host_api.credentials` — unlike other namespaces this list holds **provider ids** (e.g. `[\"google\"]`), not method names; a non-empty list opens both methods, and the requested `provider` must be in it. (b) The user-controlled per-app **`credentials_grant`** (`UserAnnaApp.custom_config.credentials_grant = {enabled, providers[]}`, empty `providers` = all declared) toggled in Installed Apps → Permissions → *Connected accounts*; dev installs grant it automatically. Missing either side → `permission_denied` / `APP_NOT_GRANTED`.\n\n**Default-account semantics.** Exactly one account per provider is the default (managed at `/settings/authorizations`); `get_token` without `account_id` resolves to it, so single-account apps need no account plumbing.\n\n**Red lines.** `list_accounts` returns metadata only. `get_token` returns a short-lived access token per call, refreshed through the per-row state machine. `refresh_token` never crosses this channel. Mask tokens before rendering — see `examples/anna-app-credentials-demo`.",
+      "sub": "Read the user's **platform-authorized accounts** (multi-account unified authorizations) straight from the anna-app bundle: enumerate connected accounts for a provider and exchange short-lived access tokens per account — without running your own OAuth flow or ever seeing a refresh token.\n\n**Declaration.** `manifest.ui.host_api.credentials` holds **provider ids** (e.g. `[\"google\"]`), not method names; the requested `provider` must be in it (otherwise `permission_denied`) and the user must have connected that provider on the platform (`/settings/authorizations`). Undeclared provider → `permission_denied`; not connected / dead credential → `APP_NOT_GRANTED` with a reconnect hint.\n\n**Default-account semantics.** Exactly one account per provider is the default (managed at `/settings/authorizations`); `get_token` without `account_id` resolves to it, so single-account apps need no account plumbing.\n\n**Red lines.** `list_accounts` returns metadata only. `get_token` returns a short-lived access token per call, refreshed through the per-row state machine. `refresh_token` never crosses this channel. Mask tokens before rendering — see `examples/anna-app-credentials-demo`.",
       "source": "host_api",
       "items": [
         {
@@ -3471,7 +3428,7 @@
         },
         {
           "name": "credentials.get_token",
-          "desc": "`{provider, account_id?}` → `{access_token, account_id, expires_at}`. Omit `account_id` for the user's default account. Dead credentials (revoked / needs re-auth) fail with `APP_NOT_GRANTED` carrying the reconnect hint.",
+          "desc": "`{provider, account_id?}` → `{access_token, account_id, expires_at}`. Omit `account_id` for the user's default account. `provider` must be listed in `ui.host_api.credentials` (otherwise `permission_denied`) and connected by the user. Dead credentials (revoked / needs re-auth) fail with `APP_NOT_GRANTED` carrying the reconnect hint.",
           "tags": [
             {
               "label": "per-call token",
@@ -3487,12 +3444,12 @@
       "detail_source": "/static/data/reference-host-api-web.json",
       "kicker": "Host API · web.*",
       "title": "web.* — host-managed web search & page fetch",
-      "sub": "Search the web and extract page content from the **anna-app bundle (iframe)** with zero provider credentials — provider routing (tavily → ddgs degrade chain), SSRF guarding, quota, billing and audit all stay host-side. `search_depth: \"advanced\"` expresses *quality intent*, never provider choice; the response reports the ACTUALLY-executed `provider_tier` and bills the cheaper rate on degrade.\n\n**Auth chain.** Bundle calls `anna.web.search({query, ...})` / `anna.web.fetch({urls, ...})` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` → `_h_web_search` / `_h_web_fetch` in `anna_app_core.dispatcher` → `SqlAlchemyWindowStore.web_search/web_fetch` (lazy-minted `kind=complete` `app_session_token`) → `app_web_facade` → shared `web_service` core → `web_provider_registry`.\n\n**ACL.** Dispatcher gate is `manifest.ui.host_api.web` (must include the method or `*`) AND the user-controlled per-app `web_grant` (default DISABLED — first call returns `APP_NOT_GRANTED` to drive the consent card; retry after grant).\n\n**Billing.** Main CU pool, per-call: `max(provider_cost_usd × QUOTA_COST_RATIO, floor_cu)`. ddgs basic = 0.5 CU floor · tavily basic ≈ 13.8 CU · tavily advanced ≈ 27.6 CU · fetch = 1.0 CU/URL (at the default 80% margin; admin margin changes propagate automatically). Failed provider-chain calls are not billed. Ledger `request_type=APP_WEB_SEARCH/APP_WEB_FETCH`, `model_name=\"web:{provider}:{op}\"`.\n\n**Executa twin.** stdio plugins get the same capability via reverse-RPC `web/search` / `web/fetch` (manifest `host_capabilities: [\"web.search\", \"web.fetch\"]` + `UserExecuta.custom_config.web_grant`; error codes -32521..-32528; tighter budgets: 8,000 chars/page, 256 KB/response). Design: docs/design/app-web-search.md.",
+      "sub": "Search the web and extract page content from the **anna-app bundle (iframe)** with zero provider credentials — provider routing (tavily → ddgs degrade chain), SSRF guarding, quota, billing and audit all stay host-side. `search_depth: \"advanced\"` expresses *quality intent*, never provider choice; the response reports the ACTUALLY-executed `provider_tier` and bills the cheaper rate on degrade.\n\n**Auth chain.** Bundle calls `anna.web.search({query, ...})` / `anna.web.fetch({urls, ...})` → postMessage → `POST /api/v1/anna-apps/runtime/rpc` → `_h_web_search` / `_h_web_fetch` in `anna_app_core.dispatcher` → `SqlAlchemyWindowStore.web_search/web_fetch` (lazy-minted `kind=complete` `app_session_token`) → `app_web_facade` → shared `web_service` core → `web_provider_registry`.\n\n**Access.** Available to every installed, enabled App — nothing to declare, no user toggle; `APP_NOT_GRANTED` only means not installed / disabled / no subscription.\n\n**Billing.** Main CU pool, per-call: `max(provider_cost_usd × QUOTA_COST_RATIO, floor_cu)`. ddgs basic = 0.5 CU floor · tavily basic ≈ 13.8 CU · tavily advanced ≈ 27.6 CU · fetch = 1.0 CU/URL (at the default 80% margin; admin margin changes propagate automatically). Failed provider-chain calls are not billed. Ledger `request_type=APP_WEB_SEARCH/APP_WEB_FETCH`, `model_name=\"web:{provider}:{op}\"`.\n\n**Executa twin.** stdio plugins get the same capability via reverse-RPC `web/search` / `web/fetch` (nothing to declare; error codes -32521..-32528; tighter budgets: 8,000 chars/page, 256 KB/response). Design: docs/design/app-web-search.md.",
       "source": "host_api",
       "items": [
         {
           "name": "web.search",
-          "desc": "`{query, max_results?, search_depth?, topic?, time_range?, region?, include_domains?, exclude_domains?}` → `{results: [{title, url, snippet, site, published_at?, score?}], provider_tier, quota_consumed}`. `score`/`published_at` are optional — never assume they exist. Out-of-cap params are REJECTED (`APP_INVALID_REQUEST`), never silently truncated. `search_depth: \"advanced\"` needs `web_grant.allowAdvanced`; usage is metered by the CU pool only (no per-minute/daily caps).",
+          "desc": "`{query, max_results?, search_depth?, topic?, time_range?, region?, include_domains?, exclude_domains?}` → `{results: [{title, url, snippet, site, published_at?, score?}], provider_tier, quota_consumed}`. `score`/`published_at` are optional — never assume they exist. Out-of-cap params are REJECTED (`APP_INVALID_REQUEST`), never silently truncated. Usage is metered by the CU pool only (no per-minute/daily caps); `max_results` is capped at 50.",
           "tags": [
             {
               "label": "billed per call"
@@ -3504,7 +3461,7 @@
         },
         {
           "name": "web.fetch",
-          "desc": "`{urls (1-10), format?, max_chars?, timeout_ms?}` → `{pages: [{url, final_url?, ok, title?, content?, truncated?, error?}], quota_consumed}` — same length & order as input, **per-item failure isolation** (check `pages[i].ok`; errors: `SSRF_BLOCKED`, `TIMEOUT`, `HTTP_<status>`, `PARSE_FAILED`, `TOO_LARGE`, `RESPONSE_BUDGET_EXCEEDED`, …). Hard SSRF policy: private/metadata IPs blocked after DNS resolution, re-validated per redirect hop. 512 KB response budget. `web_grant` shape: `{enabled, allowSearch, allowFetch, allowAdvanced, allowImageSearch, allowImageFetch, maxResultsPerCall (10)}` — default disabled; edited in the Installed-Apps permission modal; `anna-app dev` installs seed a fully-enabled dev grant (dev calls never billed). Pass `{timeoutMs: 90000}` for large batches (SDK web-namespace default is 60s).",
+          "desc": "`{urls (1-10), format?, max_chars?, timeout_ms?}` → `{pages: [{url, final_url?, ok, title?, content?, truncated?, error?}], quota_consumed}` — same length & order as input, **per-item failure isolation** (check `pages[i].ok`; errors: `SSRF_BLOCKED`, `TIMEOUT`, `HTTP_<status>`, `PARSE_FAILED`, `TOO_LARGE`, `RESPONSE_BUDGET_EXCEEDED`, …). Hard SSRF policy: private/metadata IPs blocked after DNS resolution, re-validated per redirect hop. 512 KB response budget. Pass `{timeoutMs: 90000}` for large batches (SDK web-namespace default is 60s).",
           "tags": [
             {
               "label": "billed per URL"
@@ -3516,7 +3473,7 @@
         },
         {
           "name": "web.image_search",
-          "desc": "`{query, max_results? (8, cap 50), min_width?, min_height?, aspect? (any|wide|tall|square)}` → `{results: [{image_url, thumbnail_url?, source_url, title?, width?, height?, mime_type?, license_hint?}], quota_consumed, cached?}`. **Safe-search is force-enabled platform-side** (`safe_search: false` is rejected). `license_hint` is best-effort — no copyright warranty. Needs `web_grant.allowImageSearch` (defaults OFF even when web is enabled). Results cached 10 min; cache hits bill the floor CU and set `cached: true`. Provider chain: serper (Google Images, when key configured) → ddgs.images → tavily include_images. SDK alias `anna.web.imageSearch`.",
+          "desc": "`{query, max_results? (8, cap 50), min_width?, min_height?, aspect? (any|wide|tall|square)}` → `{results: [{image_url, thumbnail_url?, source_url, title?, width?, height?, mime_type?, license_hint?}], quota_consumed, cached?}`. **Safe-search is force-enabled platform-side** (`safe_search: false` is rejected). `license_hint` is best-effort — no copyright warranty. Results cached 10 min; cache hits bill the floor CU and set `cached: true`. Provider chain: serper (Google Images, when key configured) → ddgs.images → tavily include_images. SDK alias `anna.web.imageSearch`.",
           "tags": [
             {
               "label": "billed per call"
@@ -3528,7 +3485,7 @@
         },
         {
           "name": "web.image_fetch",
-          "desc": "`{url, max_bytes? (5 MiB, cap 20 MiB), purpose?}` → `{path, get_url, mime_type, bytes_size, sha256, source_url, final_url, quota_consumed}` — an artifact REFERENCE (`get_url` is a 30-min presigned URL; field is `get_url`, not `url`), never bytes. Host downloads with the full SSRF policy + image MIME whitelist (jpeg/png/webp/gif) verified by **magic bytes**, then stores into the app's APS files self-scope (counts against storage quota; manage via `anna.files.*`). Needs `web_grant.allowImageFetch` (defaults OFF). 1.0 CU floor per image; failed downloads never billed. SDK alias `anna.web.imageFetch`.",
+          "desc": "`{url, max_bytes? (5 MiB, cap 20 MiB), purpose?}` → `{path, get_url, mime_type, bytes_size, sha256, source_url, final_url, quota_consumed}` — an artifact REFERENCE (`get_url` is a 30-min presigned URL; field is `get_url`, not `url`), never bytes. Host downloads with the full SSRF policy + image MIME whitelist (jpeg/png/webp/gif) verified by **magic bytes**, then stores into the app's APS files self-scope (counts against storage quota; manage via `anna.files.*`). 1.0 CU floor per image; failed downloads never billed. SDK alias `anna.web.imageFetch`.",
           "tags": [
             {
               "label": "billed per image"
@@ -3548,7 +3505,7 @@
       "id": "host-api-apps",
       "kicker": "Host API · apps.*",
       "title": "apps.* — launcher for installed apps",
-      "sub": "Browse and launch the user's **installed** Anna Apps and curate the pinned \"我的 Apps\" deck from your bundle (SDK ≥ 0.9.0 / dispatcher ≥ 0.11.0). Not an App Store — there are no install/uninstall verbs. Grant via `manifest.ui.host_api.apps` (method names or `*`); treated like any third-party namespace, no first-party gating. `app_ref` accepts a numeric app id or an `@handle/slug` string. Launches route through the same window-runtime path as the REST `POST /runtime/windows`, so they emit the standard `open_view` SSE event; deck mutations emit `deck_changed`.",
+      "sub": "Browse and launch the user's **installed** Anna Apps and curate the pinned \"我的 Apps\" deck from your bundle (SDK ≥ 0.9.0 / dispatcher ≥ 0.11.0). Not an App Store — there are no install/uninstall verbs. Available to every installed App — nothing to declare. `app_ref` accepts a numeric app id or an `@handle/slug` string. Launches route through the same window-runtime path as the REST `POST /runtime/windows`, so they emit the standard `open_view` SSE event; deck mutations emit `deck_changed`.",
       "source": "host_api",
       "items": [
         {
@@ -3613,12 +3570,12 @@
       "id": "host-api-mobile",
       "kicker": "Host API · mobile.*",
       "title": "mobile.* — anna-mobile native bridge",
-      "sub": "Native capabilities exposed to apps running inside the anna-mobile shell (SDK ≥ 0.16.0 / dispatcher ≥ 0.22.0). Grant via `manifest.ui.host_api.mobile`. Granted envelopes are intercepted client-side by the shell and executed by the native layer — they never reach `/runtime/rpc`. Desktop containers reject with `unsupported_container` (distinct from `permission_denied` = grant missing) so apps can degrade cleanly.",
+      "sub": "Native capabilities exposed to apps running inside the anna-mobile shell (SDK ≥ 0.16.0 / dispatcher ≥ 0.22.0). Nothing to declare. Envelopes are intercepted client-side by the shell and executed by the native layer — they never reach `/runtime/rpc`. Desktop containers reject with `unsupported_container` so apps can degrade cleanly.",
       "source": "host_api",
       "items": [
         {
           "name": "mobile.share",
-          "desc": "System share sheet (anna-mobile shell only). At least one of `text` / `url` / `data_url` (data: URL ≤ 2MB decoded, written to a short-lived native temp file). User cancel resolves with `{shared: false}` — NOT an error. Requires manifest `ui.host_api.mobile`; desktop containers reject with `unsupported_container` (distinct from `permission_denied` = grant missing) so apps can render a clean degradation notice.",
+          "desc": "System share sheet (anna-mobile shell only). At least one of `text` / `url` / `data_url` (data: URL ≤ 2MB decoded, written to a short-lived native temp file). User cancel resolves with `{shared: false}` — NOT an error. Nothing to declare; desktop containers reject with `unsupported_container` so apps can render a clean degradation notice.",
           "tags": [
             {
               "label": "mobile shell only"
@@ -3639,7 +3596,7 @@
         },
         {
           "name": "mobile.camera_capture",
-          "desc": "Native camera capture: `{camera?: 'back'|'front', quality?: 0..1, max_bytes?}` → `{data_url, mime, width, height, byte_size}`. `max_bytes` caps the returned data URL (default 4MB, hard cap 8MB — bounded by the postMessage transport; oversized captures are re-compressed once, then reject with `too_large`). Persistence is the app's job (`upload` / `files` grants). Structured non-error rejections: `permission_denied_by_user` / `cancelled` / `too_large`.",
+          "desc": "Native camera capture: `{camera?: 'back'|'front', quality?: 0..1, max_bytes?}` → `{data_url, mime, width, height, byte_size}`. `max_bytes` caps the returned data URL (default 4MB, hard cap 8MB — bounded by the postMessage transport; oversized captures are re-compressed once, then reject with `too_large`). Persistence is the app's job (`upload.*` / `files.*`). Structured non-error rejections: `permission_denied_by_user` / `cancelled` / `too_large`.",
           "tags": [
             {
               "label": "mobile shell only"
@@ -3656,7 +3613,7 @@
       "id": "host-api-window",
       "kicker": "Host API · window.*",
       "title": "window.* — window lifecycle & chrome",
-      "sub": "Open additional views, react to focus, update titles. `window.hello` / `ready` / `report_error` bypass the host_api ACL because they are part of the bundle handshake.",
+      "sub": "Open additional views, react to focus, update titles. `window.hello` / `ready` / `report_error` are part of the bundle handshake; like every other namespace, nothing needs declaring.",
       "source": "host_api",
       "items": [
         {
@@ -3742,36 +3699,6 @@
         {
           "name": "artifact.delete",
           "desc": "Artifact delete — reserved.",
-          "tags": [
-            {
-              "label": "stub",
-              "kind": "stub"
-            }
-          ]
-        },
-        {
-          "name": "fs.read",
-          "desc": "Sandboxed filesystem read — reserved.",
-          "tags": [
-            {
-              "label": "stub",
-              "kind": "stub"
-            }
-          ]
-        },
-        {
-          "name": "fs.write",
-          "desc": "Sandboxed filesystem write — reserved.",
-          "tags": [
-            {
-              "label": "stub",
-              "kind": "stub"
-            }
-          ]
-        },
-        {
-          "name": "prefs.get",
-          "desc": "User preference reads — reserved.",
           "tags": [
             {
               "label": "stub",
@@ -3939,7 +3866,7 @@
             },
             {
               "name": "anna-app validate",
-              "desc": "Run schema + ACL checks on `manifest.json` (and the matching `--bundle <dir>`). `--strict` adds a `host_api` ACL grep against the bundle. Same validators the upload path runs server-side.",
+              "desc": "Run schema + UI static checks on `manifest.json` (and the matching `--bundle <dir>`); retired schema ≤ 3 fields produce warnings. `--strict` greps the bundle for `anna.<ns>.<method>` calls the Host API does not implement. Same validators the upload path runs server-side.",
               "tags": [
                 {
                   "label": "ci-safe"
@@ -4196,10 +4123,6 @@
             {
               "name": "anna-app apps versions <slug>",
               "desc": "List all server versions of one Anna App. `--account`, `--json`."
-            },
-            {
-              "name": "anna-app apps grants <slug>",
-              "desc": "Show currently granted scopes / quota for one Anna App. `--account`, `--json`."
             },
             {
               "name": "anna-app apps sync-meta",

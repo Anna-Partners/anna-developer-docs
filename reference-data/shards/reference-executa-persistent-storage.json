@@ -87,7 +87,7 @@
         "Backed by Postgres JSONB — **not** a low-latency cache. Read-heavy hot keys (>~50 rps per key) should be memoised in plugin process memory between invokes.",
         "No server-side sub-document selection: the full `value_json` blob is returned. Keep entries small or split into multiple keys keyed by sub-document.",
         "Reads are linearisable per-key but **not** snapshot-consistent across keys — if you need a multi-key atomic view, store them under a single key as a nested object.",
-        "Requires the manifest permission `storage.read`. Per-scope access (`user` / `app` / `tool`) is gated by the `storage_token`'s `allowed_scopes` claim, set by the host at install-time grant; the Agent refuses to mint a token for unallowed scopes."
+        "Per-scope access is the `storage_token`'s `allowed_scopes` claim: always `tool`, plus `user` when the Executa manifest declares `storage.scopes.user` (legacy `aps.scope.user.*`), plus the hosting App's own `app` bucket for App-context invokes. A scope outside the claim → `-32029` with the allowed list."
       ]
     },
     {
@@ -237,7 +237,7 @@
         "Write path takes a Postgres row lock (`SELECT … FOR UPDATE`) and deducts user quota (Redis Lua + DB fallback). Sustained > ~50 writes/s on a single key will contend; shard hot state across multiple keys.",
         "`metadata` and `tags` are **replace-only** — there is no partial update. Re-send the full desired value each write.",
         "TTL is enforced lazily on read; expired-but-not-yet-deleted entries still occupy quota briefly. A reaper job sweeps them; do not rely on TTL for security-critical wipes.",
-        "Requires manifest permission `storage.write`. Per-scope access (`user` / `app` / `tool`) is gated by the `storage_token`'s `allowed_scopes` claim, set by the host at install-time grant."
+        "Per-scope access is the `storage_token`'s `allowed_scopes` claim: always `tool`, plus `user` when the Executa manifest declares `storage.scopes.user` (legacy `aps.scope.user.*`), plus the hosting App's own `app` bucket for App-context invokes. A scope outside the claim → `-32029` with the allowed list."
       ]
     },
     {
@@ -597,7 +597,7 @@
         "**Object size cap is 256 MB** (`OBJECT_MAX_BYTES`). For larger payloads you must chunk them across multiple paths yourself — there is no server-side multipart upload.",
         "**Quota is soft-reserved up front** based on the *declared* `size_bytes`. Declaring a much larger value than you actually upload temporarily inflates `used_bytes` until finalize reconciles or the 10-min reservation expires.",
         "**Rewriting an existing path is a full replace** — the previous APS object is overwritten (the entry is re-used; `generation` bumps; etag is replaced). No version history is kept. Use distinct paths if you need historical revisions.",
-        "Requires manifest permission `storage.write` and an install-time grant that allows the selected `scope`. The Agent will refuse to mint a `storage_token` with disallowed scopes; calls then fail with `STORAGE_ERR_NOT_GRANTED` (`-32021`)."
+        "Nothing to declare for `scope: \"tool\"`; `scope: \"user\"` requires the manifest `storage.scopes.user` declaration (otherwise the token's `allowed_scopes` omits it and the call fails with `-32029`). `STORAGE_ERR_NOT_GRANTED` (`-32021`) only means the Executa is not installed or was disabled by the user."
       ]
     },
     {
@@ -734,7 +734,7 @@
         "**Quota can fail late**: if your actual upload is larger than the declared `size_bytes`, the hard-reserve at finalize may raise `STORAGE_ERR_QUOTA_EXCEEDED` *after* the bytes are already uploaded. The orphan object is retained by APS infrastructure (not counted toward your APS quota) and is not auto-cleaned. Always honour `size_bytes` honestly at `upload_begin`.",
         "**Cannot mutate `content_type` after the fact** — the finalize schema ignores it. Choose the right MIME type at `upload_begin`.",
         "**`metadata=` is merged, not replaced** (server does `md.update(metadata)`), in contrast to `storage/set` semantics. To clear a metadata key you must re-upload.",
-        "Requires manifest permission `storage.write` and a `storage_token` whose `allowed_scopes` includes the chosen `scope`. Failure → `STORAGE_ERR_NOT_GRANTED` (`-32021`)."
+        "Per-scope access is the `storage_token`'s `allowed_scopes` claim: always `tool`, plus `user` when the Executa manifest declares `storage.scopes.user` (legacy `aps.scope.user.*`), plus the hosting App's own `app` bucket for App-context invokes. A scope outside the claim → `-32029` with the allowed list."
       ]
     },
     {
@@ -857,7 +857,7 @@
         "**`disposition` (Content-Disposition) is supported by the REST endpoint** but not exposed by the SDK. Call the REST endpoint directly if you need `attachment; filename=...`.",
         "**Soft-deleted entries are invisible** — once `files/delete` runs, `download_url` returns `STORAGE_ERR_NOT_FOUND` even if the underlying APS object is still retained.",
         "**URL is a bearer credential**: anyone who sees `get_url` until `expires_at` can read the bytes. Treat it like a short-lived password — don't log it, don't embed it in long-lived client state.",
-        "Requires manifest permission `storage.read` and a `storage_token` whose `allowed_scopes` covers the requested `scope`."
+        "Per-scope access is the `storage_token`'s `allowed_scopes` claim: always `tool`, plus `user` when the Executa manifest declares `storage.scopes.user` (legacy `aps.scope.user.*`), plus the hosting App's own `app` bucket for App-context invokes. A scope outside the claim → `-32029` with the allowed list."
       ]
     },
     {
@@ -984,7 +984,7 @@
         "**Hard page-size cap of 1000**. Full enumeration of a large namespace requires looping on `next_cursor`; expect O(n / page_size) round-trips.",
         "**Soft-deleted entries are excluded** (`is_deleted=True` rows are filtered out at the SQL level).",
         "**Point-in-time per page** — concurrent uploads/deletes between pages can cause an entry to appear twice or be skipped. For an exact snapshot, write a manifest object under a stable path and update it transactionally.",
-        "Requires manifest permission `storage.read` and a `storage_token` whose `allowed_scopes` covers the requested `scope`."
+        "Per-scope access is the `storage_token`'s `allowed_scopes` claim: always `tool`, plus `user` when the Executa manifest declares `storage.scopes.user` (legacy `aps.scope.user.*`), plus the hosting App's own `app` bucket for App-context invokes. A scope outside the claim → `-32029` with the allowed list."
       ]
     },
     {

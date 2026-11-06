@@ -4,7 +4,7 @@ description: "Record `anna-app dev` sessions to JSONL and verify, summarize, or 
 section: apps
 slug: recording-replay
 order: 19
-updated: 2026-04-29
+updated: 2026-11-02
 estimated_minutes: 4
 category: "Local Development & Testing"
 ---
@@ -64,7 +64,7 @@ anna-app fixture summarize fixtures/happy-path.jsonl
 ### `anna-app fixture replay <file>`
 
 Dry-run replay of a recording against the current manifest. Useful when
-you've changed `host_api` ACL or renamed a tool — the replay surfaces
+you've removed an executa or renamed a tool — the replay surfaces
 every call the new manifest would now reject.
 
 ```bash

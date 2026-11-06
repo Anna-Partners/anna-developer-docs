@@ -62,7 +62,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": "APP_NOT_GRANTED",
-          "desc": "`UserAnnaApp` row missing / disabled, `UserExecuta` row missing / disabled (when the call originates from an executa-bound install), or `embed_grant.enabled = false`. Note: when `embed_grant` is **absent** the default is `{enabled: true}` — embed is opt-out rather than opt-in. `details.jsonrpc_code = -32001`."
+          "desc": "App not installed, disabled by the user, or no active subscription. `details.jsonrpc_code = -32001`."
         },
         {
           "name": "APP_INVALID_REQUEST",
@@ -77,7 +77,7 @@
         {
           "name": "APP_SESSION_REVOKED",
           "code": "APP_SESSION_REVOKED",
-          "desc": "Cached `kind=complete` `app_session_token` was revoked server-side (admin action / grant rotated). Caller should reset state and retry — the next call mints a fresh session. Shared with `llm.complete` because both methods reuse the same token mint. `details.jsonrpc_code = -32011`."
+          "desc": "Cached `kind=complete` `app_session_token` was revoked server-side (admin action). Caller should reset state and retry — the next call mints a fresh session. Shared with `llm.complete` because both methods reuse the same token mint. `details.jsonrpc_code = -32011`."
         },
         {
           "name": "not_implemented",
@@ -90,7 +90,7 @@
           "desc": "Resolved `user_id` no longer exists (token validated but row deleted between auth and dispatch)."
         }
       ],
-      "example": "// bundle/app.js — embed a query + a corpus, then nearest-neighbour rank.\n//\n// Persist `_meta.alias` + `_meta.dimensions` alongside every cached vector.\n// If a later registry change rotates the default alias, an alias mismatch\n// is your cue to re-embed instead of silently mixing dimensions.\nasync function embedAll(texts) {\n  const reply = await anna.llm.embed({ input: texts /*, model: \"anna-managed-v1\" */ });\n  return {\n    alias: reply.model,\n    dimensions: reply._meta.dimensions,\n    vectors: reply.data.sort((a, b) => a.index - b.index).map((d) => d.embedding),\n    usage: reply.usage,\n  };\n}\n\nfunction cosine(a, b) {\n  let dot = 0;\n  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];\n  return dot; // both vectors L2-normalised by provider\n}\n\ntry {\n  const corpus = [\"Anna runs apps\", \"Cats nap a lot\", \"Embeddings are dense vectors\"];\n  const { vectors: docVecs, alias, dimensions } = await embedAll(corpus);\n\n  const { vectors: [qVec] } = await embedAll([\"how do anna apps work?\"]);\n\n  const ranked = corpus\n    .map((text, i) => ({ text, score: cosine(qVec, docVecs[i]) }))\n    .sort((a, b) => b.score - a.score);\n\n  console.log(`Top match (${alias}, dim=${dimensions}):`, ranked[0]);\n} catch (e) {\n  switch (e.code) {\n    case \"APP_NOT_GRANTED\":      setStatus(\"User has not granted embed access to this app\"); break;\n    case \"APP_INVALID_REQUEST\":  setStatus(`Bad request: ${e.message}`);                     break;\n    case \"APP_PROVIDER_ERROR\":   setStatus(\"Embedding provider error — please retry\");       break;\n    case \"APP_SESSION_REVOKED\":  resetAndRetry();                                             break;\n    default:                     throw e;\n  }\n}\n",
+      "example": "// bundle/app.js — embed a query + a corpus, then nearest-neighbour rank.\n//\n// Persist `_meta.alias` + `_meta.dimensions` alongside every cached vector.\n// If a later registry change rotates the default alias, an alias mismatch\n// is your cue to re-embed instead of silently mixing dimensions.\nasync function embedAll(texts) {\n  const reply = await anna.llm.embed({ input: texts /*, model: \"anna-managed-v1\" */ });\n  return {\n    alias: reply.model,\n    dimensions: reply._meta.dimensions,\n    vectors: reply.data.sort((a, b) => a.index - b.index).map((d) => d.embedding),\n    usage: reply.usage,\n  };\n}\n\nfunction cosine(a, b) {\n  let dot = 0;\n  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];\n  return dot; // both vectors L2-normalised by provider\n}\n\ntry {\n  const corpus = [\"Anna runs apps\", \"Cats nap a lot\", \"Embeddings are dense vectors\"];\n  const { vectors: docVecs, alias, dimensions } = await embedAll(corpus);\n\n  const { vectors: [qVec] } = await embedAll([\"how do anna apps work?\"]);\n\n  const ranked = corpus\n    .map((text, i) => ({ text, score: cosine(qVec, docVecs[i]) }))\n    .sort((a, b) => b.score - a.score);\n\n  console.log(`Top match (${alias}, dim=${dimensions}):`, ranked[0]);\n} catch (e) {\n  switch (e.code) {\n    case \"APP_NOT_GRANTED\":      setStatus(\"App disabled or not installed\"); break;\n    case \"APP_INVALID_REQUEST\":  setStatus(`Bad request: ${e.message}`);                     break;\n    case \"APP_PROVIDER_ERROR\":   setStatus(\"Embedding provider error — please retry\");       break;\n    case \"APP_SESSION_REVOKED\":  resetAndRetry();                                             break;\n    default:                     throw e;\n  }\n}\n",
       "limitations": [
         "Non-streaming. The full batch is computed before the reply lands; no per-item chunks. For huge corpora, batch client-side (≤ 64 items per call) and parallelise across calls.",
         "Reject-not-truncate. Any item > 32 000 chars or batch > 64 fails the **whole** request — there is no automatic chunking. Pre-split long documents and keep a mapping back to your source ids.",
@@ -98,7 +98,7 @@
         "Alias dimensions are immutable. Persist `_meta.alias` and `_meta.dimensions` with every stored vector — a registry rotation to a new default alias will silently break similarity search if you don't.",
         "Tokens accounting falls back to a char-based estimator when the provider omits `usage`. The estimator (`estimate_input_tokens_from_chars`) is conservative; expect ±10 % drift from the real provider count.",
         "No conversation / session state. Each call is independent — the lazy-minted `kind=complete` `app_session_token` is cached server-side only for token reuse, not for embedding history.",
-        "`embed_grant` defaults to `{enabled: true}` when the field is absent — opt-out, not opt-in. Apps that need a hard preflight should explicitly check `UserAnnaApp.custom_config.embed_grant` server-side; the SDK cannot tell you in advance.",
+        "Nothing to declare and no per-app toggle — token spend is governed by the billing surface.",
         "Per-call default deadline follows the SDK's `DEFAULT_TIMEOUTS_BY_NS.llm = 180_000` ms (180 s) — already generous. Only very large batches against cold-start providers need a HIGHER explicit override (e.g. `{ timeoutMs: 300_000 }`); a smaller value would SHORTEN the deadline, not extend it."
       ]
     }

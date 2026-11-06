@@ -68,7 +68,7 @@
         {
           "name": "permission_denied",
           "code": "permission_denied",
-          "desc": "`manifest.ui.host_api.chat` does not list `append_artifact` (or `*`). The dispatch ACL gate (`host_api_allows`) runs before the handler."
+          "desc": "Window not yours / inactive."
         }
       ],
       "example": "// Surface a generated result back into the chat thread.\nconst { artifact_id } = await anna.chat.append_artifact({\n  artifact: {\n    kind: \"summary\",\n    summary: \"Generated a 3-paragraph recap of the uploaded PDF\",\n    payload_ref: savedKey,   // e.g. an anna.storage.set / anna.files key\n    data: { paragraphs: 3, words: 412 },\n  },\n});\nconsole.log(\"appended\", artifact_id); // app-1a2b3c4d-1730000000\n",
@@ -76,7 +76,7 @@
         "Transient delivery only — the artifact is emitted as an `artifact_appended` event, NOT written to a conversation/message table. A client that wasn't subscribed when the event fired will not see it on reload.",
         "`kind` is truncated to 40 chars and `summary` to 1000 chars; over-long values are silently clipped (no error).",
         "`artifact.data` has no server-side size clamp — for large payloads store the bytes via `files.*` / `storage.*` and pass a `payload_ref` instead of inlining.",
-        "ACL gate is `manifest.ui.host_api.chat` (must list `append_artifact` or `*`); `manifest.permissions[]` is display/audit only and is NEVER checked."
+        "Available to every installed App — nothing to declare."
       ]
     },
     {
@@ -117,51 +117,14 @@
         {
           "name": "permission_denied",
           "code": "permission_denied",
-          "desc": "`manifest.ui.host_api.chat` does not list `write_message` (or `*`). The dispatch ACL gate runs before the handler."
+          "desc": "Window not yours / inactive."
         }
       ],
       "example": "// Emit an assistant-authored line. NOTE: not persisted yet (Phase 3).\nconst { message_id } = await anna.chat.write_message({\n  role: \"assistant\",\n  content: \"Done — I exported your report to the Files panel.\",\n});\n// message_id === \"msg-1730000000123\"; the host broadcasts a\n// `chat_message_from_app` event for the chat UI to render in-session.\n",
       "limitations": [
         "FUNCTIONAL STUB (Phase 3): emits a `chat_message_from_app` event but does NOT persist the message. It will not survive a reload and is not part of `chat.read_history` (which is itself unimplemented).",
         "`content` is truncated to 4000 chars; `role` is unvalidated.",
-        "ACL gate is `manifest.ui.host_api.chat` (must list `write_message` or `*`); `manifest.permissions[]` is never checked."
-      ]
-    },
-    {
-      "slug": "chat-read-history",
-      "name": "chat.read_history",
-      "kind": "Host API method · iframe surface",
-      "group": "Chat",
-      "since": "Declared in dispatch table · current v0.13.0 / dispatcher 0.17.0 · NOT yet implemented (Phase 3)",
-      "direction": "Bundle (iframe) → Host RPC → _h_chat_read_history (raises not_implemented)",
-      "summary": "PHASE-3 STUB — NOT yet implemented. The method is registered in the dispatch table (so the namespace/method name is reserved and ACL-gated), but the handler unconditionally raises `not_implemented`. Do not call it in production flows; there is currently no way to read prior conversation turns from an App bundle.",
-      "wire": {
-        "json_rpc_method": "chat.read_history",
-        "auth": "Handled by the host page — `X-Anna-App-Token` minted by `window.create`.",
-        "streaming": false
-      },
-      "signature": "anna.chat.read_history(args?: object, opts?: {timeoutMs?: number}) => Promise<never>  // always rejects with not_implemented",
-      "params": [],
-      "returns": {
-        "type": "never",
-        "desc": "Never resolves — the handler raises `HostRpcError(\"not_implemented\", \"chat.read_history is Phase 3\")` before reading any argument. The eventual shape (paginated prior turns scoped to the App's installation) is not yet contracted."
-      },
-      "errors": [
-        {
-          "name": "not_implemented",
-          "code": "not_implemented",
-          "desc": "Always raised — `chat.read_history is Phase 3`."
-        },
-        {
-          "name": "permission_denied",
-          "code": "permission_denied",
-          "desc": "`manifest.ui.host_api.chat` does not list `read_history` (or `*`). The ACL gate still runs before the (unimplemented) handler."
-        }
-      ],
-      "example": "// NOT YET IMPLEMENTED — this will reject.\ntry {\n  await anna.chat.read_history();\n} catch (err) {\n  // err.code === \"not_implemented\"  (\"chat.read_history is Phase 3\")\n}\n",
-      "limitations": [
-        "NOT IMPLEMENTED: always raises `not_implemented`. There is no supported way to read conversation history from an App today.",
-        "Even though the method is reserved + ACL-gated, granting it in `manifest.ui.host_api.chat` does nothing useful until the Phase-3 implementation lands."
+        "Available to every installed App — nothing to declare."
       ]
     }
   ]

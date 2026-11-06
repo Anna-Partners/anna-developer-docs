@@ -66,8 +66,8 @@ describing it wrong) belong on the [forum](https://forum.anna.partners/), not he
 
 ## Machine-checked facts (P3 verification layer)
 
-- **Claims sidecars** — when an article states capability strings, manifest
-  fields, host API methods, event kinds, or permission scopes, list them in
+- **Claims sidecars** — when an article states manifest fields, host API
+  methods, event kinds, storage scopes / modes, or capability kinds, list them in
   `docs/<section>/<slug>.claims.yaml`. CI (`schema-drift`) asserts every
   literal against the published `@anna-ai/app-schema` bundle **and** that it
   still appears verbatim in the article. Sidecars are optional but strongly

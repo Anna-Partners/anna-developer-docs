@@ -11,8 +11,8 @@ estimated_minutes: 4
 
 > **Generated** from `GET /api/v1/llm-models/public` (the same catalogue that powers
 > `anna.llm.catalog`) by `matrix-nexus/scripts/export_model_capabilities.py` on 2026-10-21.
-> Do not edit by hand — re-run the exporter. The live, per-App view (with your own grants
-> and quota) is the **Compare** tab of the Developer Console Playground:
+> Do not edit by hand — re-run the exporter. The live, per-App view (with your own
+> quota) is the **Compare** tab of the Developer Console Playground:
 > [`/developer?view=playground&modality=compare`](https://anna.partners/developer?view=playground&modality=compare).
 
 Every knob below is a key of `capabilities.options` returned by

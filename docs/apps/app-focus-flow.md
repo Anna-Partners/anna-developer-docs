@@ -4,7 +4,7 @@ description: "Clone the anna-app-focus-flow reference project and ship a polishe
 section: apps
 slug: app-focus-flow
 order: 3
-updated: 2026-05-06
+updated: 2026-11-02
 estimated_minutes: 6
 ---
 
@@ -18,7 +18,7 @@ The [`anna-app-focus-flow`](https://github.com/whtcjdtc2007/anna-executa-example
 ```
 anna-app-focus-flow/
 ├── app.json                  # Listing metadata (slug, name, category)
-├── manifest.json             # AppManifest schema:1 — UI + executas + host_api ACL
+├── manifest.json             # AppManifest — UI + executas
 ├── bundle/
 │   ├── index.html            # SPA entry, loads the AnnaAppRuntime SDK
 │   ├── app.js                # calls anna.tools.invoke / storage / chat / window
@@ -50,7 +50,7 @@ A single repo gives you everything an app submission needs:
 
 - **Tool** — `focus-session` exposes one dispatcher method (`session`) with an `action` discriminator (`start`, `pause`, `resume`, `complete`, `get_state`). One Executa row per app, no per-method explosion. The plugin ships in **three language flavours** (Python, Node.js, Go) all conforming to the same JSON-RPC contract; pick one via the `enabled` field in each `executa.json` (default: Python). See [Multi-language executas](https://github.com/whtcjdtc2007/anna-executa-examples/blob/main/docs/multi-language-anna-apps.md) for the full discovery rules.
 - **Skill** — `focus-coach` is loaded into the assistant's system prompt whenever the app's window is focused, so the LLM knows when and how to call the tool.
-- **UI bundle** — a static SPA that talks to the host through the [App UI SDK](/developers/apps/app-ui-sdk), exercising `tools.invoke`, `storage.get/set`, `chat.write_message`, and `window.set_title` against the real ACL.
+- **UI bundle** — a static SPA that talks to the host through the [App UI SDK](/developers/apps/app-ui-sdk), exercising `tools.invoke`, `storage.get/set`, `chat.write_message`, and `window.set_title` against the real dispatcher.
 - **Tests + fixtures** — vitest drives the bundle through `mountBundle`, pytest drives the plugin through `anna-executa-test`, and recorded JSONL fixtures replay through `anna-app fixture verify`.
 
 ## 1. Clone and install
@@ -105,7 +105,7 @@ scripts/set-tool-id.py status   # confirm the three files agree
 The helper updates (Python flavour only — see the per-flavour READMEs for Node / Go):
 
 1. `executas/focus-session-python/pyproject.toml` (`[project].name` + `[project.scripts]` key)
-2. `manifest.json` (`required_executas[].tool_id` + `ui.host_api.tools`)
+2. `manifest.json` (`required_executas[].tool_id`)
 3. `bundle/app.js` (`TOOL_ID` constant)
 
 The runtime `MANIFEST` in `focus_session_plugin.py` no longer declares a `name` — the host identifies the Executa by its server-assigned `tool_id`, not by a self-reported manifest name.
@@ -113,7 +113,7 @@ The runtime `MANIFEST` in `focus_session_plugin.py` no longer declares a `name` 
 Run `scripts/set-tool-id.py reset` to restore the placeholders before committing back to a fork.
 
 > [!IMPORTANT]
-> Tool IDs are **mint-only** — Anna assigns them server-side as `tool-{handle}-{slug}-{uniq}` and the dispatcher does literal string equality against `required_executas[].tool_id`. You cannot type a custom ID, and any client-supplied `tool_id` is dropped. See [App Manifest](/developers/apps/app-manifest) for the full ACL rules.
+> Tool IDs are **mint-only** — Anna assigns them server-side as `tool-{handle}-{slug}-{uniq}` and the dispatcher does literal string equality against `required_executas[].tool_id`. You cannot type a custom ID, and any client-supplied `tool_id` is dropped. See [App Manifest](/developers/apps/app-manifest) for the executa reference rules.
 
 ## 4. Validate
 
@@ -124,8 +124,8 @@ pnpm validate                # → anna-app validate --strict
 This runs the same three layers Nexus applies on submission:
 
 1. **`AppManifest`** Pydantic model (`extra="forbid"`) — shape & types
-2. **`validate_ui_section_static`** — CSP, view geometry, and the rule that every `host_api.tools` entry resolves to a declared `required_executas` / `optional_executas` ID
-3. **Bundle linter** — entry exists, view names unique, sizes well-formed; `--strict` scans the bundle JS (string literals and comments excluded) for `anna.<ns>.<method>` usage and asserts each is allow-listed
+2. **`validate_ui_section_static`** — CSP, view geometry, `browser_permissions`
+3. **Bundle linter** — entry exists, view names unique, sizes well-formed; `--strict` scans the bundle JS (string literals and comments excluded) for `anna.<ns>.<method>` usage and asserts each exists in the Host API table
 
 ## 5. Test the contract
 

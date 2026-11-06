@@ -1,10 +1,10 @@
 ---
 title: "Testing the Bundle"
-description: "Drive the bundle from vitest with `mountBundle` — same ACL gating and call recording as the dev harness."
+description: "Drive the bundle from vitest with `mountBundle` — same access decisions and call recording as the dev harness."
 section: apps
 slug: testing-bundle
 order: 17
-updated: 2026-04-29
+updated: 2026-11-02
 estimated_minutes: 4
 category: "Local Development & Testing"
 ---
@@ -13,7 +13,7 @@ category: "Local Development & Testing"
 
 Use `@anna-ai/cli/test` (the `mountBundle` helper) to drive your bundle
 modules directly from `vitest` — no iframe, no harness server, no
-`uvx`. The same ACL gating, mock-runtime, and call-recording layer that
+`uvx`. The same access decisions, mock-runtime, and call-recording layer that
 backs `anna-app dev` runs in-process.
 
 ## Install
@@ -66,19 +66,22 @@ describe("timer", () => {
 | `harness.runtime` | Drop-in for the production SDK (`AnnaAppRuntime`). Same `tools.invoke` / `storage.set` / `chat.write_message` / event API. |
 | `harness.calls` | `CallLog` with `all()`, `byNs(prefix)`, `last()`, `lastOf(prefix)`, `clear()`. |
 | `harness.events` | `EventBus` with `emit(name, payload)` (simulate server events) and `on(name, fn)`. |
-| `harness.acl` | Effective ACL derived from `manifest.ui.host_api`. |
 | `harness.mock(key, handler)` | Replace / add a mock at any time. |
 | `harness.wait(ms)` | Microtask helper. |
 
-## ACL semantics
+## Denied calls
 
-Calls outside `manifest.ui.host_api` resolve to `outcome: "denied"` and
-the promise rejects with `HostApiError`. This mirrors the production
-dispatcher's `permission_denied` path:
+The harness makes the same decisions as the production dispatcher: every
+Host API method is available, and only the three
+[capability declarations](/developers/apps/app-manifest#capability-declarations)
+can deny a call — `tools.invoke` on a `tool_id` outside
+`required_executas` / `optional_executas`, an undeclared `credentials`
+provider, or an undeclared cross-app storage scope. Those resolve to
+`outcome: "denied"` and the promise rejects with `HostApiError`:
 
 ```ts
 await expect(
-  harness.runtime.fs.read({ path: "/etc/passwd" }),
+  harness.runtime.tools.invoke({ tool_id: "not-in-manifest", args: {} }),
 ).rejects.toThrow(HostApiError);
 expect(harness.calls.last()?.outcome).toBe("denied");
 ```

@@ -4,7 +4,7 @@ description: "How the Agent spawns, initializes, calls, and shuts down an Execut
 section: tools
 slug: executa-lifecycle
 order: 6
-updated: 2026-09-10
+updated: 2026-11-02
 estimated_minutes: 7
 verified_runtime: "1.1.0-beta.135"
 ---
@@ -84,28 +84,13 @@ The Agent transparently falls back to protocol **1.1** when:
 
 v1 plugins keep working, but **lose access to all reverse-RPC features** (sampling, storage, future logging/progress).
 
-## Manifest declarations vs. runtime capabilities
+## Negotiation is the only gate
 
-The negotiation in `initialize` is necessary but not sufficient. To actually use a host capability the plugin must **also** declare it in the `describe` manifest:
+The `initialize` handshake is all a plugin needs to use the reverse-RPC surface. There is **no** `host_capabilities` declaration and no per-user toggle: on **every** `invoke` of an installed, enabled Executa the host mints the full token set — `sampling_token`, `storage_token`, `image_token`, `media_token`, `upload_token` (plus `credentials_token` when the manifest maps credentials to OAuth providers). Which reverse RPC you call (`sampling/*`, `storage/*`, `files/*`, `image/*`, `video/*`, `music/*`, `audio/*`, `host/uploadFile`, `agent/*`) is up to you; the user's CU quota is the usage gate.
 
-```json
-{
-  "name": "my-tool",
-  "version": "0.1.0",
-  "host_capabilities": ["llm.sample", "aps.kv"],
-  "tools": [ /* ... */ ]
-}
-```
+The one thing a plugin manifest can still declare is a **cross-boundary storage scope**: by default `storage_token.allowed_scopes` is `["tool"]` (your private bucket); declaring `"storage": { "scopes": { "user": "rw" } }` (or the legacy `aps.scope.user.read` / `.write` strings, still accepted) adds `"user"`. See [Persistent Storage](/developers/tools/executa-storage#scopes). Legacy `host_capabilities` strings such as `llm.sample` / `aps.kv` / `aps.files` are ignored (not rejected) — `anna-app validate` warns so you can delete them.
 
-| Capability string | Unlocks | Reverse RPC methods |
-|---|---|---|
-| `llm.sample` | [Sampling](/developers/tools/executa-sampling) | `sampling/createMessage` |
-| `aps.kv` | [APS](/developers/tools/executa-storage) — KV store | `storage/*` |
-| `aps.files` | APS — object/file store | `files/*` |
-
-Which APS *scopes* a plugin may touch (`user` / `tool`) is a **platform constant** baked into the `storage_token`, not a grant field or extra capability strings — `storage.user` / `storage.app` / `storage.tool` are **not** valid `host_capabilities` values. The `aps.scope.*` family (an App-side declaration) **also** triggers plugin-side `storage_token` minting — the mint gate and every validation surface share one predicate, so a scope-only manifest no longer dies with `-32021` in production only. See [Persistent Storage](/developers/tools/executa-storage#three-pre-conditions) for the full accepted allow-list.
-
-Without the manifest declaration, Nexus refuses the corresponding reverse RPC at the gate (`-32008 not_negotiated` for sampling, `-32021 not_granted` for storage).
+The remaining `*_NOT_GRANTED` errors (`-32001` sampling, `-32021` storage, `-32101` image, `-32201` upload, `-3212x` / `-3214x` / `-3216x` media) mean exactly one thing in production: the Executa is not installed or the user disabled it.
 
 ## Per-invoke context injection
 
@@ -131,8 +116,9 @@ Once v2 is live, every `invoke` request also carries a `context` block beside `t
 |---|---|---|
 | `credentials` | [Platform Authorization](/developers/tools/executa-authorization) + per-plugin overrides | Talking to third-party APIs |
 | `invoke_id` | Auto-minted by the Agent (UUID hex) | Audit correlation; reverse-RPC budget keying |
-| `sampling_token` | Nexus, JWT `aud=executa-sampling`, TTL 600 s | `sampling/createMessage` authorization |
-| `storage_token`  | Nexus, JWT `aud=aps-storage`, TTL 600 s | `storage/*` & `files/*` authorization |
+| `sampling_token` | Nexus, JWT `aud=executa-sampling`, TTL 600 s | `sampling/createMessage` and `agent/*` authorization |
+| `storage_token`  | Nexus, JWT `aud=aps-storage`, TTL 600 s | `storage/*` & `files/*` authorization (`allowed_scopes` claim) |
+| `image_token` / `media_token` / `upload_token` | Nexus, per-invoke JWTs | `image/*`, `video/*` / `music/*` / `audio/*`, `host/uploadFile` |
 
 Tokens are bound to (`user_id`, `executa_tool_id`, `tool_invoke_id`) and expire shortly after the invoke completes — **never** persist them across invocations. When the invoke is dispatched from an Anna App context (window `tools.invoke` / async job), the `storage_token` additionally carries host-attested `app_id`/`app_slug` claims that unlock the hosting App's own `scope="app"` bucket — see [Persistent Storage § Scopes](/developers/tools/executa-storage#scopes) for the exact conditions.
 

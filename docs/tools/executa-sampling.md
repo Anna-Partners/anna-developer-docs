@@ -4,7 +4,7 @@ description: "Let your plugin ask the host to perform an LLM completion on the u
 section: tools
 slug: executa-sampling
 order: 9
-updated: 2026-10-26
+updated: 2026-11-02
 estimated_minutes: 12
 ---
 
@@ -28,15 +28,11 @@ Without sampling, every plugin that wants to summarize / classify / plan would n
 
 Sampling collapses all three into one capability advertised by the host.
 
-## Three pre-conditions
+## One pre-condition
 
-End-to-end sampling needs **all** of the following:
+End-to-end sampling needs **v2 negotiation**: the host sends `initialize`; the plugin replies with the same `protocolVersion: "2.0"` and lists `capabilities.sampling = {}`. See [Lifecycle](/developers/tools/executa-lifecycle#v2-capability-handshake). Without it the host returns `-32008 SAMPLING_NOT_NEGOTIATED` and your reverse RPC is rejected before reaching a model.
 
-1. **v2 negotiation.** The host sends `initialize`; the plugin replies with the same `protocolVersion: "2.0"` and lists `capabilities.sampling = {}`. See [Lifecycle](/developers/tools/executa-lifecycle#v2-capability-handshake).
-2. **Manifest declaration.** The plugin's `describe` manifest includes `host_capabilities: ["llm.sample"]`. The Anna App publish validator rejects unknown capability strings.
-3. **User grant.** The end user enabled sampling for this Executa in their Anna Admin panel (a single on/off switch). Per-invoke limits are platform constants — they are no longer user-adjustable.
-
-If any condition is missing, the host returns `-32008 SAMPLING_NOT_NEGOTIATED` and your reverse RPC is rejected before reaching a model.
+There is no manifest declaration and no user switch: the host mints a `sampling_token` on **every** invoke of every installed, enabled Executa. Per-invoke limits are platform constants.
 
 ## Wire protocol
 
@@ -289,14 +285,14 @@ All sampling errors come back as JSON-RPC errors with stable codes:
 
 | Code | Name | Meaning |
 |---|---|---|
-| `-32001` | `SAMPLING_NOT_GRANTED` | User has not enabled sampling for this Executa. |
+| `-32001` | `SAMPLING_NOT_GRANTED` | Executa not installed or disabled by the user (re-enable it under Installed Apps). |
 | `-32002` | `SAMPLING_QUOTA_EXCEEDED` | User account quota exhausted. |
 | `-32003` | `SAMPLING_PROVIDER_ERROR` | Upstream LLM provider failed. |
 | `-32004` | `SAMPLING_INVALID_REQUEST` | Malformed params (e.g. `includeContext != "none"`, `messages` empty, `responseFormat` schema over limits, `thinking` not a boolean / object). |
 | `-32005` | `SAMPLING_TIMEOUT` | The completion did not finish in time. |
 | `-32006` | `SAMPLING_MAX_CALLS_EXCEEDED` | Per-invoke call-count cap reached. |
 | `-32007` | `SAMPLING_MAX_TOKENS_EXCEEDED` | Per-invoke cumulative token cap reached. |
-| `-32008` | `SAMPLING_NOT_NEGOTIATED` | Host didn't negotiate v2, or manifest missing `host_capabilities: ["llm.sample"]`. |
+| `-32008` | `SAMPLING_NOT_NEGOTIATED` | Host didn't negotiate v2 (plugin skipped or failed `initialize`). |
 | `-32009` | `SAMPLING_USER_DENIED` | User explicitly rejected this sampling request. |
 | `-32010` | `SAMPLING_UNSUPPORTED_RESPONSE_FORMAT` | Model can't honour the requested `responseFormat` and `onUnsupported` is `"error"`. `data` = `{requested, modelName}`. |
 
@@ -350,7 +346,6 @@ while True:
     if req["method"] == "describe":
         send({"jsonrpc": "2.0", "id": req["id"], "result": {
             "name": "summarizer", "version": "0.1.0",
-            "host_capabilities": ["llm.sample"],
             "tools": [{"name": "summarize", "description": "Summarize text",
                        "parameters": [{"name": "text", "type": "string", "required": True}]}],
         }})
@@ -400,4 +395,4 @@ All three SDKs ship a single-reader / multi-writer dispatcher so you don't have 
 - [Lifecycle & Capability Negotiation](/developers/tools/executa-lifecycle)
 - [Protocol Specification](/developers/tools/executa-protocol)
 - [Persistent Storage](/developers/tools/executa-storage) — sister reverse-RPC capability
-- [Common Pitfalls](/developers/tools/executa-pitfalls#8-sampling-host_capabilities-not-declared)
+- [Common Pitfalls](/developers/tools/executa-pitfalls#8-sampling-v2-not-negotiated)

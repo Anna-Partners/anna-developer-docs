@@ -28,7 +28,7 @@
           "summary": "Multi-turn agent mode. `auto` rotates `client_id` per turn; `fixed` pins one.",
           "notes": [
             "`auto` is the recommended default for most plugins.",
-            "`fixed` additionally requires `fixed_client_id` AND a matching entry in `llm_grant.agent.allowed_fixed_client_ids`, otherwise Anna server returns `AGENT_ERR_NOT_GRANTED` (-32041)."
+            "`fixed` additionally requires `fixed_client_id`, which must be one of the current user's registered Agent clients; otherwise Anna server returns `-32004 invalid request`."
           ]
         },
         {
@@ -41,7 +41,7 @@
           "notes": [
             "Only meaningful when `agent_submode='fixed'`.",
             "Under `submode='auto'` it is silently stored on the session row but has no runtime effect.",
-            "Must appear in `llm_grant.agent.allowed_fixed_client_ids` or the call is rejected."
+            "Must belong to the current user (registered Agent client) or the call is rejected; an offline client is accepted with a warning."
           ]
         },
         {
@@ -90,7 +90,7 @@
         {
           "name": "AGENT_NOT_GRANTED",
           "code": -32041,
-          "desc": "`sampling_token` missing from handler `ctx` — host did not authorize agent reverse-RPC for this plugin. SDK constant: `AGENT_ERR_NOT_GRANTED`. Wire `error.data.errorCode` keeps the `AGENT_` prefix (unique to -32041 in this namespace)."
+          "desc": "`sampling_token` missing from handler `ctx` — cannot happen for an installed, enabled Executa in production (the token is minted on every invoke). SDK constant: `AGENT_ERR_NOT_GRANTED`. Wire `error.data.errorCode` keeps the `AGENT_` prefix (unique to -32041 in this namespace)."
         },
         {
           "name": "INVALID_REQUEST",
@@ -100,7 +100,7 @@
         {
           "name": "SUBMODE_MISMATCH",
           "code": -32044,
-          "desc": "Propagated verbatim from Anna server `/copilot/app/sessions` when `agent_submode` or `fixed_client_id` diverges from the user grant (e.g. `fixed` requested but the grant only allows `auto`, or `fixed_client_id` not in `llm_grant.agent.allowed_fixed_client_ids`). Bridge does not re-shape; SDK constant: `AGENT_ERR_SUBMODE_MISMATCH`."
+          "desc": "Propagated verbatim from Anna server `/copilot/app/sessions` when `agent_submode` is not a valid submode for this session kind. Bridge does not re-shape; SDK constant: `AGENT_ERR_SUBMODE_MISMATCH`."
         },
         {
           "name": "QUOTA_EXCEEDED",
@@ -207,7 +207,7 @@
           "summary": "Per-turn tool whitelist; overrides the session-level `quota_caps.allowed_tools` for this run only.",
           "notes": [
             "Forwarded verbatim to Anna server as the `allowed_tools` field.",
-            "Anna server intersects this with the user's grant; tools outside the grant are silently dropped.",
+            "Anna server intersects this with the session's effective tool set; tools outside it are silently dropped.",
             "Pass `[]` to disable all tools for this turn (pure LLM reply)."
           ]
         },
@@ -245,7 +245,7 @@
         {
           "name": "AGENT_NOT_GRANTED",
           "code": -32041,
-          "desc": "`sampling_token` missing from handler `ctx`. SDK constant: `AGENT_ERR_NOT_GRANTED`."
+          "desc": "`sampling_token` missing from handler `ctx` — cannot happen for an installed, enabled Executa in production. SDK constant: `AGENT_ERR_NOT_GRANTED`."
         },
         {
           "name": "SESSION_NOT_FOUND",
@@ -275,7 +275,7 @@
         {
           "name": "TOOL_NOT_GRANTED",
           "code": -32048,
-          "desc": "`allowed_tools` (per-turn) or session-level tool list includes a tool that is not in the user's grant. Propagated verbatim from upstream. SDK constant: `AGENT_ERR_TOOL_NOT_GRANTED`. Note: upstream may also silently drop ungranted tools instead of raising — depends on call site."
+          "desc": "`allowed_tools` (per-turn) or session-level tool list includes a tool that is not in the session's effective tool set. Propagated verbatim from upstream. SDK constant: `AGENT_ERR_TOOL_NOT_GRANTED`. Note: upstream may also silently drop such tools instead of raising — depends on call site."
         }
       ],
       "limitations": [

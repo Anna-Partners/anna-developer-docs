@@ -1,21 +1,21 @@
 ---
 title: "App UI Manifest"
-description: "The `ui` section of a schema ≥ 2 manifest: bundle, views, host_api, csp_overrides, browser_permissions."
+description: "The `ui` section of a schema ≥ 2 manifest: bundle, views, the credentials / agent.tools declarations, browser_permissions, csp_overrides."
 section: apps
 slug: app-ui-manifest
 order: 10
-updated: 2026-10-30
+updated: 2026-11-02
 estimated_minutes: 6
 category: "App UI"
 ---
 
-When `schema` ≥ 2 (current maximum: 3), an Anna App manifest gains a `ui` section that describes the static bundle, the named views the LLM can summon, the host API scopes the iframe is allowed to call, the browser features (Permissions Policy) the iframe needs, and any per-bundle CSP overrides. Everything else from [App Manifest](/developers/apps/app-manifest) still applies — including the schema-3 changes (structured [`storage`](/developers/apps/app-manifest#storage-schema-3) entry, top-level `permissions` removed).
+When `schema` ≥ 2 (current: 4), an Anna App manifest gains a `ui` section that describes the static bundle, the named views the LLM can summon, the two `host_api` [capability declarations](/developers/apps/app-manifest#capability-declarations) that involve a second principal (`credentials`, `agent.tools`), the browser features (Permissions Policy) the iframe needs, and any per-bundle CSP overrides. Everything else from [App Manifest](/developers/apps/app-manifest) still applies. The Host API itself needs no declaration — every method is available to an installed App.
 
 ## Example
 
 ```jsonc
 {
-  "schema": 3,
+  "schema": 4,
   "required_executas": [
     { "tool_id": "tool-yourhandle-browser-abcd1234" }
   ],
@@ -46,10 +46,8 @@ When `schema` ≥ 2 (current maximum: 3), an Anna App manifest gains a `ui` sect
       }
     ],
     "host_api": {
-      "tools":  ["required:*"],
-      "chat":   ["append_artifact"],
-      "storage": ["get", "set", "delete", "list"],
-      "window": ["set_title", "open_view", "close"]
+      "credentials": ["google"],
+      "agent": { "tools": ["fs_read_file"] }
     },
     "browser_permissions": ["microphone"],
     "csp_overrides": {
@@ -69,7 +67,7 @@ When `schema` ≥ 2 (current maximum: 3), an Anna App manifest gains a `ui` sect
 | `bundle` | object | yes | See [`bundle`](#bundle) |
 | `views` | array | yes | 1–16 entries; at most one `default: true`. See [`views[]`](#views) |
 | `form_factors` | array of string | no | Containers the app supports: `"desktop"` / `"mobile"`. Defaults to `["desktop"]` — declare `"mobile"` to appear in the Anna mobile launcher. See [Mobile Support](/developers/apps/app-mobile) |
-| `host_api` | object | no | RPC ACL. See [`host_api`](#host_api). Defaults to all empty (only the always-allowed `window` scope) |
+| `host_api` | object | no | Capability declarations: `credentials` (third-party account providers) and `agent.tools` (local-device tools). See [`host_api`](#host_api). Defaults to empty — most Apps omit it |
 | `browser_permissions` | array of string | no | Browser features (Permissions Policy) delegated to the iframe: `microphone`, `camera`, `geolocation`, `display-capture`, `clipboard-read`, `fullscreen`, `autoplay`, `picture-in-picture`, `screen-wake-lock`, `web-share`. Unique entries; anything else is rejected. Defaults to `[]`. See [App UI Browser Permissions](/developers/apps/app-ui-browser-permissions) |
 | `csp_overrides` | object | no | Map of CSP directive → list of values. Only the directives below are accepted; `style-src` accepts only `'self'`, `'sha256-...'`, `'nonce-...'`; `script-src` additionally accepts `'wasm-unsafe-eval'` (see [WebAssembly](#webassembly)); `frame-src` accepts only explicit `https://` origins (see [Embedding third-party content](#embedding-third-party-content-frame-src)) |
 | `state_merge` | string | no | Reserved. Default `"last_writer_wins"` |
@@ -131,31 +129,16 @@ The publish validator emits non-blocking lint warnings when these baselines are 
 
 ### `host_api`
 
-The ACL that gates host RPC calls from your iframe. Each namespace key is a list of **method names** the iframe is allowed to invoke (`agent` is the one exception — an object spec). `window.*` is always granted; everything else requires explicit listing. This ACL is the **only** manifest-level gate — the legacy top-level `permissions` list is never consulted (see below). Some namespaces are additionally gated by a per-app, user-controlled grant enforced host-side (noted per row).
+`host_api` is **not** an allow-list of methods. Every Host API namespace — `window.*`, `storage.*`, `files.*`, `llm.*`, `agent.session.*`, `image.*`, `video.*`, `music.*`, `audio.*`, `web.*`, `upload.*`, `chat.*`, `artifact.*`, `apps.*`, `mobile.*`, and `tools.*` for the Executas in `required_executas` / `optional_executas` — is callable by an installed, enabled App; the user's CU quota is the only usage gate. The block holds the two declarations that involve something other than the user's own account:
 
-| Namespace | Allowed values | What it grants |
+| Key | Type | Declares |
 |---|---|---|
-| `tools` | `required:*` &#124; `optional:*` &#124; `required:<tool_id>` &#124; `optional:<tool_id>` &#124; `<tool_id>` | Calls to [`tools.invoke`](/developers/apps/app-ui-host-api#tools) on the listed Executas. Bare `<tool_id>`s must appear in `required_executas` or `optional_executas`. **Optional narrowing**: empty/omitted ⇒ every declared executa is callable |
-| `chat` | `append_artifact`, `write_message` ⏳, `read_history` ⏳ | Attach artifact cards; post messages / read history (stubs today) |
-| `artifact` | `create`, `update`, `delete` | Manipulate chat artifacts *(stub, Phase 3)* |
-| `llm` | `complete`, `stream`, `embed`, `catalog` | Host-side LLM calls bound to the user's quota — see [LLM & Agent](/developers/apps/llm-and-agent); `catalog` adds media capability/CU-pricing discovery (`anna.llm.catalog({serviceType})`) |
-| `agent` | object, not a list: `{ "session": { "auto": true, "fixed": false }, "tools": […] }` | Multi-turn agent sessions (`agent.session.*`); at least one submode must be `true`. `tools` optionally narrows the session's tool surface |
-| `fs` | `read`, `write` | Anna Agent filesystem access *(stub, Phase 3)* |
-| `storage` | `get`, `set`, `delete`, `list` | Per-window `runtime_state` (≤256 KB); with a schema-3 [`storage`](/developers/apps/app-manifest#storage-schema-3) declaration the same methods are APS-backed (`anna.storage.*`) |
-| `files` | `upload_init`, `upload_finalize`, `download_url`, `download`, `list`, `delete` | APS object/file storage (`anna.files.*`); per-call scope is gated by the install-time `storage_token`, not by this list |
-| `prefs` | `get` | Read user preferences *(stub)* |
-| `image` | `generate`, `edit` | Host-mediated image generation/editing — also gated by the per-app `image_grant` |
-| `upload` | `inline`, `negotiate`, `confirm` | User-artifact uploads to host storage — also gated by the per-app `upload_grant` |
-| `video` | `generate`, `getJob`, `cancelJob`, `listJobs` | Host-mediated async video generation jobs (`anna.video.*`; CU pre-charge + refund) — also gated by the per-app `media_grant` |
-| `music` | `generate`, `getJob`, `cancelJob`, `listJobs` | Host-mediated async music generation jobs (`anna.music.*`; same job model as video, CU pre-charge + refund, `idempotencyKey` replay) — also gated by the per-app `media_grant.music` |
-| `audio` | `speak`, `transcribe`, `session` | Host-mediated TTS / STT (`anna.audio.*`) and the realtime voice session (`anna.audio.session()`, relayed by the host bridge — see [App UI Audio Session](/developers/apps/app-ui-audio-session)) — also gated by the per-app `media_grant`; `session` needs both `speak` and `transcribe` flags and makes the host grant the iframe `allow="microphone"` |
-| `web` | `search`, `fetch`, `image_search`, `image_fetch` | Host-managed web search/fetch (provider keys, SSRF guard, billing stay host-side) — also gated by the per-app `web_grant` |
-| `apps` | `list`, `search`, `get`, `launch`, `deck.list`, `deck.add`, `deck.remove`, `deck.reorder` | Apps launcher: browse/launch the user's installed apps, curate the "我的 Apps" deck |
-| `credentials` | **provider ids** (e.g. `google`), not method names | `credentials.list_accounts` / `credentials.get_token` for the listed providers — also gated by the per-app `credentials_grant` |
-| `mobile` | `share`, `haptics`, `camera_capture` | Native bridge — only executable inside the anna-mobile shell; desktop containers answer `unsupported_container` |
-| `window` | (always granted) | Geometry, title, focus, open/close — listing values here is harmless |
+| `credentials` | array of **provider ids** (e.g. `"google"`) | Third-party accounts your iframe may read via `credentials.list_accounts` / `credentials.get_token`. The user must also have connected the provider on the platform. An undeclared provider → `permission_denied` |
+| `agent` | `{ "tools": [tool id, …] }` or `{ "tools": ["*"] }` | Host-kit tools that run on the user's machine (`fs_*`, `exec_*`, `browser_*`) which sandbox agent sessions created by this App may use; `"*"` = all of them. Server-side tools (`doc_read`, `web_search`, …) never need declaring. Effective set per session = `requested ∩ (server_side ∪ (host_kit ∩ declared))` — see [LLM & Agent](/developers/apps/llm-and-agent#1-what-you-declare) |
 
-Full method-level reference: [App UI Host API](/developers/apps/app-ui-host-api).
+Anything else inside `host_api` is rejected on a `schema: 4` manifest. Older manifests that still carry the pre-schema-4 method tables (`"storage": ["get", "set"]`, `"tools": ["required:*"]`, `"agent": { "session": … }`, …) are accepted and [normalized](/developers/apps/app-manifest#legacy-manifests-schema-13): the method tables are dropped, `tools` refs become `optional_executas`, and `"audio": ["session"]` becomes `browser_permissions: ["microphone"]`.
+
+Cross-app storage scopes are declared at the manifest top level ([`storage.scopes`](/developers/apps/app-manifest#capability-declarations)), not here. Full method-level reference: [App UI Host API](/developers/apps/app-ui-host-api).
 
 ### `csp_overrides`
 
@@ -201,7 +184,7 @@ By default the bundle CSP has no `frame-src`, so nested iframes fall back to `de
 
 Rules: explicit `https://host[:port]` origins only — no `*` or wildcard subdomains, no paths, no CSP keywords (`'self'`, `'none'`, …), at most 8 origins. The declared origins are disclosed on the App's install/review surface, like `external_origins`.
 
-Declaring `frame-src` also unlocks the **playback permission chain**: the platform scopes `autoplay`, `encrypted-media`, `fullscreen` and `picture-in-picture` to your declared origins (both in the bundle's `Permissions-Policy` response header and in the host window's iframe `allow` attribute). Every other browser feature stays denied unless you list it in [`ui.browser_permissions`](/developers/apps/app-ui-browser-permissions) — with one legacy implication kept for published Apps: declaring `ui.host_api.audio ∋ "session"` makes the host emit `allow="microphone 'src'"` on your iframe and `Permissions-Policy: microphone=(self)` on the bundle response, so the realtime voice session can call `getUserMedia` — see [App UI Audio Session](/developers/apps/app-ui-audio-session).
+Declaring `frame-src` also unlocks the **playback permission chain**: the platform scopes `autoplay`, `encrypted-media`, `fullscreen` and `picture-in-picture` to your declared origins (both in the bundle's `Permissions-Policy` response header and in the host window's iframe `allow` attribute). Every other browser feature stays denied unless you list it in [`ui.browser_permissions`](/developers/apps/app-ui-browser-permissions) — a realtime voice session, for example, needs `"microphone"` there so `getUserMedia` works (see [App UI Audio Session](/developers/apps/app-ui-audio-session)).
 
 Your own `<iframe>` inside the bundle **must still forward those features** — the delegation chain is per-frame:
 
@@ -236,17 +219,13 @@ Tips:
 - Ship `.wasm` files inside your bundle (`application/wasm` is on the [upload whitelist](/developers/apps/app-ui-bundle)) and fetch them same-origin. `connect-src` stays `'self'` unless you extend it, so runtime loading of WASM from third-party origins is blocked by default — keep it that way.
 - **Single-threaded builds only.** App iframes are not cross-origin isolated (no COOP/COEP), so `SharedArrayBuffer` is unavailable and pthread/multi-threaded WASM builds will not run. Use single-threaded variants (e.g. the single-thread ffmpeg.wasm core).
 - CSP has no per-module hash pinning for WASM — the directive applies to all WASM compiled in the iframe.
-- Available on every plan; no review flag or extra permission is required.
-
-### Top-level `permissions` (legacy, `schema ≤ 2` only)
-
-The root-level `permissions` list is **display-only legacy metadata with zero enforcement sites** — the dispatcher gates every host RPC on `ui.host_api` (plus the per-app grants noted above) and never reads `permissions`. At `schema: 3` the field is **rejected outright** (`permissions: removed in schema 3 — permission display is derived from ui.host_api + storage/host_capabilities`); the Store/review permission display is derived from the enforced declarations instead. On `schema ≤ 2` apps it is accepted (allow-list validated) but ignored at runtime — see the [Manifest reference](/developers/apps/app-manifest#field-reference).
+- Available on every plan; no review flag is required.
 
 ## Validation
 
 Two passes:
 
-1. **Static** — runs on every `validate-manifest` and version-create call. Checks `format`, view counts/sizes, `host_api.tools` references, `browser_permissions` allow-list, `csp_overrides` shape, `external_origins` schemes.
+1. **Static** — runs on every `validate-manifest` and version-create call. Checks `format`, view counts/sizes, `host_api` shape (`credentials` / `agent.tools` only), `browser_permissions` allow-list, `csp_overrides` shape, `external_origins` schemes.
 2. **With files** — runs at `bundle/finalize`. Confirms `bundle.entry` exists in the uploaded `file_map`.
 
 Both raise `ManifestValidationError` with a Chinese-language reason string. Common rejections:
@@ -255,7 +234,6 @@ Both raise `ManifestValidationError` with a Chinese-language reason string. Comm
 - `ui.views 数量必须在 1..16 之间`
 - `ui.views 中只能有一个 default=true`
 - `view '<name>' default_size 小于 min_size`
-- `host_api.tools 引用未在 manifest 中声明的 tool_id: <ref>`
 - `browser_permissions contains an unsupported feature: ['payment']`
 - `browser_permissions has duplicate entries: ['microphone']`
 - `csp_overrides 含不允许的 directive: [...]`

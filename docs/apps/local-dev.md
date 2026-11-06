@@ -4,7 +4,7 @@ description: "Run an Anna App locally with `anna-app dev` — in-process dispatc
 section: apps
 slug: local-dev
 order: 16
-updated: 2026-09-24
+updated: 2026-11-02
 estimated_minutes: 5
 category: "Local Development & Testing"
 verified_cli: "0.1.54"
@@ -47,7 +47,7 @@ anna-app dev
 
 Open the URL it prints (`http://127.0.0.1:5180/dev/<wid>?t=<dev-token>` by
 default). The bundle loads inside the harness iframe and can call every
-host_api the manifest grants.
+Host API method — exactly as an installed App can in production.
 
 ## CLI flags
 
@@ -97,36 +97,34 @@ anna-app dev --storage aps
 while logged in (`anna-app login`). The boot banner confirms the mode:
 
 ```text
-storage backend   aps (real nexus APS via /api/v1/storage/*) · caps gate strict (production parity)
+storage backend   aps (real nexus APS via /api/v1/storage/*)
 ```
 
 `--storage aps` requires the real LLM bridge — it cannot be combined with
 `--no-llm` or `--mock-llm`.
 
-### Storage capability gate (production parity)
+### Same decisions as production
 
-In `aps` mode the harness enforces the same capability gate as the platform
-minter: if your manifest declares **no** `aps.*` entry in
-`host_capabilities` (and no schema-3 `storage` entry), any `storage/*` /
-`files/*` call for a non-self scope fails locally with the exact production
-error plus a fix hint:
+The harness makes the **same access decisions** as the platform — there is
+no grant simulation and nothing to toggle. Every Host API method and every
+Executa reverse-RPC token (`sampling_token`, `storage_token`, `image_token`,
+`media_token`, `upload_token`) is available locally just as it is for an
+installed App in production. The only manifest-driven checks, enforced
+identically in both places, are the three
+[capability declarations](/developers/apps/app-manifest#capability-declarations):
 
-```text
--32021: storage_token missing — host did not authorize storage for this invoke
-hint: declare "aps.kv" (KV) / "aps.files" (Files) in host_capabilities; the
-platform will not mint a plugin storage_token without them (docs: executa-storage)
-```
-
-Pass `--no-strict-caps` to downgrade the gate to a one-shot warning while you
-iterate on the manifest — but note the warning is honest: the same call **will**
-fail in production until the declaration lands.
+- `credentials.get_token(provider)` for a provider missing from
+  `ui.host_api.credentials` → `permission_denied`;
+- `storage.*` / `files.*` on a cross-app scope missing from `storage.scopes`
+  → `permission_denied` (plugin side: `storage_token.allowed_scopes` only
+  carries `tool` plus the scopes the Executa declares);
+- a sandbox agent session only sees the host-kit tools listed in
+  `ui.host_api.agent.tools`.
 
 > [!TIP]
-> Exercising real APS locally is the difference between finding a scope or
-> capability bug in an afternoon and finding it in Marketplace review — the
-> in-memory backend does not enforce `storage_token` scopes the way
-> production does (missing `host_capabilities` declarations are now caught
-> by the strict caps gate above even in local runs).
+> Exercising real APS locally (`--storage aps`) is still worth it: the
+> in-memory backend does not enforce scope `owner` semantics the way
+> production APS does.
 
 ## Size limits (production parity)
 

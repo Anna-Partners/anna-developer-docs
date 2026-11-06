@@ -4,7 +4,7 @@ description: "Open a full-duplex voice session from your bundle — streaming AS
 section: apps
 slug: app-ui-audio-session
 order: 17
-updated: 2026-10-23
+updated: 2026-11-02
 estimated_minutes: 10
 category: "App UI"
 ---
@@ -67,35 +67,29 @@ Consequences you can rely on:
   `unknown_method` / `not_supported` — feature-detect with
   `typeof anna.audio?.session === "function"` and fall back to `audio.speak`.
 
-## Authorization
+## What you declare
 
-Three gates, all checked when the session opens:
+The voice session, like every Host API surface, is available to any
+installed, enabled App — there is no `host_api` entry and no user toggle for
+it. The one thing you must declare is the **browser** microphone permission,
+because the sandboxed iframe cannot call `getUserMedia` without it:
 
-1. **Manifest** — `ui.host_api.audio` must contain `"session"`. Declaring it also
-   **implies** the `microphone` browser permission: the host renders your
-   iframe with `allow="microphone 'src'"` and serves the bundle with
-   `Permissions-Policy: microphone=(self)`. Listing it explicitly as well —
-   `"browser_permissions": ["microphone"]` — is recommended for clarity and is
-   required if you record outside a session (e.g. for `audio.transcribe`). See
-   [App UI Browser Permissions](/developers/apps/app-ui-browser-permissions).
+```json
+"ui": {
+  "browser_permissions": ["microphone"]
+}
+```
 
-   ```json
-   "ui": {
-     "host_api": {
-       "audio": ["session"],
-       "agent": { "session": { "auto": true } }
-     }
-   }
-   ```
+The host then renders your iframe with `allow="microphone 'src'"` and serves
+the bundle with `Permissions-Policy: microphone=(self)`. See
+[App UI Browser Permissions](/developers/apps/app-ui-browser-permissions).
+Older manifests that declared `"host_api": { "audio": ["session"] }` are
+normalized on ingest — `microphone` is added to `browser_permissions` for
+them, so published voice Apps keep working without a republish.
 
-2. **User grant** — `media_grant.audio.enabled` **and both** `speak` and
-   `transcribe` sub-flags, because the session synthesizes and recognises.
-   Missing any → `not_granted`.
-3. **Agent submode** (only for `llm: "agent"`) — `host_api.agent.session.auto`
-   (or `.fixed` with `fixed_client_id`) must be on, exactly as for
-   `anna.agent.session`. Otherwise `permission_denied`. (The validator does
-   not require it — declaring `session` alone is fine if you only ever open
-   `llm: "none"`.)
+`llm: "agent"` runs a sandbox agent session; the session's tool surface
+follows [`ui.host_api.agent.tools`](/developers/apps/llm-and-agent#1-what-you-declare)
+(server-side tools need no declaration).
 
 ## A complete push-to-talk loop
 
@@ -252,8 +246,8 @@ runtime failures arrive as `error` events.
 
 | Code | Meaning |
 |---|---|
-| `permission_denied` | Window not yours / inactive, `host_api.audio` lacks `session`, or `llm:"agent"` without a matching `agent.session` submode |
-| `not_granted` | `media_grant.audio` off, or `speak` / `transcribe` sub-flag off |
+| `permission_denied` | Window not yours / inactive |
+| `not_granted` | App not installed, disabled by the user, or no active subscription |
 | `concurrency_limit` | A session is already open for this window |
 | `not_supported` | Host feature flag off, or no WebSocket in this page |
 | `quota_exhausted` | CU pool empty (at open or during the periodic check) |
@@ -303,7 +297,7 @@ timing and the usage summary).
 
 ## See also
 
-- [App UI Media](/developers/apps/app-ui-media) — the synchronous `audio.speak` / `audio.transcribe` surface and `media_grant`
+- [App UI Media](/developers/apps/app-ui-media) — the synchronous `audio.speak` / `audio.transcribe` surface
 - [LLM & Agent](/developers/apps/llm-and-agent) — agent sessions, submodes, tool surface
-- [App UI Host API](/developers/apps/app-ui-host-api) — envelope, ACL model, generic errors
+- [App UI Host API](/developers/apps/app-ui-host-api) — envelope, generic errors
 - [Reference · `audio.*`](/developers/reference/host-api-audio) — every field, event and limit

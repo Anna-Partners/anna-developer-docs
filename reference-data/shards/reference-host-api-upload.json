@@ -8,7 +8,7 @@
       "group": "Upload",
       "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
       "direction": "Bundle (iframe) → Host RPC → app_llm_facade → host_upload_service → R2",
-      "summary": "Single-shot upload — bundle base64-encodes the file and posts it inline in the RPC body. Best for payloads ≤ 8 MiB already in memory: one round-trip vs three for the negotiate/confirm flow. The host validates MIME + purpose against `upload_grant`, decodes, writes to R2 under a per-(user, App) prefix, and returns a short-lived download URL.",
+      "summary": "Single-shot upload — bundle base64-encodes the file and posts it inline in the RPC body. Best for payloads ≤ 8 MiB already in memory: one round-trip vs three for the negotiate/confirm flow. The host validates MIME (hard denylist) + purpose, decodes, writes to R2 under a per-(user, App) prefix, and returns a short-lived download URL.",
       "wire": {
         "json_rpc_method": "upload.inline",
         "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
@@ -33,7 +33,7 @@
           "summary": "Wire MIME type of the payload. Must pass the host denylist (SVG is forced to attachment, executables are rejected). The per-user MIME allowlist was removed — any non-blocked type is accepted, Office formats included.",
           "notes": [
             "Allowlist failure → `APP_PROVIDER_ERROR` (HTTP 400 underneath) with the `host_upload_service` reason verbatim — typically `MIME_REJECTED`.",
-            "Glob wildcards (`image/*`) in the grant are honoured."
+            "Any type not on the host hard denylist (executables, `image/svg+xml`) is accepted."
           ]
         },
         {
@@ -42,7 +42,7 @@
           "default": null,
           "required": true,
           "desc": "",
-          "summary": "Base64-encoded bytes of the file. Inline payload after decode must be ≤ `upload_grant.maxFileBytes` (default **20 MiB**).",
+          "summary": "Base64-encoded bytes of the file. Inline payload after decode must be ≤ the platform cap (**20 MiB**).",
           "notes": [
             "Wire size ≈ 1.33× raw bytes. A 15 MiB file becomes ~20 MiB on the wire — if you regularly approach the cap, use `upload.negotiate`+`confirm` instead to skip the encode overhead.",
             "Too-large → `APP_PROVIDER_ERROR` with reason `TOO_LARGE` (HTTP 400 underneath).",
@@ -55,10 +55,10 @@
           "default": "\"user_artifact\"",
           "required": false,
           "desc": "",
-          "summary": "Why the file is being uploaded — used for billing categorisation and to scope `upload_grant.allowedPurposes`. Allowed values: `image_input`, `image_reference`, `user_artifact`.",
+          "summary": "Why the file is being uploaded — used for billing categorisation. Allowed values: `image_input`, `image_reference`, `user_artifact`.",
           "notes": [
             "Outside the host's set → `APP_PROVIDER_ERROR` with reason `PURPOSE_REJECTED` (HTTP 403 underneath).",
-            "If `upload_grant.allowedPurposes` is configured, the value must additionally appear in that allowlist.",
+            "Outside the protocol set → `PURPOSE_REJECTED`.",
             "Choose `image_input` when you plan to feed the result to `image.edit`/`image.generate` so billing rows correlate."
           ]
         }
@@ -71,7 +71,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": "APP_NOT_GRANTED",
-          "desc": "`upload_grant.enabled == false`. Mapped from `APP_ERR_NOT_GRANTED` (-32001). HTTP 403."
+          "desc": "App not installed, disabled by the user, or no active subscription. Mapped from `APP_ERR_NOT_GRANTED` (-32001). HTTP 403."
         },
         {
           "name": "APP_INVALID_REQUEST",
@@ -91,7 +91,7 @@
       ],
       "example": "// Upload a small image already in a Blob.\nasync function blobToB64(blob) {\n  const dataUrl = await new Promise((res, rej) => {\n    const r = new FileReader();\n    r.onload = () => res(r.result);\n    r.onerror = rej;\n    r.readAsDataURL(blob);\n  });\n  return dataUrl.slice(dataUrl.indexOf(\",\") + 1);  // strip 'data:...;base64,'\n}\n\ntry {\n  const out = await anna.upload.inline({\n    filename:  \"poster.png\",\n    mime_type: \"image/png\",\n    content_b64: await blobToB64(file),\n    purpose: \"user_artifact\",\n  });\n  // Save r2_key in storage; refresh download_url via upload.confirm({r2_key}) later.\n  await anna.storage.set({ key: `poster:${id}`, value: { r2_key: out.r2_key } });\n} catch (e) {\n  if (e.code === \"APP_PROVIDER_ERROR\" && /TOO_LARGE/.test(e.message)) {\n    // Fall back to large-file path\n    await uploadViaNegotiate(file);\n  } else throw e;\n}\n",
       "limitations": [
-        "Decoded payload cap is `upload_grant.maxFileBytes` (default 20 MiB). Hard ceiling for `inline` in practice is ~8 MiB raw / ~10 MiB wire because larger postMessages stutter the iframe → host channel.",
+        "Decoded payload cap is the platform constant 20 MiB. Hard ceiling for `inline` in practice is ~8 MiB raw / ~10 MiB wire because larger postMessages stutter the iframe → host channel.",
         "Synchronous. No progress events, no resume on partial failure — for multi-MB payloads on slow networks use `upload.negotiate`+`confirm` so the bytes flow directly to R2 with native PUT progress.",
         "`download_url` expires (~30 min). Always persist `r2_key`; re-mint URLs through `upload.confirm`.",
         "MIME canonicalisation: requesting `image/svg+xml` may return `application/octet-stream` (SVG forced to attachment to prevent active content). Plan your renderer accordingly.",
@@ -105,7 +105,7 @@
       "group": "Upload",
       "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
       "direction": "Bundle (iframe) → Host RPC → app_llm_facade → host_upload_service (sign-only)",
-      "summary": "Step 1/2 of the large-file flow. Validates MIME + purpose against `upload_grant`, mints a presigned R2 PUT URL (5-minute TTL), and returns the `r2_key` the bundle should remember. Does **not** count against the file quota — that's charged on `upload.confirm`.",
+      "summary": "Step 1/2 of the large-file flow. Validates MIME (hard denylist) + purpose, mints a presigned R2 PUT URL (5-minute TTL), and returns the `r2_key` the bundle should remember. Does **not** count against the file quota — that's charged on `upload.confirm`.",
       "wire": {
         "json_rpc_method": "upload.negotiate",
         "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
@@ -139,7 +139,7 @@
           "default": "\"user_artifact\"",
           "required": false,
           "desc": "",
-          "summary": "One of `image_input`, `image_reference`, `user_artifact` — additionally constrained by `upload_grant.allowedPurposes` if set. Outside the set → `APP_PROVIDER_ERROR` `PURPOSE_REJECTED`."
+          "summary": "One of `image_input`, `image_reference`, `user_artifact`. Outside the set → `APP_PROVIDER_ERROR` `PURPOSE_REJECTED`."
         }
       ],
       "returns": {
@@ -150,7 +150,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": "APP_NOT_GRANTED",
-          "desc": "`upload_grant.enabled == false`. HTTP 403."
+          "desc": "App not installed, disabled by the user, or no active subscription. HTTP 403."
         },
         {
           "name": "APP_INVALID_REQUEST",
@@ -173,7 +173,7 @@
         "PUT URL TTL is ~5 min. Slow uploads on flaky networks can race the expiry; renegotiate rather than retrying the same `put_url`.",
         "Browser CORS: R2 must allow PUT from the iframe origin. Anna Apps' R2 bucket is preconfigured for this; if you self-host, mirror the CORS rules in `docs/design/`.",
         "Negotiate is free — but if you negotiate-without-confirm repeatedly, the orphan R2 objects can still appear in the bucket (lifecycle policy reaps them). Don't rely on that for cleanup.",
-        "No `size_bytes` validation at negotiate time. A file larger than `upload_grant.maxFileBytes` will succeed at PUT but fail at `upload.confirm` with `TOO_LARGE` after HEAD. Pre-check `file.size` in the bundle to fail fast."
+        "No `size_bytes` validation at negotiate time. A file larger than the 20 MiB cap will succeed at PUT but fail at `upload.confirm` with `TOO_LARGE` after HEAD. Pre-check `file.size` in the bundle to fail fast."
       ]
     },
     {
@@ -183,7 +183,7 @@
       "group": "Upload",
       "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
       "direction": "Bundle (iframe) → Host RPC → app_llm_facade → host_upload_service (HEAD R2)",
-      "summary": "Step 2/2 of the large-file flow. The host HEADs the R2 object to verify the PUT actually landed, validates size against `upload_grant.maxFileBytes`, records the upload (charging the file quota), and returns the canonical `download_url`. Idempotent on success — repeated calls re-mint the URL without double-charging.",
+      "summary": "Step 2/2 of the large-file flow. The host HEADs the R2 object to verify the PUT actually landed, validates size against the 20 MiB cap, records the upload (charging the file quota), and returns the canonical `download_url`. Idempotent on success — repeated calls re-mint the URL without double-charging.",
       "wire": {
         "json_rpc_method": "upload.confirm",
         "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",

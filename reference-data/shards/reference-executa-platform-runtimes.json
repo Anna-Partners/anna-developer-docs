@@ -1,0 +1,214 @@
+{
+  "section_id": "executa-platform-runtimes",
+  "items": [
+    {
+      "slug": "anna-chrome-executable",
+      "name": "ANNA_CHROME_EXECUTABLE / ANNA_CHROME_VERSION",
+      "kind": "Discovery env var · presence-based",
+      "group": "Discovery contract",
+      "since": "Matrix Agent runtime contract (forum #490)",
+      "summary": "Absolute path + four-part version of the platform Chrome for Testing, resolved by the Agent — never guess `chromium-<rev>` directory names. `ANNA_CHROME_PROVIDER` is always `playwright-cft`.",
+      "wire": {
+        "ANNA_CHROME_EXECUTABLE": "absolute path, e.g. `/ms-playwright/chromium-1208/chrome-linux64/chrome` (cloud) · `~/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing` (macOS)",
+        "ANNA_CHROME_VERSION": "four-part build, e.g. `145.0.7632.6`",
+        "ANNA_CHROME_PROVIDER": "playwright-cft",
+        "semantics": "set only when Chrome is ready to run; absent (never empty) means not available on this Agent"
+      },
+      "example": "const puppeteer = require(\"puppeteer-core\");   // NOT \"puppeteer\" — it downloads its own Chrome\n\nif (!process.env.ANNA_CHROME_EXECUTABLE) {\n  throw new Error(\"platform Chrome missing — declare runtime.requires.chrome in executa.json\");\n}\nconsole.error(\"platform chrome\", process.env.ANNA_CHROME_VERSION); // stderr: stdout is the protocol channel\n\nconst browser = await puppeteer.launch({\n  executablePath: process.env.ANNA_CHROME_EXECUTABLE,\n  headless: true,\n  args: [\"--no-sandbox\", \"--disable-dev-shm-usage\"], // required on Cloud Agents\n});\n",
+      "limitations": [
+        "Paths are readable + executable by your process but the directories are **shared platform state** — never write into them.",
+        "`PLAYWRIGHT_BROWSERS_PATH` may also be visible; it is an implementation detail, **not** part of the contract, and its layout belongs to Playwright.",
+        "Set `\"puppeteer\": { \"skipDownload\": true }` in `package.json` (or `PUPPETEER_SKIP_DOWNLOAD=1` in CI) so your build never pulls its own Chrome.",
+        "Keep concurrent Chrome instances ≤ 3–4 on Cloud Agents (limited microVM memory).",
+        "Compare **majors only** — the build follows the platform Playwright pin and changes with Matrix releases."
+      ]
+    },
+    {
+      "slug": "anna-node-executable",
+      "name": "ANNA_NODE_EXECUTABLE / ANNA_NODE_VERSION",
+      "kind": "Discovery env var · presence-based",
+      "group": "Discovery contract",
+      "since": "Matrix Agent runtime contract (forum #490)",
+      "summary": "Absolute path + full version of the shared Node 22 LTS. Lets a binary-distributed Node tool ship a 2-line shell shim instead of an embedded Node (~120 MiB saved).",
+      "wire": {
+        "ANNA_NODE_EXECUTABLE": "absolute path, e.g. `/opt/anna/node/bin/node` (cloud) · `~/.anna/runtimes/node-22/bin/node` (desktop)",
+        "ANNA_NODE_VERSION": "full version, e.g. `22.14.0`",
+        "provisioning": "baked into Cloud Agent images; on desktop Agents installed once from the agent console (\"Platform\" row, ~30 MiB) — a `runtime.requires` declaration never installs anything",
+        "semantics": "set only when Node is ready to run; absent (never empty) means not available on this Agent"
+      },
+      "example": "#!/bin/sh\n# bin/ppt-engine — lightweight entrypoint, no embedded Node\nset -eu\n: \"${ANNA_NODE_EXECUTABLE:?This Executa requires the Anna platform Node.js runtime. Declare runtime.requires.node in executa.json and install on an up-to-date Agent.}\"\nexec \"$ANNA_NODE_EXECUTABLE\" --enable-source-maps \"$EXECUTA_HOME/dist/main.js\" \"$@\"\n\n:: bin/ppt-engine.cmd — Windows\n@echo off\nif \"%ANNA_NODE_EXECUTABLE%\"==\"\" (echo ANNA_NODE_EXECUTABLE missing 1>&2 & exit /b 2)\n\"%ANNA_NODE_EXECUTABLE%\" \"%EXECUTA_HOME%\\dist\\main.js\" %*\n",
+      "limitations": [
+        "Pinned to the **Node 22 LTS line** on every channel; a major switch goes through a separate design review and is announced in advance.",
+        "No rollbacks — if your tool hard-depends on an exact Node build, bundle your own runtime and set `runtime.fallback: \"bundled\"`.",
+        "Shell / `.cmd` shims are regular entrypoints of the multi-file binary pipeline — see Binary distribution."
+      ]
+    },
+    {
+      "slug": "anna-runtime-profile",
+      "name": "ANNA_RUNTIME_PROFILE / ANNA_AGENT_VERSION / ANNA_RUNTIMES_JSON",
+      "kind": "Discovery env var · presence-based",
+      "group": "Discovery contract",
+      "since": "Matrix Agent runtime contract (forum #490)",
+      "summary": "Where you run, the Matrix Agent version for capability gating, and a compact JSON summary of the whole contract.",
+      "wire": {
+        "ANNA_RUNTIME_PROFILE": "`cloud-linux` | `desktop-macos` | `desktop-windows` | `desktop-linux`",
+        "ANNA_AGENT_VERSION": "Matrix Agent version, e.g. `1.1.0-beta.49`",
+        "ANNA_RUNTIMES_JSON": "`{\"profile\": …, \"agent_version\": …, \"chrome\": {\"executable\", \"version\", \"provider\"}, \"node\": {\"executable\", \"version\", \"provider\"}}` — same facts as the individual variables"
+      },
+      "example": "const runtimes = process.env.ANNA_RUNTIMES_JSON\n  ? JSON.parse(process.env.ANNA_RUNTIMES_JSON)\n  : null;\n\nif (!runtimes) {\n  // Agent predates the contract: degrade gracefully (e.g. scan PLAYWRIGHT_BROWSERS_PATH)\n  // or declare runtime.requires so the install fails loudly instead.\n}\nconsole.error(\"profile\", runtimes?.profile, \"agent\", process.env.ANNA_AGENT_VERSION);\n",
+      "limitations": [
+        "Older Agents that predate the contract set **none** of these variables — the demo app's `legacy-scan` fallback shows how to degrade.",
+        "The contract is identical across all channels; branch on `ANNA_RUNTIME_PROFILE` only for genuinely platform-specific behaviour (e.g. `--no-sandbox` on cloud)."
+      ]
+    },
+    {
+      "slug": "runtime-requires",
+      "name": "runtime.requires",
+      "kind": "executa.json field · install-time precheck",
+      "group": "Install-time precheck",
+      "since": "Matrix Agent runtime contract (forum #490) · tools only",
+      "summary": "Declare semver ranges for `node` / `chrome` so a missing runtime fails at **install time** with a structured `runtime_missing` error instead of crashing at invoke time.",
+      "signature": "{\n  \"runtime\": {\n    \"requires\": {\n      \"node\":   \">=22 <23\",   // semver range; omit = no requirement\n      \"chrome\": \">=140\"       // chrome compares the MAJOR version only\n    },\n    \"fallback\": \"fail\"        // \"fail\" (default) | \"bundled\"\n  }\n}",
+      "params": [
+        {
+          "name": "requires.node",
+          "type": "semver range",
+          "required": false,
+          "desc": "Range the shared Node must satisfy. Operators `>` `>=` `<` `<=` `=` `^` `~`, space = AND, `||` = OR. Anything else is rejected at publish time."
+        },
+        {
+          "name": "requires.chrome",
+          "type": "semver range (major only)",
+          "required": false,
+          "desc": "Range for the platform Chrome. Only the **major** is compared — never pin an exact build like `146.0.7680.153`."
+        },
+        {
+          "name": "fallback",
+          "type": "\"fail\" | \"bundled\"",
+          "required": false,
+          "default": "fail",
+          "desc": "`bundled` means your package ships its own runtime and still runs when the platform one is missing — the precheck then only warns."
+        }
+      ],
+      "returns": {
+        "type": "install result",
+        "desc": "On an unmet requirement the install fails with `reason_code: \"runtime_missing\"` and a `missing_runtimes` map such as `{\"node\": \"required >=22 <23, found none\"}`."
+      },
+      "limitations": [
+        "The precheck is a **pure check** — a declaration never installs anything. Cloud Agents have the shared Node baked in; desktop users install it once from the agent console (\"Platform\" row) and retry the app install.",
+        "Older Agents that predate the contract ignore the block (no precheck, no crash) — fully backwards compatible.",
+        "Applies to `executa_type: \"tool\"` packages."
+      ]
+    },
+    {
+      "slug": "get-platform-runtimes",
+      "name": "GET /api/v1/platform/runtimes",
+      "kind": "Public REST endpoint · no auth",
+      "group": "Install-time precheck",
+      "since": "nexus public API (forum #490)",
+      "summary": "Public, unauthenticated, cacheable version matrix per release channel — current versions plus the announced next with `effective_from`. Feeds the generated blocks on the docs page and `anna-app doctor`.",
+      "wire": {
+        "method": "GET",
+        "path": "/api/v1/platform/runtimes",
+        "auth": "none",
+        "caching": "cacheable; `generated_at` in the body"
+      },
+      "returns": {
+        "type": "object",
+        "desc": "`{schema: 1, generated_at, policy: {chrome, node}, channels: {\"cloud-linux\" | \"desktop-macos\" | \"desktop-windows\": {current: {agent_version, components: {chrome: {version}, node: {version}}} | null, next: {agent_version?, effective_from?, components?} | null}}}`. `current: null` means the channel has not published a matrix yet."
+      },
+      "example": "curl -sS -H 'Accept: application/json' https://anna.partners/api/v1/platform/runtimes | jq '.channels[\"cloud-linux\"]'\n# or, with the CLI:\nanna-app doctor\n",
+      "limitations": [
+        "Planning-time truth only — at run time trust your own process env (`ANNA_CHROME_VERSION` / `ANNA_NODE_VERSION`); desktop users may lag several Matrix versions behind.",
+        "Version matrix and *Upcoming* blocks on the docs page are regenerated from this endpoint by `matrix-nexus/scripts/export_platform_runtimes.py` — do not edit them by hand."
+      ]
+    },
+    {
+      "slug": "platform-runtimes-cloud-linux",
+      "name": "Cloud (linux-x86_64)",
+      "kind": "Platform runtime channel",
+      "group": "Release channels · current versions",
+      "summary": "Chrome for Testing 145.0.7632.6 · Node.js 22.14.0 · Agent 1.1.0-beta.49",
+      "wire": {
+        "channel": "cloud-linux",
+        "agent_version": "1.1.0-beta.49",
+        "chrome": "145.0.7632.6",
+        "node": "22.14.0",
+        "next": "none announced",
+        "discovery": "`ANNA_CHROME_EXECUTABLE` · `ANNA_CHROME_VERSION` · `ANNA_NODE_EXECUTABLE` · `ANNA_NODE_VERSION` · `ANNA_RUNTIMES_JSON`",
+        "source": "`GET /api/v1/platform/runtimes`"
+      },
+      "limitations": [
+        "**Chrome policy** — Follows the Matrix Playwright pin. Major bumps are announced >= 14 days ahead; a given major stays available across >= 2 Matrix minor releases. Compare major only.",
+        "**Node.js policy** — Pinned to the Node 22 LTS line across all channels. Major switches go through a separate design review and are announced in advance.",
+        "Planning-time truth only — the run-time truth is your own process env (`ANNA_CHROME_VERSION` / `ANNA_NODE_VERSION`); desktop users may lag several Matrix versions behind this matrix."
+      ],
+      "env": [
+        "ANNA_CHROME_EXECUTABLE",
+        "ANNA_CHROME_VERSION",
+        "ANNA_NODE_EXECUTABLE",
+        "ANNA_NODE_VERSION",
+        "ANNA_RUNTIMES_JSON"
+      ],
+      "next": null
+    },
+    {
+      "slug": "platform-runtimes-desktop-macos",
+      "name": "Desktop macOS",
+      "kind": "Platform runtime channel",
+      "group": "Release channels · current versions",
+      "summary": "Chrome for Testing (unpublished) · Node.js (unpublished) · Agent (unpublished)",
+      "wire": {
+        "channel": "desktop-macos",
+        "agent_version": "unpublished",
+        "chrome": "unpublished",
+        "node": "unpublished",
+        "next": "none announced",
+        "discovery": "`ANNA_CHROME_EXECUTABLE` · `ANNA_CHROME_VERSION` · `ANNA_NODE_EXECUTABLE` · `ANNA_NODE_VERSION` · `ANNA_RUNTIMES_JSON`",
+        "source": "`GET /api/v1/platform/runtimes`"
+      },
+      "limitations": [
+        "**Chrome policy** — Follows the Matrix Playwright pin. Major bumps are announced >= 14 days ahead; a given major stays available across >= 2 Matrix minor releases. Compare major only.",
+        "**Node.js policy** — Pinned to the Node 22 LTS line across all channels. Major switches go through a separate design review and are announced in advance.",
+        "Planning-time truth only — the run-time truth is your own process env (`ANNA_CHROME_VERSION` / `ANNA_NODE_VERSION`); desktop users may lag several Matrix versions behind this matrix."
+      ],
+      "env": [
+        "ANNA_CHROME_EXECUTABLE",
+        "ANNA_CHROME_VERSION",
+        "ANNA_NODE_EXECUTABLE",
+        "ANNA_NODE_VERSION",
+        "ANNA_RUNTIMES_JSON"
+      ],
+      "next": null
+    },
+    {
+      "slug": "platform-runtimes-desktop-windows",
+      "name": "Desktop Windows",
+      "kind": "Platform runtime channel",
+      "group": "Release channels · current versions",
+      "summary": "Chrome for Testing (unpublished) · Node.js (unpublished) · Agent (unpublished)",
+      "wire": {
+        "channel": "desktop-windows",
+        "agent_version": "unpublished",
+        "chrome": "unpublished",
+        "node": "unpublished",
+        "next": "none announced",
+        "discovery": "`ANNA_CHROME_EXECUTABLE` · `ANNA_CHROME_VERSION` · `ANNA_NODE_EXECUTABLE` · `ANNA_NODE_VERSION` · `ANNA_RUNTIMES_JSON`",
+        "source": "`GET /api/v1/platform/runtimes`"
+      },
+      "limitations": [
+        "**Chrome policy** — Follows the Matrix Playwright pin. Major bumps are announced >= 14 days ahead; a given major stays available across >= 2 Matrix minor releases. Compare major only.",
+        "**Node.js policy** — Pinned to the Node 22 LTS line across all channels. Major switches go through a separate design review and are announced in advance.",
+        "Planning-time truth only — the run-time truth is your own process env (`ANNA_CHROME_VERSION` / `ANNA_NODE_VERSION`); desktop users may lag several Matrix versions behind this matrix."
+      ],
+      "env": [
+        "ANNA_CHROME_EXECUTABLE",
+        "ANNA_CHROME_VERSION",
+        "ANNA_NODE_EXECUTABLE",
+        "ANNA_NODE_VERSION",
+        "ANNA_RUNTIMES_JSON"
+      ],
+      "next": null
+    }
+  ]
+}

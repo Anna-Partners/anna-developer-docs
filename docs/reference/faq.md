@@ -33,6 +33,10 @@ No. The protocol is small enough that "the SDK" would be tens of lines. The exam
 
 No. The skill loader wraps every Skill — regardless of `execution_mode` — as a prompt-mode LangChain tool that returns the skill's markdown body to the LLM, decorated with an execution-mode hint and any declared dependencies. Running anything is the agent's job, via its built-in `exec` / `command` tools. `execution_mode` is purely a hint that helps the LLM pick the right execution path.
 
+### Where do I see which Chrome / Node version the platform provides?
+
+Four outlets, one truth source. Planning time: the [Platform runtimes](/developers/tools/executa-platform-runtimes) page (its *Version matrix* and *Upcoming* sections are generated from the live registry), the public `GET /api/v1/platform/runtimes` endpoint (no auth, safe for CI), and `anna-app doctor` which prints the same per-channel matrix. Run time: your Executa process env — `ANNA_CHROME_VERSION` / `ANNA_NODE_VERSION` (desktop users may lag several Matrix versions behind the published matrix). Chrome upgrades are announced ≥ 2 weeks ahead and compared by major version only.
+
 ## Distribution
 
 ### Do I need Verified Developer status to publish?

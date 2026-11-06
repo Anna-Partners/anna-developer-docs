@@ -5,9 +5,10 @@ Articles that state machine-checkable facts carry a **claims sidecar**
 ``docs/<section>/<slug>.claims.yaml`` listing the exact literals they claim:
 
     # docs/apps/app-manifest.claims.yaml
-    manifest_fields: [schema, required_executas, host_capabilities]
-    capabilities: [aps.kv, llm.sample]
-    permissions: [storage.read]
+    manifest_fields: [schema, required_executas, storage]
+    storage_scopes: [user, tool]
+    storage_modes: [rw]
+    capability_kinds: [accounts, shared_data, local_device]
     host_api_methods: [storage.get]
     event_kinds: [...]
     ui_manifest_fields: [...]
@@ -16,8 +17,8 @@ Two assertions per claimed literal:
 
 1. **Truth** — the literal exists in the published schema bundle
    (@anna-ai/app-schema, version pinned in ``.schema-version``). This is the
-   check that catches forum #99/#248-class errors: dead capability strings,
-   wrong manifest field names, phantom methods.
+   check that catches forum #99/#248-class errors: dead storage-scope
+   strings, wrong manifest field names, phantom methods.
 2. **Honesty** — the literal appears verbatim in the article body, so a doc
    edit that drops or renames a fact also fails until the sidecar follows.
 

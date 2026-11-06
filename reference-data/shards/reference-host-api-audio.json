@@ -91,7 +91,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.audio` does not list this operation, or the user's `media_grant.audio.enabled` / per-operation flag (`speak` or `transcribe`) is off for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -216,7 +216,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.audio` does not list this operation, or the user's `media_grant.audio.enabled` / per-operation flag (`speak` or `transcribe`) is off for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -285,7 +285,7 @@
           "default": "agent",
           "summary": "`agent` routes each final utterance through **this App's agent session** (`POST /copilot/app/agent`, server-minted token; tool surface = `ui.host_api.agent.tools`). `none` runs ASR + TTS only — you get `asr_*` events and can `say()` your own text.",
           "notes": [
-            "`agent` requires manifest `host_api.agent.session.{auto|fixed}` matching `submode`; otherwise the open fails with `permission_denied`."
+            "`agent` runs a sandbox agent session for this App — nothing to declare; host-kit tools follow `ui.host_api.agent.tools`."
           ]
         },
         {
@@ -357,13 +357,13 @@
         {
           "name": "permission_denied",
           "code": null,
-          "desc": "Window not yours / not active, manifest `ui.host_api.audio` lacks `session`, or `llm:'agent'` without a matching `host_api.agent.session` submode.",
+          "desc": "Window not yours / not active.",
           "retryable": false
         },
         {
           "name": "not_granted",
           "code": null,
-          "desc": "User `media_grant.audio` is off, or one of the `speak` / `transcribe` flags is off — the session needs **both**.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -432,7 +432,7 @@
         "model": "The user's realtime ASR / TTS preferences; `llm:'agent'` turns are billed by the agent session itself (not double-counted).",
         "pricing": "Only audio you actually `sendAudio()` is recognised and billed — an idle open session costs nothing. Gate the microphone behind push-to-talk or a wake word; `end()` returns `{total_asr_seconds, total_tts_characters}` for your own accounting."
       },
-      "example": "const mic = anna.audio.mic({ sampleRate: 16000, onChunk: (pcm16) => { if (talking) vs.sendAudio(pcm16); } });\nawait mic.start();            // prompts for the microphone (iframe gets allow=\"microphone\" from host_api.audio ∋ 'session')\nmic.setMuted(true);           // push-to-talk gate\n\nconst vs = await anna.audio.session({ llm: 'agent', language: 'zh', system: 'Answer in one short sentence.', maxDurationSec: 1800 });\nconst player = anna.audio.player({ sampleRate: vs.audioConfig.sample_rate });\n\nvs.on('asr_final',  ({ text })  => transcript.append(text));\nvs.on('llm_partial',({ text })  => reply.textContent += text);\nvs.on('tts_audio',  ({ audio }) => player.enqueue(audio));\nvs.on('tts_done',   ()          => player.flush());\nvs.on('interrupted',()          => player.stop());          // barge-in\nvs.on('ended',      (usage)     => console.log(usage.total_asr_seconds, usage.total_tts_characters));\n\nptt.onpointerdown = () => { talking = true;  mic.setMuted(false); };\nptt.onpointerup   = () => { talking = false; mic.setMuted(true); vs.flushAudio(); };\n\nsetInterval(() => vs.setContext(JSON.stringify(gameState)), 1000);   // ≤4 KB, replaces, next turn\nawait vs.say('Careful, top lane.', { priority: 'high' });            // TTS-only, preempts\n\nanna.on('host.app_state', ({ state }) => { if (state !== 'active') vs.end(); });  // mobile: foreground-only\nawait vs.end();",
+      "example": "const mic = anna.audio.mic({ sampleRate: 16000, onChunk: (pcm16) => { if (talking) vs.sendAudio(pcm16); } });\nawait mic.start();            // prompts for the microphone (iframe gets allow=\"microphone\" from ui.browser_permissions)\nmic.setMuted(true);           // push-to-talk gate\n\nconst vs = await anna.audio.session({ llm: 'agent', language: 'zh', system: 'Answer in one short sentence.', maxDurationSec: 1800 });\nconst player = anna.audio.player({ sampleRate: vs.audioConfig.sample_rate });\n\nvs.on('asr_final',  ({ text })  => transcript.append(text));\nvs.on('llm_partial',({ text })  => reply.textContent += text);\nvs.on('tts_audio',  ({ audio }) => player.enqueue(audio));\nvs.on('tts_done',   ()          => player.flush());\nvs.on('interrupted',()          => player.stop());          // barge-in\nvs.on('ended',      (usage)     => console.log(usage.total_asr_seconds, usage.total_tts_characters));\n\nptt.onpointerdown = () => { talking = true;  mic.setMuted(false); };\nptt.onpointerup   = () => { talking = false; mic.setMuted(true); vs.flushAudio(); };\n\nsetInterval(() => vs.setContext(JSON.stringify(gameState)), 1000);   // ≤4 KB, replaces, next turn\nawait vs.say('Careful, top lane.', { priority: 'high' });            // TTS-only, preempts\n\nanna.on('host.app_state', ({ state }) => { if (state !== 'active') vs.end(); });  // mobile: foreground-only\nawait vs.end();",
       "limitations": [
         "Not a dispatcher RPC — requires a host page with the bridge relay (nexus ≥ 1.1.0-beta.189; the local harness mocks it with `SpeechRecognition` / `speechSynthesis`). Hosts without it reply `unknown_method` / `not_supported`.",
         "Upstream audio must be 16 kHz mono PCM16; chunks ≤32 KB (the SDK splits). `sendAudio` is fire-and-forget: when the host socket buffers >256 KB the bridge drops the newest chunks (counted in the bridge's `session.close` reply, not surfaced by `end()`).",
@@ -453,7 +453,7 @@
       "summary": "Microphone capture tuned for `audio.session`: 16 kHz mono PCM16 frames of 4096 samples (~256 ms) delivered to `onChunk(pcm16, float32)`, with `onLevel(rms)` for a VU meter / cheap VAD, an `analyser` node for visualizers, `setMuted()` as the push-to-talk gate and `stop()` to release the device. Shares one source file with the main-chat voice call (`anna-voice-client-core.js`).",
       "wire": {
         "json_rpc_method": null,
-        "auth": "None — runs entirely inside the iframe. Needs a secure context and the outer iframe's `allow=\"microphone\"`, which the host emits iff manifest `host_api.audio ∋ \"session\"`.",
+        "auth": "None — runs entirely inside the iframe. Needs a secure context and the outer iframe's `allow=\"microphone\"`, which the host emits iff manifest `ui.browser_permissions` lists `microphone` (legacy `host_api.audio ∋ \"session\"` is normalized to it).",
         "streaming": false,
         "timeout_s": null,
         "http_equivalent": null

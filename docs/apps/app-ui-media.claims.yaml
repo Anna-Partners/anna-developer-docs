@@ -24,4 +24,4 @@ host_api_methods:
 event_kinds:
   - media_job
 ui_manifest_fields:
-  - host_api
+  - browser_permissions

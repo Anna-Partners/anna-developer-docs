@@ -39,7 +39,7 @@
           "summary": "Number of images to generate in one call. Three independent caps apply — each surfaces a **different** error code.",
           "notes": [
             "**Host hard cap `_MAX_N = 8`**. Enforced by the matrix Agent's `_validate_generate` BEFORE the request leaves the plugin host. `n > 8` → `MAX_IMAGES_EXCEEDED` (`-32106`) with `data.hostCap = 8`.",
-            "**Per-call grant cap** = `image_token.max_per_call_generate` (default **4**, `DEFAULT_IMAGE_MAX_PER_CALL_GEN`). Enforced by the Nexus gate AFTER token decode. `n > max_per_call_generate` → `IMAGE_PER_CALL_EXCEEDED` (`-32107`).",
+            "**Per-call cap** = `image_token.max_per_call_generate` (platform constant **4**). Enforced by the Nexus gate AFTER token decode. `n > max_per_call_generate` → `IMAGE_PER_CALL_EXCEEDED` (`-32107`).",
             "**Per-invoke rolling counter** `img:invoke:{tool_invoke_id}` (Redis HASH `images` field, **30-min TTL** = `_INVOKE_TTL_SECONDS`). Caps the cumulative total across all `image/generate` + `image/edit` calls in the same `tool_invoke_id` at `image_token.max_images` (default **4** = `DEFAULT_IMAGE_MAX_IMAGES`). Exceed → `MAX_IMAGES_EXCEEDED` (`-32106`) with `data.images` and `data.maxImages` set.",
             "Not every provider supports `n > 1` (DALL·E 3 does not). The host attempts to batch and silently degrades to N serial single-image calls when the provider can't batch — billing is identical; latency is N×."
           ]
@@ -176,7 +176,7 @@
         {
           "name": "IMAGE_NOT_GRANTED",
           "code": -32101,
-          "desc": "Plugin's manifest does not declare `host_capabilities: [\"llm.image\"]`, OR token's `allow_generate == false`, OR the matrix Agent did not mint an `image_token` for this invoke (host did not negotiate). Wire name: `IMAGE_NOT_GRANTED` (both sides agree). SDK constant: `IMAGE_ERR_NOT_GRANTED`."
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps). Wire name: `IMAGE_NOT_GRANTED` (both sides agree). SDK constant: `IMAGE_ERR_NOT_GRANTED`. The token itself is minted on every invoke, so a missing `image_token` cannot happen in production."
         },
         {
           "name": "IMAGE_QUOTA_EXCEEDED",
@@ -216,12 +216,12 @@
         {
           "name": "IMAGE_USER_DENIED",
           "code": -32109,
-          "desc": "⚠ **Divergence.** Wire (from Nexus): -32109 = `IMAGE_USER_DENIED` — raised when `UserExecuta.custom_config.image_grant.enabled == false` (user toggled the grant off in Anna Admin). SDK constant `IMAGE_ERR_NO_MODEL_AVAILABLE = -32109` is **wrong** for wire-decoded errors. Always switch on `error_name`."
+          "desc": "⚠ **Divergence.** Wire (from Nexus): -32109 = `IMAGE_USER_DENIED` — retained wire code, no longer raised (the per-Executa image toggle was removed; disable the Executa instead). SDK constant `IMAGE_ERR_NO_MODEL_AVAILABLE = -32109` is **wrong** for wire-decoded errors. Always switch on `error_name`."
         },
         {
           "name": "IMAGE_MODEL_UNAVAILABLE",
           "code": -32110,
-          "desc": "⚠ **Divergence.** Wire (from Nexus): -32110 = `IMAGE_MODEL_UNAVAILABLE` — no enabled image provider on the user's plan, or no provider matches `model_hints`. SDK constant `IMAGE_ERR_STORAGE_ERROR = -32110` does NOT match wire reality."
+          "desc": "⚠ **Divergence.** Wire (from Nexus): -32110 = `IMAGE_MODEL_UNAVAILABLE` — no enabled image provider on the user's plan, or `model` names no routable image model. SDK constant `IMAGE_ERR_STORAGE_ERROR = -32110` does NOT match wire reality."
         },
         {
           "name": "IMAGE_EDIT_REFERENCE_INVALID",
@@ -229,18 +229,18 @@
           "desc": "⚠ **Divergence.** Wire (from Nexus image gate): -32313 = `IMAGE_EDIT_REFERENCE_INVALID`, raised for both generate `reference_image_urls` and edit `image_url` URL-safety / unreachability failures. SDK constant `IMAGE_ERR_N_UNSUPPORTED = -32313`. Note many URL-safety rejections in the gate's `validate_image_url` path actually surface as `IMAGE_INVALID_REQUEST` (-32104) instead — depends on call site."
         }
       ],
-      "example": "# Inside an Executa plugin (executa_sdk).\nfrom executa_sdk import ImageClient, ImageError, IMAGE_ERR_NOT_GRANTED, IMAGE_ERR_QUOTA_EXCEEDED\n\nimage = ImageClient()                       # uses default stdout write_frame\n\nasync def make_poster(req_id: str, invoke_id: str, prompt: str) -> dict:\n    try:\n        result = await image.generate(\n            prompt=prompt,\n            n=2,\n            size=\"1024x1024\",\n            metadata={\"executa_invoke_id\": invoke_id},  # billing correlation — always include\n            timeout=120.0,\n        )\n    except ImageError as e:\n        if e.code == IMAGE_ERR_NOT_GRANTED:\n            return {\"success\": False, \"error\": \"user has not granted image generation\"}\n        if e.code == IMAGE_ERR_QUOTA_EXCEEDED:\n            return {\"success\": False, \"error\": \"image quota exhausted; ask the user to upgrade\"}\n        raise\n\n    # Each url is a transient host-stored HTTPS URL (~30 min TTL).\n    # Persist via `host/uploadFile` if you need it long-term.\n    urls = [img[\"url\"] for img in result[\"images\"]]\n    return {\"success\": True, \"data\": {\"images\": urls, \"model\": result[\"model\"]}}\n",
+      "example": "# Inside an Executa plugin (executa_sdk).\nfrom executa_sdk import ImageClient, ImageError, IMAGE_ERR_NOT_GRANTED, IMAGE_ERR_QUOTA_EXCEEDED\n\nimage = ImageClient()                       # uses default stdout write_frame\n\nasync def make_poster(req_id: str, invoke_id: str, prompt: str) -> dict:\n    try:\n        result = await image.generate(\n            prompt=prompt,\n            n=2,\n            size=\"1024x1024\",\n            metadata={\"executa_invoke_id\": invoke_id},  # billing correlation — always include\n            timeout=120.0,\n        )\n    except ImageError as e:\n        if e.code == IMAGE_ERR_NOT_GRANTED:\n            return {\"success\": False, \"error\": \"executa disabled or not installed\"}\n        if e.code == IMAGE_ERR_QUOTA_EXCEEDED:\n            return {\"success\": False, \"error\": \"image quota exhausted; ask the user to upgrade\"}\n        raise\n\n    # Each url is a transient host-stored HTTPS URL (~30 min TTL).\n    # Persist via `host/uploadFile` if you need it long-term.\n    urls = [img[\"url\"] for img in result[\"images\"]]\n    return {\"success\": True, \"data\": {\"images\": urls, \"model\": result[\"model\"]}}\n",
       "limitations": [
         "**Returned URLs expire in ~30 min** (`R2_TRANSIENT_PRESIGN_EXPIRY = 1800`). The exact remaining seconds are reported in `images[i].expires_in`. Do not cache `url` in user-visible state without re-presigning. For durable storage, GET the bytes within the TTL and round-trip through `host/uploadFile` or `files/upload_begin`.",
         "**Three different error codes guard `n`** — do not lump them together: `n > 8` (host hard cap) → `IMAGE_MAX_IMAGES_EXCEEDED` (-32106) with `data.hostCap`; `n > image_token.max_per_call_generate` → `IMAGE_PER_CALL_EXCEEDED` (-32107); cumulative invoke total exceeds `image_token.max_images` → `IMAGE_MAX_IMAGES_EXCEEDED` (-32106) with `data.images`/`data.maxImages`. Tell the user which one tripped — UX language differs.",
         "**No streaming.** Generation is fully buffered — your `invoke` blocks until the provider returns or `timeout` fires. Set `timeout ≥ 60 s` and tell the LLM how long to wait if user-facing.",
         "**SDK-local timeout vs upstream timeout look different on the wire**: `IMAGE_TIMEOUT` (-32105) only fires inside the SDK's `asyncio.wait_for`. An upstream timeout becomes `IMAGE_PROVIDER_ERROR` (-32103) with `error_name == \"subcall_timeout\"` and `data.subcall == \"image\"`. Match on those, not on numeric code, for retry/fallback logic.",
-        "**Manifest must declare `host_capabilities: [\"llm.image\"]`** — if absent, Nexus's `_manifest_declares_capability` check fails before any provider call → `IMAGE_NOT_GRANTED` (-32101) with message mentioning the missing capability string.",
-        "**User grant lives at `UserExecuta.custom_config.image_grant.enabled` (boolean)**, NOT `image_grant.generate`. When `enabled == false`, the gate raises `IMAGE_USER_DENIED` (-32109). Distinct from `IMAGE_NOT_GRANTED` (-32101 = manifest / token problem), even though both visually mean 'no permission'.",
+        "**Nothing to declare in the manifest** — the host mints an `image_token` (generate + edit) on every invoke of every installed, enabled Executa. Legacy `host_capabilities: [\"llm.image\"]` strings are ignored (`anna-app validate` warns).",
+        "**`IMAGE_NOT_GRANTED` (-32101) has one meaning in production:** the Executa is not installed or the user disabled it. `IMAGE_USER_DENIED` (-32109) is a retained wire code that is no longer raised.",
         "**Matrix↔Nexus error-code divergence at -32107 / -32108 / -32109 / -32110 / -32313 / -32314 is a real bug-class trap.** The SDK constants `IMAGE_ERR_NOT_NEGOTIATED`, `IMAGE_ERR_USER_DENIED`, `IMAGE_ERR_NO_MODEL_AVAILABLE`, `IMAGE_ERR_STORAGE_ERROR`, `IMAGE_ERR_N_UNSUPPORTED`, `IMAGE_ERR_REFERENCE_FETCH_FAILED` have **the wrong numeric values for the wire**. Always: `if e.data.get(\"errorCode\") == \"IMAGE_USER_DENIED\":` — do NOT use `if e.code == IMAGE_ERR_USER_DENIED:`.",
         "**Provider safety filters can refuse** — surfaces as `IMAGE_PROVIDER_ERROR` (-32103), NOT `IMAGE_INVALID_REQUEST`. Inspect `error.message` to triage; do not retry the same prompt verbatim.",
         "**`reference_image_urls` cost bandwidth** — each URL is one inbound host fetch billed against the user's monthly quota. Cap at ≤ 3 in practice.",
-        "**Host implementation note (informational, not part of the plugin contract).** The reverse-RPC frame stops at the Agent; what happens next is invisible to the plugin but useful to understand when debugging:\n• The Agent mints a short-lived JWT (audience `executa-image`, TTL **600 s** = `DEFAULT_IMAGE_TTL_SECONDS`) carrying `user_id`, `executa_tool_id`, `tool_invoke_id`, `allow_generate`, `allow_edit`, `max_per_call_generate`, `max_per_call_edit`, `max_images`, `model_hints`.\n• `MatrixCopilotClient.image_create_generate` **injects `executa_tool_id` and `tool_invoke_id` into the JSON body** before POSTing to `/api/v1/copilot/image/generate`. You do NOT send these fields from the plugin — the SDK signature has no slot for them and including them in `metadata` is ignored. Nexus rejects with `IMAGE_INVALID_REQUEST` (-32104) if the body fields disagree with the token claims.\n• On the wire to Nexus the param `model_preferences` is **renamed to `modelPreferences`** (camelCase). This only matters if you inspect packet captures; the SDK call stays snake_case."
+        "**Host implementation note (informational, not part of the plugin contract).** The reverse-RPC frame stops at the Agent; what happens next is invisible to the plugin but useful to understand when debugging:\n• The Agent mints a short-lived JWT (audience `executa-image`, TTL **600 s** = `DEFAULT_IMAGE_TTL_SECONDS`) carrying `user_id`, `executa_tool_id`, `tool_invoke_id`, `max_per_call_generate`, `max_per_call_edit`, `max_images` (platform constants; the former `allow_*` / `model_hints` claims are gone).\n• `MatrixCopilotClient.image_create_generate` **injects `executa_tool_id` and `tool_invoke_id` into the JSON body** before POSTing to `/api/v1/copilot/image/generate`. You do NOT send these fields from the plugin — the SDK signature has no slot for them and including them in `metadata` is ignored. Nexus rejects with `IMAGE_INVALID_REQUEST` (-32104) if the body fields disagree with the token claims.\n• On the wire to Nexus the param `model_preferences` is **renamed to `modelPreferences`** (camelCase). This only matters if you inspect packet captures; the SDK call stays snake_case."
       ]
     },
     {
@@ -370,7 +370,7 @@
         {
           "name": "IMAGE_NOT_GRANTED",
           "code": -32101,
-          "desc": "User has not granted `image_grant.edit = true` for this Executa."
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps)."
         },
         {
           "name": "QUOTA_EXCEEDED",
@@ -400,7 +400,7 @@
         {
           "name": "NOT_NEGOTIATED",
           "code": -32107,
-          "desc": "Missing `invoke_id`, no v2 handshake, or manifest lacks `host_capabilities: [\"llm.image.edit\"]`."
+          "desc": "Missing `invoke_id` or no v2 handshake."
         },
         {
           "name": "EDIT_NOT_SUPPORTED",
@@ -425,7 +425,7 @@
       ],
       "example": "# Restyle a previously-generated image in cyberpunk neon.\nfrom executa_sdk import ImageClient, ImageError, IMAGE_ERR_EDIT_NOT_SUPPORTED, IMAGE_ERR_MASK_UNSUPPORTED\n\nimage = ImageClient()\n\nasync def restyle(invoke_id: str, source_url: str) -> dict:\n    try:\n        result = await image.edit(\n            image_url=source_url,\n            prompt=\"Restyle in cyberpunk neon. Preserve composition.\",\n            n=1,\n            metadata={\"executa_invoke_id\": invoke_id},\n        )\n    except ImageError as e:\n        if e.code == IMAGE_ERR_EDIT_NOT_SUPPORTED:\n            # User's provider can't edit — fall back to a fresh generate.\n            return await image.generate(prompt=\"Cyberpunk neon poster\", n=1,\n                                       metadata={\"executa_invoke_id\": invoke_id})\n        if e.code == IMAGE_ERR_MASK_UNSUPPORTED:\n            raise   # caller passed a mask the provider can't honour\n        raise\n    return {\"images\": [img[\"url\"] for img in result[\"images\"]], \"model\": result[\"model\"]}\n",
       "limitations": [
-        "**`allow_edit` is OFF by default** in the user's image grant (`DEFAULT_IMAGE_*` in `image_token.py`); users must explicitly opt in. First call without it → `IMAGE_NOT_GRANTED`.",
+        "**Edit needs no opt-in** — the same per-invoke `image_token` covers `generate` and `edit`; the per-call cap for edit is 1 image.",
         "**Per-call cap defaults to 1** (`max_per_call_edit`), vs `max_per_call_generate` default 4. Plan accordingly — most workflows are one-edit-at-a-time anyway.",
         "**The source `image_url` is not mutated** — the host stores edited results as new R2 objects with new transient URLs. If you need to chain edits, feed each call's output URL into the next call (refresh URLs that are near their 30-min TTL).",
         "**Provider capability matrix is heterogeneous** — handle `EDIT_NOT_SUPPORTED` / `MASK_UNSUPPORTED` / `N_UNSUPPORTED` distinctly. Falling back from a masked edit to a full-image edit is usually safe; from any edit to a fresh `generate` requires re-prompting.",
@@ -439,7 +439,7 @@
       "group": "Image · async jobs",
       "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/image/generate_async`",
-      "summary": "Submit an async text-to-image / reference-image job (same body as `image/generate` + `clientTag?` / `idempotencyKey?`; snake_case `job_id` / `client_tag` also accepted) → `{jobId:'ijob_…', kind:'image', state:'queued', estimatedCostCU, deadlineAt, idempotentReplay}`. Same grant (`image_grant`), same `image_token`, same `llm.image` capability as the sync call. Per-invoke `max_images` is **reserved by `n` at submit** and not released if the job later fails (guardrail, not billing — the CU hold is refunded). Use the SDK wrapper `generate_await` or return `jobId` from the invoke and resume with `image/get_job` for renders longer than the invoke budget.",
+      "summary": "Submit an async text-to-image / reference-image job (same body as `image/generate` + `clientTag?` / `idempotencyKey?`; snake_case `job_id` / `client_tag` also accepted) → `{jobId:'ijob_…', kind:'image', state:'queued', estimatedCostCU, deadlineAt, idempotentReplay}`. Same `image_token` as the sync call — nothing to declare. Per-invoke `max_images` is **reserved by `n` at submit** and not released if the job later fails (guardrail, not billing — the CU hold is refunded). Use the SDK wrapper `generate_await` or return `jobId` from the invoke and resume with `image/get_job` for renders longer than the invoke budget.",
       "wire": {
         "json_rpc_method": "image/generate_async",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -453,7 +453,7 @@
           "name": "prompt / n / size / aspect_ratio / model / params / fit / reference_image_urls",
           "type": "see image/generate",
           "required": "prompt",
-          "summary": "Identical validation to the sync call (host-side `image_api_family` fal-only models; `IMAGE_MODEL_UNAVAILABLE` / `IMAGE_SIZE_UNSUPPORTED` / `IMAGE_OPTION_INVALID` pass through). `model` defaults to the token's first `model_hints` entry.",
+          "summary": "Identical validation to the sync call (host-side `image_api_family` fal-only models; `IMAGE_MODEL_UNAVAILABLE` / `IMAGE_SIZE_UNSUPPORTED` / `IMAGE_OPTION_INVALID` pass through). `model` defaults to the user's preferred image model.",
           "notes": []
         },
         {
@@ -479,7 +479,7 @@
         {
           "name": "IMAGE_NOT_GRANTED",
           "code": -32101,
-          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -524,7 +524,7 @@
       "group": "Image · async jobs",
       "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/image/edit_async`",
-      "summary": "Submit an async edit job (`image_url`, optional `mask_url`, same body as `image/edit` + `clientTag?` / `idempotencyKey?`). Requires token `allow_edit` and manifest `llm.image.edit` (or legacy `llm.image`); `mask_url` on a model without mask support → `-32312`. Inputs are re-hosted by the platform before submission.",
+      "summary": "Submit an async edit job (`image_url`, optional `mask_url`, same body as `image/edit` + `clientTag?` / `idempotencyKey?`). Nothing to declare; `mask_url` on a model without mask support → `-32312`. Inputs are re-hosted by the platform before submission.",
       "wire": {
         "json_rpc_method": "image/edit_async",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -564,13 +564,13 @@
         {
           "name": "IMAGE_EDIT_NOT_ALLOWED",
           "code": -32311,
-          "desc": "Token `allow_edit` false.",
+          "desc": "Retained wire code; no longer raised by the gate (edit is covered by the per-invoke `image_token`).",
           "retryable": false
         },
         {
           "name": "IMAGE_NOT_GRANTED",
           "code": -32101,
-          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -646,7 +646,7 @@
         {
           "name": "IMAGE_NOT_GRANTED",
           "code": -32101,
-          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -704,7 +704,7 @@
         {
           "name": "IMAGE_NOT_GRANTED",
           "code": -32101,
-          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -740,7 +740,7 @@
       "group": "Image · re-sign",
       "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/image/resign` (local presign, no provider call)",
-      "summary": "Re-sign already-paid artifacts by storage key (`r2_key` from a sync result or `r2Key` from a job view) for up to 7 days — `{r2Keys:[…]}` (1–20) → `{urls:[{r2Key, url, expiresIn}]}` in input order. Any key not owned by the invoking user fails the whole call (`IMAGE_ASSET_NOT_FOUND`, `data.index`). Free; needs `llm.image` or `llm.image.edit` + `image_grant.enabled`.",
+      "summary": "Re-sign already-paid artifacts by storage key (`r2_key` from a sync result or `r2Key` from a job view) for up to 7 days — `{r2Keys:[…]}` (1–20) → `{urls:[{r2Key, url, expiresIn}]}` in input order. Any key not owned by the invoking user fails the whole call (`IMAGE_ASSET_NOT_FOUND`, `data.index`). Free; available to every installed, enabled Executa.",
       "wire": {
         "json_rpc_method": "image/resign",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -766,7 +766,7 @@
         {
           "name": "IMAGE_NOT_GRANTED",
           "code": -32101,
-          "desc": "manifest `host_capabilities` lacks `llm.image` (`llm.image.edit` for edit_async), token `allow_generate` / `allow_edit` false, `image_grant` off, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {

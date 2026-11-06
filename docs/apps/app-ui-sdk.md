@@ -4,7 +4,7 @@ description: "Embed the Anna App SDK in your bundle and call host APIs from insi
 section: apps
 slug: app-ui-sdk
 order: 13
-updated: 2026-10-23
+updated: 2026-11-02
 estimated_minutes: 5
 category: "App UI"
 ---
@@ -73,7 +73,7 @@ interface AnnaAppRuntime {
    *  the exact value `open_app_view` prompts need. */
   app:        { id: number; slug?: string; name?: string } | null;
   viewMeta:   { name: string; title: string; default_size: {w,h}; … };
-  capabilities: { tools: string[]; chat: string[]; storage: string[]; … };
+  capabilities: { host_api_version: string };   // no per-namespace scopes — every method is available
 
   /** Initial payload supplied by `open_app_view(payload=…)` */
   entryPayload: any;
@@ -111,7 +111,7 @@ interface AnnaAppRuntime {
 }
 ```
 
-Every namespace proxy is generated dynamically from `capabilities` returned by `window.hello`. If your manifest does not list `chat.append_artifact`, calling `anna.chat.append_artifact(...)` from inside the iframe will throw `permission_denied` — you cannot escalate from the client.
+Every namespace proxy covers the full Host API surface of the host you are running on (`window.hello` only reports `capabilities.host_api_version`; there are no per-namespace scopes). Every method is available to an installed App; the only `permission_denied` cases are the three [capability declarations](/developers/apps/app-manifest#capability-declarations) (undeclared `credentials` provider, undeclared cross-app storage scope, `tools.invoke` on an Executa outside `required_executas` / `optional_executas`) — you cannot escalate from the client.
 
 ## Resume vs first open
 
@@ -178,7 +178,7 @@ const { result } = await anna.tools.invoke({
 
 The host resolves the `tool_id` against `(plugin_name, tool_name)` from the Executa registry, then invokes the Executa over NATS on the user's currently-online Anna Agent. If no agent is online you get `agent_unavailable`.
 
-If you supplied a per-Executa allow-list in `host_api.tools` (e.g. `["required:tool-yourhandle-browser-abcd1234"]`), only those `tool_id`s can be invoked.
+Only the `tool_id`s in `required_executas` / `optional_executas` can be invoked, and the Executa must be installed and enabled for the user.
 
 ## Title, resize, close
 
@@ -188,7 +188,7 @@ await anna.window.resize({ w: 1024, h: 768 });
 await anna.window.close({ reason: "user_done" });
 ```
 
-`window.*` is always allowed — no permission required.
+`window.*` needs nothing declared, like every other namespace.
 
 ## Follow the user's theme and language
 
@@ -217,7 +217,7 @@ Migration in three steps:
    and the SDK then falls back to `prefers-color-scheme` / `navigator.language`.
 
 These are one-way host → app broadcasts (`theme.changed`, `locale.changed`), not RPC
-methods: **no `host_api` entry is needed** and adding one has no effect.
+methods — nothing to declare.
 
 ## Errors
 
@@ -233,7 +233,7 @@ Common codes:
 | Code | Meaning |
 |---|---|
 | `invalid_token` | JWT expired or wrong window — the SDK auto-refreshes most cases |
-| `permission_denied` | `(ns, method)` not in `host_api`, or referenced `tool_id` not in allow-list |
+| `permission_denied` | Undeclared `credentials` provider / storage scope, or `tool_id` not in `required_executas` / `optional_executas` |
 | `invalid_arg` | Schema mismatch on RPC args |
 | `not_found` | Window already closed; storage key missing; etc. |
 | `agent_unavailable` | `tools.invoke` could not reach the user's Anna Agent |

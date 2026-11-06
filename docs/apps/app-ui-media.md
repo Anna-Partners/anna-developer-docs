@@ -1,10 +1,10 @@
 ---
 title: "App UI Media: Video, Music & Audio"
-description: "Generate video and music (async jobs), synthesize speech and transcribe audio from your bundle through the host — grants, catalogue discovery, CU pre-charge, idempotency, media_job events and URL lifetime."
+description: "Generate video and music (async jobs), synthesize speech and transcribe audio from your bundle through the host — catalogue discovery, CU pre-charge, idempotency, media_job events and URL lifetime."
 section: apps
 slug: app-ui-media
 order: 16
-updated: 2026-10-23
+updated: 2026-11-02
 estimated_minutes: 10
 category: "App UI"
 ---
@@ -29,39 +29,12 @@ lives in the Reference: [`video.*`](/developers/reference/host-api-video),
 [`music.*`](/developers/reference/host-api-music), [`audio.*`](/developers/reference/host-api-audio), [`llm.catalog`](/developers/reference/host-api-llm),
 [`media_job`](/developers/reference/sse-events).
 
-## Two-layer authorization
+## Nothing to declare
 
-Like `image.*`, media is gated twice. Both must pass or the call fails with
-`APP_NOT_GRANTED`:
-
-1. **Manifest** — declare the method surface you use (including `llm.catalog`
-   for discovery — it goes through the same ACL as every other namespace):
-
-   ```json
-   "ui": {
-     "host_api": {
-       "video": ["generate", "getJob", "cancelJob", "listJobs"],
-       "music": ["generate", "getJob", "cancelJob", "listJobs"],
-       "audio": ["speak", "transcribe"],
-       "llm": ["catalog"]
-     }
-   }
-   ```
-
-2. **User grant** — the user enables media for *your* App in Anna Admin
-   (`media_grant`). Note the per-operation flags for audio:
-
-   ```json
-   "media_grant": {
-     "video": { "enabled": true },
-     "music": { "enabled": true },
-     "audio": { "enabled": true, "speak": true, "transcribe": true }
-   }
-   ```
-
-   `audio.enabled` alone is **not** enough — `speak` / `transcribe` must each be
-   on. Grants default to off; the review flow shows `media_grant` to the user
-   alongside `image_grant`.
+Like `image.*`, the whole media surface (`video.*`, `music.*`, `audio.*`,
+`llm.catalog`) is available to every installed, enabled App — no manifest
+entry, no user toggle. `APP_NOT_GRANTED` (`-32001`) only means the App is not
+installed, was disabled by the user, or the user has no active subscription.
 
 There is **no platform-side daily or concurrency cap**. The user's CU quota pool
 is the only limit (`APP_QUOTA_EXCEEDED`, HTTP 429 on the HTTP surface).
@@ -98,8 +71,8 @@ default. Render it generically; keys differ per model (ElevenLabs exposes
 exposes `vol` −12..12 `pitch` and `emotion`). The default model is
 `models.find(m => m.isUserPreferred) ?? models.find(m => m.isPlatformDefault)`.
 
-Only service types your App is **granted** are returned — an ungranted type
-yields an empty list, never an error, so you can feature-detect and degrade.
+A service type with no routable model yields an empty list, never an error,
+so you can feature-detect and degrade.
 Passing parameters outside a model's capability space fails with
 `VIDEO_INVALID_REQUEST` / `AUDIO_VOICE_INVALID` / `AUDIO_TEXT_TOO_LONG` /
 `AUDIO_OPTION_INVALID`, each echoing the allowed space in `error.data.allowed`
@@ -218,8 +191,7 @@ Catalogue entries may carry a `licenseNote`; surface it before commercial use.
 `anna.image.generate` / `anna.image.edit` stay **synchronous and unchanged** —
 a 0.5K single image is back in ~5 s and that path is the right default. Two
 things used to be impossible on the image line and are now additive opt-ins
-(`@anna-ai/app-runtime` ≥ 0.25.0, dispatcher 0.29.0; manifest `ui.host_api.image`
-must list the new method names; the existing `image_grant` applies — no new grant):
+(`@anna-ai/app-runtime` ≥ 0.25.0, dispatcher 0.29.0):
 
 1. **Jobs for long renders.** 2K/4K or `quality: "high"` images take 60–120 s;
    held open in a sync call they time out and are lost on reload — while the
@@ -266,7 +238,7 @@ must list the new method names; the existing `image_grant` applies — no new gr
 
 `anna.llm.catalog({ serviceType: 'image_gen' | 'image_edit' })` entries carry
 `capabilities.jobs: true` and `image_edit` entries now report the real
-`options.n.max` (= your `image_grant.maxPerCallEdit`). Behaviour change on the
+`options.n.max` (= the platform per-call edit cap, 1). Behaviour change on the
 sync path: a provider safety rejection is `IMAGE_CONTENT_REJECTED` (`-32115`,
 HTTP 400) instead of `APP_PROVIDER_ERROR`.
 
@@ -297,7 +269,7 @@ const { text } = await anna.audio.transcribe({ audioBase64: b64, format: 'webm',
 ```
 
 > **Recording in the iframe?** `getUserMedia` / `MediaRecorder` are governed
-> by the browser's Permissions Policy, not by `host_api`. Declare
+> by the browser's Permissions Policy. Declare
 > `"browser_permissions": ["microphone"]` in `manifest.ui` or the Dashboard
 > rejects the call with `NotAllowedError` before the user is even asked
 > (`transcribe` accepts uploaded files / URLs too, so it does not imply the
@@ -350,7 +322,7 @@ errors, `allowed`.
 
 | Code | Name | When |
 |---|---|---|
-| `-32001` | `APP_NOT_GRANTED` | manifest surface missing **or** user `media_grant` flag off |
+| `-32001` | `APP_NOT_GRANTED` | App not installed, disabled by the user, or no active subscription |
 | `-32015` | `APP_QUOTA_EXCEEDED` | CU pool exhausted (HTTP 429) |
 | `-32122` | `VIDEO_INVALID_REQUEST` | video params outside the catalogue; also the generic validator for audio shapes (empty text, bad format/delivery/speed) |
 | `-32123` | `VIDEO_PROVIDER_ERROR` | provider submit/render failure — hold refunded, retryable |
@@ -366,7 +338,7 @@ errors, `allowed`.
 | `-32166` | `MUSIC_LYRICS_TOO_LONG` | over `lyricsMaxChars` (`data.{maxChars, actualChars}`) |
 | `-32167` | `MUSIC_JOB_NOT_CANCELLABLE` | music job already terminal |
 | `-32168` | `MUSIC_CONTENT_REJECTED` | provider safety system rejected prompt / lyrics / image — not billed |
-| `-32107` | `IMAGE_PER_CALL_EXCEEDED` | `n` > `image_grant.maxPerCallGenerate` / `maxPerCallEdit` (`data.allowed.maxN`) — sync and async |
+| `-32107` | `IMAGE_PER_CALL_EXCEEDED` | `n` > the platform per-call cap (4 generate / 1 edit) or the model's `maxN` (`data.allowed.maxN`) — sync and async |
 | `-32110` | `IMAGE_MODEL_UNAVAILABLE` | unknown / non-image `model` (`data.allowed`) |
 | `-32111` | `IMAGE_SIZE_UNSUPPORTED` | `fit: 'strict'` and the size / ratio is outside the model's space (`data.allowed`) |
 | `-32112` | `IMAGE_OPTION_INVALID` | a `params` value violates the model's option schema (`data.{key, reason, allowed}`) |
@@ -386,7 +358,7 @@ errors, `allowed`.
 
 Executa plugins get the same capabilities through reverse RPC
 (`video/generate`, `video/get_job`, `video/cancel_job`, `music/generate`, `music/get_job`,
-`music/cancel_job`, `audio/speak`, `audio/transcribe`) with plugin-side gates (`host_capabilities`, `media_token`, audio per-invoke budgets) —
+`music/cancel_job`, `audio/speak`, `audio/transcribe`) using the `media_token` minted on every invoke (audio per-invoke budgets apply) —
 see [Executa media](/developers/tools/executa-media). The image job surface
 (`image/generate_async`, `image/edit_async`, `image/get_job`, `image/cancel_job`,
 `image/resign`) rides the existing `image_token` — see [Executa image](/developers/tools/executa-image#async-jobs-re-signing).
@@ -403,23 +375,21 @@ harness's LLM bridge decides what a media call does:
 | `--no-llm` | `llm_disabled` |
 
 Minimum CLI versions — the harness rejects the call with `-32601 method not
-found` (and the manifest validator rejects the `ui.host_api` key) on older
-builds, so check `anna-app --version` before debugging your own code:
+found` on older builds, so check `anna-app --version` before debugging your
+own code:
 
 | Surface | CLI | Bundled `@anna-ai/app-schema` |
 |---|---|---|
 | `video.*`, `audio.*`, `llm.catalog` | ≥ 0.1.58 | ≥ 0.26.0 |
 | `music.*`, `image.generateAsync` / `editAsync` / `getJob` / `cancelJob` / `listJobs` / `resign` | ≥ **0.1.60** (`anna-app-runtime-local` ≥ 0.2.0a30) | ≥ 0.29.0 |
 
-If your project pins an older `@anna-ai/cli` (per-app lockfile), `anna-app validate --strict`
-fails with `must NOT have additional properties {"additionalProperty":"music"}` — upgrade the
-CLI rather than overriding the schema range. See [Local Dev with --llm](/developers/apps/local-dev-llm)
-for PAT setup and fixture format.
+See [Local Dev with --llm](/developers/apps/local-dev-llm) for PAT setup and
+fixture format.
 
 ## See also
 
-- [App UI Host API](/developers/apps/app-ui-host-api) — envelope, ACL model, generic error codes
-- [App UI Manifest](/developers/apps/app-ui-manifest) — `ui.host_api.video` / `.music` / `.audio` grant table
+- [App UI Host API](/developers/apps/app-ui-host-api) — envelope, generic error codes
+- [App UI Manifest](/developers/apps/app-ui-manifest) — the `ui` section
 - [App UI Audio Session](/developers/apps/app-ui-audio-session) — realtime voice: streaming ASR / TTS, barge-in, `setContext`, `say`
 - [Executa media](/developers/tools/executa-media) — the plugin-side mirror
 - [Model capabilities](/developers/reference/model-capabilities) — every TTS / image / video / music model's options, limits and CU prices (generated from the catalogue)

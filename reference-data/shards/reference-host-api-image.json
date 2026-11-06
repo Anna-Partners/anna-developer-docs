@@ -8,7 +8,7 @@
       "group": "Image",
       "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
       "direction": "Bundle (iframe) → Host RPC → app_llm_facade → image provider (DALL·E / SDXL / FLUX / …) → R2",
-      "summary": "Generate `n` images from a text prompt using the host's configured image provider. The host enforces the per-(user, App) `image_grant`, checks plan quota, calls the provider, stores bytes on R2, and returns short-lived presigned URLs. The bundle never sees a provider key, never holds R2 credentials, and never bills directly.",
+      "summary": "Generate `n` images from a text prompt using the host's configured image provider. The host checks the platform per-call cap and plan quota, calls the provider, stores bytes on R2, and returns short-lived presigned URLs. The bundle never sees a provider key, never holds R2 credentials, and never bills directly.",
       "wire": {
         "json_rpc_method": "image.generate",
         "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
@@ -36,9 +36,9 @@
           "desc": "",
           "summary": "How many images to generate in this call. Must be a positive integer.",
           "notes": [
-            "Clamped against `image_grant.maxPerCallGenerate` (default **4**) — exceeding → `APP_INVALID_REQUEST` with `n={n} exceeds per-call cap {max}`.",
-            "Independent host hard-cap of **8** lives in the Anna Agent runtime `_MAX_N` for the plugin-side path; the App-side facade enforces only the grant value.",
-            "Per-invoke rolling counter (`image_grant.max_images`) is **not** applied to App-side calls — those quotas are scoped to Executa plugin `tool_invoke_id` and not to App sessions."
+            "Clamped against the platform per-call cap (**4**) and the model's `maxN` — exceeding → `IMAGE_PER_CALL_EXCEEDED` (`data.allowed.maxN`).",
+            "The plugin-side path shares the same platform constants (4 per `generate`, 1 per `edit`, 4 per invoke).",
+            "The per-invoke rolling counter is **not** applied to App-side calls — it is scoped to Executa plugin `tool_invoke_id`, not to App sessions."
           ]
         },
         {
@@ -146,7 +146,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": "APP_NOT_GRANTED",
-          "desc": "`image_grant.enabled == false`, `allowGenerate == false`, or the underlying executa row is disabled. Mapped from `APP_ERR_NOT_GRANTED` (-32001) by the dispatcher. HTTP 403 on the legacy `/api/v1/copilot/app/image/generate` route."
+          "desc": "App not installed, disabled by the user, or no active subscription. Mapped from `APP_ERR_NOT_GRANTED` (-32001) by the dispatcher. HTTP 403 on the legacy `/api/v1/copilot/app/image/generate` route."
         },
         {
           "name": "APP_INVALID_REQUEST",
@@ -181,7 +181,7 @@
         "CSP gotcha: the iframe's `img-src` must allow the host's R2 hostname. Either add `https:` (or the specific R2 domain) to `manifest.ui.csp_overrides.img-src`, or display the image via a same-origin proxy.",
         "Cross-Origin-Embedder-Policy: if the iframe is in `require-corp` mode, R2 presigned URLs that don't include `Cross-Origin-Resource-Policy: cross-origin` will be blocked (`ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep`). The default Anna App runtime does **not** set COEP for this reason — only opt in when SharedArrayBuffer is required.",
         "No streaming. Image responses are buffered; a slow provider (DALL·E 3 cold-start, FLUX queue) can take 30-60 s — the SDK default per-call timeout is `DEFAULT_TIMEOUTS_BY_NS.image = 180_000` ms (180 s), override via `opts.timeoutMs`.",
-        "Per-invoke rolling quota (`max_images`) used by Executa plugin-side image calls is **not** applied here. Only `image_grant.maxPerCallGenerate` and plan-level quota apply.",
+        "Per-invoke rolling quota used by Executa plugin-side image calls is **not** applied here. Only the platform per-call cap (4) and plan-level quota apply.",
         "Returned `images[].r2_key` can be re-signed for 7 days with `anna.image.resign({r2Keys})` (v0.25.0) — the 30-min URL is no longer the only window."
       ]
     },
@@ -192,7 +192,7 @@
       "group": "Image",
       "since": "Introduced anna-app-runtime v0.4 · current v0.13.0 / dispatcher 0.17.0",
       "direction": "Bundle (iframe) → Host RPC → app_llm_facade → image provider → R2",
-      "summary": "Mutate an existing image URL using a text prompt; the source image is not modified. Requires a stricter grant (`image_grant.allowEdit = true`) than `image.generate` because edits often imply higher provider cost. Optional `mask_url` enables inpainting where the provider supports it.",
+      "summary": "Mutate an existing image URL using a text prompt; the source image is not modified. Available to every installed App like `image.generate`; the per-call cap is stricter (1) because edits often imply higher provider cost. Optional `mask_url` enables inpainting where the provider supports it.",
       "wire": {
         "json_rpc_method": "image.edit",
         "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
@@ -230,7 +230,7 @@
           "desc": "",
           "summary": "Number of edited variants. Must be positive.",
           "notes": [
-            "Clamped against `image_grant.maxPerCallEdit` (default **1**) — usually stricter than the generate cap because edit variants are expensive.",
+            "Clamped against the platform per-call edit cap (**1**) — stricter than the generate cap because edit variants are expensive.",
             "Edit providers often return `n=1` regardless of request; check `out.images.length` rather than assuming."
           ]
         },
@@ -289,7 +289,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": "APP_NOT_GRANTED",
-          "desc": "`image_grant.enabled == false` OR `allowEdit == false` (default). Mapped from `APP_ERR_NOT_GRANTED` (-32001). HTTP 403."
+          "desc": "App not installed, disabled by the user, or no active subscription. Mapped from `APP_ERR_NOT_GRANTED` (-32001). HTTP 403."
         },
         {
           "name": "APP_INVALID_REQUEST",
@@ -322,7 +322,7 @@
       "limitations": [
         "Source URL must be reachable from the provider's network. Internal-only URLs (private R2 bucket without presign, intranet hosts) fail validation or fetch.",
         "Mask support varies per provider. Probe with a small request before exposing a mask UI to the user.",
-        "Edit grant defaults to **off**. `image_grant.enabled = true` alone is not enough; the user must also flip `allowEdit` in Anna Admin.",
+        "Nothing to declare and no user toggle for edit — installing the App is the consent.",
         "Same URL-expiry, CSP, and COEP caveats as `image.generate`.",
         "Edits do not chain — each call goes back to the provider; there is no server-side artifact graph that would let the host skip a re-fetch of `image_url`.",
         "Returned `images[].r2_key` can be re-signed for 7 days with `anna.image.resign({r2Keys})` (v0.25.0) — the 30-min URL is no longer the only window."
@@ -357,7 +357,7 @@
           "type": "integer",
           "required": false,
           "default": "1",
-          "summary": "Images in this job (one job = n images, submitted as one provider request `num_images=n`). Capped by `image_grant.maxPerCallGenerate` / `maxPerCallEdit` and the model's `maxN` → `IMAGE_PER_CALL_EXCEEDED`.",
+          "summary": "Images in this job (one job = n images, submitted as one provider request `num_images=n`). Capped by the platform per-call cap (4 generate / 1 edit) and the model's `maxN` → `IMAGE_PER_CALL_EXCEEDED`.",
           "notes": []
         },
         {
@@ -401,7 +401,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -419,7 +419,7 @@
         {
           "name": "IMAGE_PER_CALL_EXCEEDED",
           "code": -32107,
-          "desc": "`n` exceeds `image_grant.maxPerCallGenerate` / `maxPerCallEdit` (`data.allowed.maxN`).",
+          "desc": "`n` exceeds the platform per-call cap (4 generate / 1 edit) or the model's `maxN` (`data.allowed.maxN`).",
           "retryable": false
         },
         {
@@ -461,7 +461,7 @@
       "group": "Image",
       "since": "Introduced anna-app-runtime v0.25.0 / dispatcher 0.29.0 / schema 0.29.0 (2026-10-21)",
       "direction": "Bundle (iframe) → Host RPC → app_media_facade.image_edit_async → input re-host → quota hold → anna_media_jobs INSERT → fal queue edit endpoint → R2",
-      "summary": "Submit an asynchronous edit job (whole-image or mask-based). Body = `image.edit` body + `clientTag?` / `idempotencyKey?`. Requires `image_grant.allowEdit` (default **off**). `image_url` / `mask_url` are SSRF-checked and re-hosted to platform storage before submission, so an expiring input URL cannot break a queued job. Everything else mirrors `image.generateAsync`.",
+      "summary": "Submit an asynchronous edit job (whole-image or mask-based). Body = `image.edit` body + `clientTag?` / `idempotencyKey?`. `image_url` / `mask_url` are SSRF-checked and re-hosted to platform storage before submission, so an expiring input URL cannot break a queued job. Everything else mirrors `image.generateAsync`.",
       "wire": {
         "json_rpc_method": "image.editAsync",
         "auth": "Handled by the host page — the bundle never sees the token. Transport (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) is described once in the section overview; the equivalent HTTP endpoints under `/api/v1/copilot/app/image/...` accept an `app_session_token`.",
@@ -491,7 +491,7 @@
           "type": "integer",
           "required": false,
           "default": "1",
-          "summary": "Images in this job (one job = n images, submitted as one provider request `num_images=n`). Capped by `image_grant.maxPerCallGenerate` / `maxPerCallEdit` and the model's `maxN` → `IMAGE_PER_CALL_EXCEEDED`.",
+          "summary": "Images in this job (one job = n images, submitted as one provider request `num_images=n`). Capped by the platform per-call cap (4 generate / 1 edit) and the model's `maxN` → `IMAGE_PER_CALL_EXCEEDED`.",
           "notes": []
         },
         {
@@ -535,7 +535,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -553,7 +553,7 @@
         {
           "name": "IMAGE_PER_CALL_EXCEEDED",
           "code": -32107,
-          "desc": "`n` exceeds `image_grant.maxPerCallGenerate` / `maxPerCallEdit` (`data.allowed.maxN`).",
+          "desc": "`n` exceeds the platform per-call cap (4 generate / 1 edit) or the model's `maxN` (`data.allowed.maxN`).",
           "retryable": false
         },
         {
@@ -626,7 +626,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -679,7 +679,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -762,7 +762,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -815,7 +815,7 @@
         {
           "name": "APP_NOT_GRANTED",
           "code": -32001,
-          "desc": "manifest `ui.host_api.image` does not list this method, or the user's `image_grant` is off (`enabled` / `allowGenerate` / `allowEdit`) for this App.",
+          "desc": "App not installed, disabled by the user, or no active subscription.",
           "retryable": false
         },
         {
@@ -839,7 +839,7 @@
       "example": "img.onerror = async () => {\n  const { urls } = await anna.image.resign({ r2Keys: [img.dataset.r2Key] });\n  img.src = urls[0].url;\n};",
       "limitations": [
         "Objects are deleted 7 days after creation; a re-signed URL for a deleted object returns 404 — treat as expired.",
-        "Only `image_grant.enabled` is required — the method does not distinguish generate / edit."
+        "Available to every installed App — the method does not distinguish generate / edit."
       ]
     }
   ]

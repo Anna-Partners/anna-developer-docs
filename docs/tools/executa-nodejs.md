@@ -105,6 +105,32 @@ echo '{"jsonrpc":"2.0","method":"invoke","id":2,"params":{"tool":"b64","argument
 
 Publish the binary entry point with `npm` (`bin` field in `package.json`) and register the plugin with `distribution_type: npm`. For local iteration, build a `.tar.gz` (e.g. `tar czf my-tool.tgz dist/`) and point the Agent at the archive path with `distribution_type: local` — the Agent runs the [full v2 install pipeline](/developers/tools/executa-binary#local-archive-distribution-no-urls-no-upload) and supports multi-file binaries (native addons in `node_modules/`, etc.).
 
+### Use the platform Node (recommended for Node tools > 50 MiB)
+
+Every Agent provides a shared, pinned **Node 22 LTS** exposed as
+`ANNA_NODE_EXECUTABLE` — so a `binary`-distributed Node tool doesn't need to
+embed a Node runtime at all. Ship your built JS + pruned `node_modules` and a
+two-line shell shim as the entrypoint:
+
+```sh
+#!/bin/sh
+set -eu
+: "${ANNA_NODE_EXECUTABLE:?requires the Anna platform Node runtime — declare runtime.requires.node}"
+exec "$ANNA_NODE_EXECUTABLE" "$EXECUTA_HOME/dist/main.js" "$@"
+```
+
+Declare the requirement in `executa.json` so old Agents reject the install
+cleanly instead of crashing at invoke time:
+
+```jsonc
+"runtime": { "requires": { "node": ">=22 <23" }, "fallback": "fail" }
+```
+
+Full contract, Chrome sharing and the version policy:
+[Platform runtimes](/developers/tools/executa-platform-runtimes). Working
+example (≈5 MiB package incl. `puppeteer-core`):
+[`anna-app-platform-runtime-demo`](https://github.com/whtcjdtc2007/anna-executa-examples/tree/main/examples/anna-app-platform-runtime-demo).
+
 ## 4. Build a binary (optional)
 
 Node 20+ ships [single-executable applications](https://nodejs.org/api/single-executable-applications.html) via `--experimental-sea-config`. For multi-platform CI the easiest route remains [`@yao-pkg/pkg`](https://github.com/yao-pkg/pkg):

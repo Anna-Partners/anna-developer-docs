@@ -4,7 +4,7 @@ description: "Hand a file (or its bytes) to Anna; the host stores it in shared R
 section: tools
 slug: executa-host-upload
 order: 13
-updated: 2026-05-27
+updated: 2026-11-02
 estimated_minutes: 7
 ---
 
@@ -15,28 +15,11 @@ Available from Executa protocol **v2** onward; pairs naturally with [Image Gener
 > [!TIP]
 > Use Host Upload for **ephemeral / shareable** artefacts (≤ 80 MiB total per invoke, short presigned URLs). For durable per-user data that survives across invokes — caches, notes, files in the user's drive — use [Persistent Storage (APS)](/developers/tools/executa-storage) instead.
 
-## Three pre-conditions
+## One pre-condition
 
-End-to-end `host/uploadFile` access requires **all** of:
+End-to-end `host/uploadFile` access requires **v2 negotiation**: reply to `initialize` with `protocolVersion: "2.0"` and a non-empty `capabilities.upload` claim (an empty object is fine). Without it the host answers `UPLOAD_NOT_NEGOTIATED (-32210)`.
 
-1. **v2 negotiation.** Reply to `initialize` with `protocolVersion: "2.0"` and a non-empty `capabilities.upload` claim (an empty object is fine).
-2. **Manifest declaration.** Your published manifest declares the host capability:
-   ```json
-   { "host_capabilities": ["host.upload"] }
-   ```
-   The publish validator rejects unknown capability strings.
-3. **User grant.** The end user enabled `upload_grant` for this Executa in Anna Admin. The grant carries:
-   ```json
-   {
-     "enabled": true,
-     "maxFiles": 16,
-     "maxFileBytes": 26214400,
-     "allowedPurposes": ["image_input", "image_reference", "user_artifact"]
-   }
-   ```
-   `maxFiles` and `maxFileBytes` (single-file cap) feed the per-invoke counters. There is **no MIME allowlist**: any type that is not on the host's hard denylist (executables, `image/svg+xml`) is accepted — Office formats included. Inline-rendering risk is controlled at serve time instead: every `download_url` carries a signed `Content-Disposition` (`inline` only for `image/*` / `audio/*` / `video/*` / `application/pdf`, `attachment` for everything else).
-
-Missing any pre-condition surfaces as `UPLOAD_NOT_GRANTED (-32201)` (capability / manifest / grant) or `UPLOAD_NOT_NEGOTIATED (-32210)` (no `upload_token` in the invoke context — usually means the host did not authorize this Executa at invoke time).
+There is no manifest declaration and no user toggle: the host mints an `upload_token` on **every** invoke of every installed, enabled Executa. `UPLOAD_NOT_GRANTED (-32201)` in production means the Executa is not installed or the user disabled it. The per-invoke caps (`maxFiles` 16, `maxFileBytes` 20 MiB, `maxTotalBytes` 80 MiB) are platform constants carried in the token. There is **no MIME allowlist**: any type that is not on the host's hard denylist (executables, `image/svg+xml`) is accepted — Office formats included. Inline-rendering risk is controlled at serve time instead: every `download_url` carries a signed `Content-Disposition` (`inline` only for `image/*` / `audio/*` / `video/*` / `application/pdf`, `attachment` for everything else).
 
 ## Wire protocol
 
@@ -198,12 +181,12 @@ The plugin sees these JSON-RPC errors (wire codes & names are normative in the A
 
 | Code     | Constant                    | Meaning |
 | -------- | --------------------------- | ------- |
-| `-32201` | `UPLOAD_NOT_GRANTED`        | Capability missing, manifest didn't declare `host.upload`, or `upload_grant.enabled = false`. |
+| `-32201` | `UPLOAD_NOT_GRANTED`        | Executa not installed or disabled by the user. |
 | `-32202` | `QUOTA_EXCEEDED`            | Plan upload quota exhausted. |
 | `-32203` | `INVALID_REQUEST`           | Bad `mode`, missing `filename` / `mime_type`, malformed `content_b64`, etc. |
 | `-32204` | `TOO_LARGE`                 | Decoded bytes exceed `maxFileBytes` or the 8 MiB inline cap. |
 | `-32205` | `MIME_REJECTED`             | `mime_type` malformed or on the host hard denylist (executables, `image/svg+xml`). The per-token MIME allowlist was removed — any other type is accepted. |
-| `-32206` | `PURPOSE_REJECTED`          | `purpose` not in the protocol whitelist (`image_input` / `image_reference` / `user_artifact`) or not in `allowedPurposes`. |
+| `-32206` | `PURPOSE_REJECTED`          | `purpose` not in the protocol whitelist (`image_input` / `image_reference` / `user_artifact`). |
 | `-32207` | `STORAGE_ERROR`             | R2 5xx / network. Also wraps subcall timeouts (`errorName: "subcall_timeout"`). |
 | `-32208` | `TIMEOUT`                   | Provider call exceeded the host wall-clock. |
 | `-32209` | `USER_DENIED`               | User declined an in-the-moment confirm prompt. |
@@ -237,13 +220,13 @@ Single-invoke-at-a-time plugins keep working without the field (the host falls b
 | Limit | Default | Source |
 |---|---|---|
 | Inline payload (decoded) | **8 MiB** | `INLINE_MAX_BYTES` |
-| Single-file size cap | **20 MiB** (token default); grants typically widen to **25 MiB** | `upload_token.max_file_bytes`, `upload_grant.maxFileBytes` |
+| Single-file size cap | **20 MiB** | `upload_token.max_file_bytes` (platform constant) |
 | Per-invoke total bytes | **80 MiB** | `upload_token.max_total_bytes` |
-| Per-invoke file count | **16** | `upload_token.max_files`, `upload_grant.maxFiles` |
+| Per-invoke file count | **16** | `upload_token.max_files` (platform constant) |
 | Presigned PUT URL TTL | **300 s** | `DEFAULT_PRESIGN_PUT_EXPIRY` |
 | Returned GET URL TTL | **~30 min** | `R2_TRANSIENT_PRESIGN_EXPIRY` |
 | `upload_token` TTL | **600 s** (10 min) | JWT `aud=executa-upload` |
-| Default `allowedPurposes` | `image_input`, `image_reference`, `user_artifact` | `DEFAULT_UPLOAD_ALLOWED_PURPOSES` |
+| Allowed `purpose` values | `image_input`, `image_reference`, `user_artifact` | protocol whitelist |
 
 Treat `QUOTA_EXCEEDED`, `MAX_FILES_EXCEEDED`, and `TOO_LARGE` as **non-retryable** within the same invocation; treat `STORAGE_ERROR` / `TIMEOUT` as retryable with backoff (≤ 2 attempts).
 

@@ -4,7 +4,7 @@ description: "Ask the host to generate or edit images on the user's behalf, with
 section: tools
 slug: executa-image
 order: 12
-updated: 2026-10-23
+updated: 2026-11-02
 estimated_minutes: 8
 ---
 
@@ -15,21 +15,11 @@ Available from Executa protocol **v2** onward; companion to [Sampling](/develope
 > [!TIP]
 > If your tool only needs to **embed** an existing image (e.g. a brand logo the user uploaded), use [Host Upload](/developers/tools/executa-host-upload) instead — generation is for when the pixels do not exist yet.
 
-## Three pre-conditions
+## One pre-condition
 
-End-to-end image generation requires **all** of:
+End-to-end image generation requires **v2 negotiation**: the host sends `initialize`; the plugin replies with `protocolVersion: "2.0"` and lists `client_capabilities.image` (and `image.edit` if you use `image/edit`). Without it the host returns `IMAGE_NOT_NEGOTIATED (-32107)`.
 
-1. **v2 negotiation.** The host sends `initialize`; the plugin replies with `protocolVersion: "2.0"` and lists `client_capabilities.image` (and `image.edit` if you use `image/edit`).
-2. **Manifest declaration.** Your published manifest declares the capabilities it intends to use:
-   ```json
-   {
-     "host_capabilities": ["llm.image", "llm.image.edit"]
-   }
-   ```
-   The publish validator rejects unknown capability strings.
-3. **User grant.** The end user enabled `image_grant.generate = true` (and `image_grant.edit = true`) for this Executa in their Anna Admin panel. The grant carries `max_images_per_day` and `max_per_call` caps.
-
-If any pre-condition is missing, the host returns `IMAGE_NOT_NEGOTIATED (-32107)` or `IMAGE_NOT_GRANTED (-32101)` and the reverse-RPC never reaches a provider.
+There is no manifest declaration and no user toggle: the host mints an `image_token` on **every** invoke of every installed, enabled Executa, for both `generate` and `edit`. `IMAGE_NOT_GRANTED (-32101)` in production means the Executa is not installed or the user disabled it. Per-call / per-invoke caps are platform constants (4 images per `generate` call, 1 per `edit`, 4 per invoke).
 
 ## Wire protocol
 
@@ -118,7 +108,7 @@ async-job family identical in shape to `music/*`:
 | Reverse RPC | Body | Returns |
 | --- | --- | --- |
 | `image/generate_async` | `image/generate` body + `clientTag?`, `idempotencyKey?` | `{jobId: "ijob_…", kind: "image", state: "queued", estimatedCostCU, deadlineAt, idempotentReplay}` |
-| `image/edit_async` | `image/edit` body + `clientTag?`, `idempotencyKey?` | same (needs token `allow_edit` + `llm.image.edit`) |
+| `image/edit_async` | `image/edit` body + `clientTag?`, `idempotencyKey?` | same |
 | `image/get_job` | `{jobId}` | `ImageJobView` — `result.images[].{url, r2Key, mimeType, width, height, expiresIn}`; every `url` re-signed per call |
 | `image/cancel_job` | `{jobId}` | `{state: "cancelled", refunded: true}` (queued) · `{state: "running", cancelPending: false}` (provider refused) |
 | `image/resign` | `{r2Keys: string[]}` (1–20) | `{urls: [{r2Key, url, expiresIn}]}` — re-sign already-paid artifacts for 7 days |
@@ -227,13 +217,13 @@ res, err := c.Generate(imageclient.GenerateRequest{
 
 | Code     | Constant                 | Meaning |
 | -------- | ------------------------ | ------- |
-| `-32101` | `IMAGE_NOT_GRANTED`      | User has not enabled `image_grant.generate` for this Executa. |
-| `-32102` | `IMAGE_QUOTA_EXCEEDED`   | User exhausted `max_images_per_day`. |
+| `-32101` | `IMAGE_NOT_GRANTED`      | Executa not installed or disabled by the user. |
+| `-32102` | `IMAGE_QUOTA_EXCEEDED`   | User's CU pool cannot cover the call. |
 | `-32103` | `IMAGE_PROVIDER_ERROR`   | Upstream provider 5xx / model error. |
 | `-32104` | `IMAGE_INVALID_REQUEST`  | Bad `size`, empty `prompt`, etc. |
 | `-32105` | `IMAGE_TIMEOUT`          | Provider exceeded host wall-clock. |
-| `-32106` | `IMAGE_MAX_IMAGES_EXCEEDED` | `n` > `image_grant.max_per_call`. |
-| `-32107` | `IMAGE_NOT_NEGOTIATED`   | Manifest did not list `llm.image`, or v2 not negotiated. |
+| `-32106` | `IMAGE_MAX_IMAGES_EXCEEDED` | Per-invoke image budget (4) exhausted. |
+| `-32107` | `IMAGE_NOT_NEGOTIATED`   | v2 not negotiated (`client_capabilities.image` missing). |
 | `-32108` | `IMAGE_USER_DENIED`      | User declined an in-the-moment confirm prompt. |
 | `-32109` | `IMAGE_NO_MODEL_AVAILABLE` | User has no image provider configured. |
 | `-32110` | `IMAGE_MODEL_UNAVAILABLE` | `model` not found / not an image model (`data.allowed` = valid names); or no routable image model. |
@@ -252,7 +242,7 @@ res, err := c.Generate(imageclient.GenerateRequest{
 ## Pitfalls
 
 > [!WARNING]
-> **`n` is capped per-call AND per-day.** `image_grant.max_per_call` caps any single call; `max_images_per_day` is a rolling 24-hour counter shared across every Executa+app combo the user has granted image to. Surface the canonical error code and let the user adjust the grant — never silently retry with smaller `n`.
+> **`n` is capped per-call AND per-invoke.** A single `generate` call accepts at most 4 images (`edit`: 1), and one invoke may produce at most 4 in total; the user's CU pool is the only other limit. Surface the canonical error code — never silently retry with smaller `n`.
 
 > [!IMPORTANT]
 > **Returned URLs expire.** R2 presigned URLs last ~30 min. Keep `images[].r2_key` (sync) / `result.images[].r2Key` (job) instead and call `image/resign` to get a fresh URL for up to 7 days; for durable storage persist via [`host/uploadFile`](/developers/tools/executa-host-upload). Treat the URL as an ephemeral artifact, not durable storage.

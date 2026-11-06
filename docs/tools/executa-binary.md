@@ -255,6 +255,20 @@ Before launching the entrypoint the Agent injects:
 | `DYLD_LIBRARY_PATH` | prepended `${EXECUTA_HOME}/lib` and `lib64` (macOS) |
 | `PATH` | prepended `${EXECUTA_HOME}/share/bin` (when it exists; on Windows `lib/` is added too) |
 | working directory | `EXECUTA_HOME` |
+| `ANNA_WORKSPACE_DIR` | durable workspace root (see [Cloud Agent filesystem](/developers/reference#executa-cloud-storage)) |
+| `ANNA_RUNTIME_PROFILE` | where you run: `cloud-linux` \| `desktop-macos` \| `desktop-windows` \| `desktop-linux` |
+| `ANNA_AGENT_VERSION` | the Matrix Agent version (for capability gating) |
+| `ANNA_CHROME_EXECUTABLE` | absolute path to the platform Chrome for Testing (only set when ready to run) |
+| `ANNA_CHROME_VERSION` | four-part Chrome version, e.g. `145.0.7632.6` |
+| `ANNA_CHROME_PROVIDER` | always `playwright-cft` |
+| `ANNA_NODE_EXECUTABLE` | absolute path to the shared platform Node.js (only set when available) |
+| `ANNA_NODE_VERSION` | full Node version, e.g. `22.14.0` |
+| `ANNA_RUNTIMES_JSON` | compact JSON summary of all of the above |
+
+The `ANNA_CHROME_*` / `ANNA_NODE_*` discovery contract is **presence-based**:
+a variable is only set when that runtime is actually usable on this Agent —
+never probe paths yourself, and never write into those directories. Full
+contract, version policy and usage templates: [Platform runtimes](/developers/tools/executa-platform-runtimes).
 
 This means your binary can `dlopen("libfoo.so", ...)`, your Python launcher can `Path(os.environ["EXECUTA_DATA"]) / "config.toml"`, etc.
 

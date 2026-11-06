@@ -97,7 +97,7 @@
         {
           "name": "UPLOAD_NOT_GRANTED",
           "code": -32201,
-          "desc": "User has not enabled `upload_grant` for this Executa, or the executa is disabled, or manifest is missing `host_capabilities: [\"host.upload\"]`."
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps)."
         },
         {
           "name": "QUOTA_EXCEEDED",
@@ -286,7 +286,7 @@
         "**`size_bytes` is advisory at sign time, enforced at confirm time.** Over-shipping bytes succeeds at R2 but `confirm` rejects with `UPLOAD_TOO_LARGE` (`head_object.ContentLength > max_file_bytes`). Under-shipping is allowed but wastes the quota you reserved.",
         "**Headers must match exactly** — copy `headers` verbatim into the PUT. Adding or omitting any of them invalidates the signature.",
         "**Negotiate does not count against `max_files`** — only `confirm` does, since negotiate may be cancelled. This means a misbehaving plugin can spam negotiate; the host throttles via the `upload_token` TTL (10 min) and Nexus's per-user rate-limit middleware.",
-        "**No partial / resumable uploads** — R2 multipart is not exposed to plugins. If your payload is larger than `max_file_bytes` (default 20 MiB, max 100 MiB by user grant), split it into multiple files application-side."
+        "**No partial / resumable uploads** — R2 multipart is not exposed to plugins. If your payload is larger than `max_file_bytes` (platform constant 20 MiB), split it into multiple files application-side."
       ]
     },
     {

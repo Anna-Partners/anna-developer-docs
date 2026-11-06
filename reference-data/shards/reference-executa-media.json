@@ -8,7 +8,7 @@
       "group": "Video · LLM video generation",
       "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ media reverse-RPC release (2026-10-08)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/media/video/generate` → executa_media_gate → app_media_facade (origin=executa) → fal queue → R2",
-      "summary": "Submit an async text-to-video / image-to-video job from a plugin. Same parameter space, state machine, pre-charge/refund billing and 30-min URL rule as the App Host API `video.generate`; gated by `host_capabilities: [\"llm.video\"]`, the user's `media_grant.video` and the `media_token` claim `allow_video`. No per-invoke job cap: each job is pre-charged in CU.",
+      "summary": "Submit an async text-to-video / image-to-video job from a plugin. Same parameter space, state machine, pre-charge/refund billing and 30-min URL rule as the App Host API `video.generate`; available to every installed, enabled Executa via the per-invoke `media_token` — nothing to declare. No per-invoke job cap: each job is pre-charged in CU.",
       "wire": {
         "json_rpc_method": "video/generate",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -48,7 +48,7 @@
         {
           "name": "VIDEO_NOT_GRANTED",
           "code": -32120,
-          "desc": "manifest `host_capabilities` lacks `llm.video`, `media_grant.video.enabled` is off, token claim `allow_video` false, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -131,7 +131,7 @@
         {
           "name": "VIDEO_NOT_GRANTED",
           "code": -32120,
-          "desc": "manifest `host_capabilities` lacks `llm.video`, `media_grant.video.enabled` is off, token claim `allow_video` false, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -179,7 +179,7 @@
         {
           "name": "VIDEO_NOT_GRANTED",
           "code": -32120,
-          "desc": "manifest `host_capabilities` lacks `llm.video`, `media_grant.video.enabled` is off, token claim `allow_video` false, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -207,7 +207,7 @@
       "group": "Audio · LLM speech synthesis",
       "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ media reverse-RPC release (2026-10-08)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/media/audio/speak` → executa_media_gate → app_media_facade.audio_speak (origin=executa) → TTS provider → R2 / inline",
-      "summary": "Synchronous TTS from a plugin — same parameters, voice/length validation and model resolution as the App `audio.speak`; gated by `host_capabilities: [\"llm.audio.speak\"]`, `media_grant.audio.{enabled, speak}`, token claim `allow_audio_speak` and a per-invoke character budget (`max_audio_chars`, default 8000).",
+      "summary": "Synchronous TTS from a plugin — same parameters, voice/length validation and model resolution as the App `audio.speak`; available to every installed, enabled Executa via the per-invoke `media_token`; a per-invoke character budget (`max_audio_chars`, 8000) applies.",
       "wire": {
         "json_rpc_method": "audio/speak",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -240,7 +240,7 @@
         {
           "name": "AUDIO_NOT_GRANTED",
           "code": -32140,
-          "desc": "Missing `llm.audio.speak` capability / grant / token claim, or Executa disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -290,7 +290,7 @@
       "group": "Audio · LLM speech recognition",
       "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ 2026-10-12 (`METHOD_AUDIO_TRANSCRIBE`) · nexus 1.1.0-beta.189",
       "direction": "Plugin → Agent → Nexus `POST /copilot/media/audio/transcribe` → executa_media_gate._gate_audio_transcribe → app_media_facade.audio_transcribe (request_type=EXECUTA_STT) → STT provider",
-      "summary": "Synchronous STT (≤ 10 min) from a plugin — 1:1 mirror of the App `audio.transcribe` contract under `audio/speak`'s security model; gated by `host_capabilities: [\"llm.audio.transcribe\"]`, `media_grant.audio.{enabled, transcribe}`, token claim `allow_audio_transcribe` and a per-invoke seconds budget (`max_audio_seconds`, default 600).",
+      "summary": "Synchronous STT (≤ 10 min) from a plugin — 1:1 mirror of the App `audio.transcribe` contract under `audio/speak`'s security model; available to every installed, enabled Executa via the per-invoke `media_token`; a per-invoke seconds budget (`max_audio_seconds`, 600) applies.",
       "wire": {
         "json_rpc_method": "audio/transcribe",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -337,7 +337,7 @@
         {
           "name": "AUDIO_NOT_GRANTED",
           "code": -32140,
-          "desc": "Missing `llm.audio.transcribe` capability / `media_grant.audio.transcribe` / token claim, Executa disabled — or host too old (`method_not_found` mapped by SDKs).",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps). Also what SDKs report when the host is too old to know `audio/transcribe` (`method_not_found`).",
           "retryable": false
         },
         {
@@ -395,7 +395,7 @@
       "group": "Music · LLM music generation",
       "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ music reverse-RPC release / nexus dispatcher 0.28.0 (2026-10-19)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/media/music/generate` → executa_media_gate → app_media_facade.music_generate (origin=executa) → fal queue → R2",
-      "summary": "Submit an async text-to-music job (lyrics / instrumental / duration / format / reference image / model-native `options`) from a plugin. Same parameter space, no-silent-downgrade validation, idempotency, state machine, pre-charge/refund billing and 30-min URL rule as the App Host API `music.generate`; gated by `host_capabilities: [\"llm.music\"]`, the user's `media_grant.music` and the `media_token` claim `allow_music`. No per-invoke job cap: each job is pre-charged in CU.",
+      "summary": "Submit an async text-to-music job (lyrics / instrumental / duration / format / reference image / model-native `options`) from a plugin. Same parameter space, no-silent-downgrade validation, idempotency, state machine, pre-charge/refund billing and 30-min URL rule as the App Host API `music.generate`; available to every installed, enabled Executa via the per-invoke `media_token` — nothing to declare. No per-invoke job cap: each job is pre-charged in CU.",
       "wire": {
         "json_rpc_method": "music/generate",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -435,7 +435,7 @@
         {
           "name": "MUSIC_NOT_GRANTED",
           "code": -32160,
-          "desc": "manifest `host_capabilities` lacks `llm.music`, `media_grant.music.enabled` is off, token claim `allow_music` false, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -525,7 +525,7 @@
         {
           "name": "MUSIC_NOT_GRANTED",
           "code": -32160,
-          "desc": "manifest `host_capabilities` lacks `llm.music`, `media_grant.music.enabled` is off, token claim `allow_music` false, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {
@@ -577,7 +577,7 @@
         {
           "name": "MUSIC_NOT_GRANTED",
           "code": -32160,
-          "desc": "manifest `host_capabilities` lacks `llm.music`, `media_grant.music.enabled` is off, token claim `allow_music` false, or the Executa is disabled.",
+          "desc": "Executa not installed or disabled by the user (re-enable it under Installed Apps).",
           "retryable": false
         },
         {

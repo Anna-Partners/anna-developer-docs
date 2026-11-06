@@ -4,7 +4,7 @@ description: "The bugs that show up most often when authors build Executa plugin
 section: tools
 slug: executa-pitfalls
 order: 14
-updated: 2026-10-26
+updated: 2026-11-02
 estimated_minutes: 8
 ---
 
@@ -260,27 +260,19 @@ The Agent already grants binary distributions a **60 s** describe timeout for th
 
 ---
 
-## 8 · Sampling — `host_capabilities` not declared
+## 8 · Sampling — v2 not negotiated
 
 **Symptom**
 
-Your plugin issues `sampling/createMessage`, the host returns `error: { code: -32008, message: "not_negotiated" }`, and the Agent log says *"executa X did not declare host_capabilities['llm.sample']"*.
+Your plugin issues `sampling/createMessage` and the host returns `error: { code: -32008, message: "not_negotiated" }`.
 
 **Cause**
 
-Even after v2 negotiation, Nexus refuses sampling unless the plugin's published manifest **also** declares the capability.
+The plugin did not complete the v2 handshake: it answered `initialize` with `Method not found`, timed out (5 s), or omitted `capabilities.sampling` from its reply, so the Agent silently downgraded the session to v1 and never forwards reverse RPCs. There is no manifest declaration to add — every installed, enabled Executa receives a `sampling_token` on each invoke.
 
 **Fix**
 
-```json
-{
-  "name": "my-tool",
-  "host_capabilities": ["llm.sample"],
-  "tools": [ /* ... */ ]
-}
-```
-
-Re-publish the Executa version and ask users to update. See [Sampling](/developers/tools/executa-sampling#three-pre-conditions).
+Reply to `initialize` with `protocolVersion: "2.0"` and the capabilities you use (`sampling`, `storage`, `media`, …). The official SDKs do this for you. See [Lifecycle](/developers/tools/executa-lifecycle#v2-capability-handshake).
 
 ---
 
@@ -297,35 +289,6 @@ The plugin returned the `invoke` result and immediately did `process.exit()` / `
 **Fix**
 
 Same as Pitfall #1 — the plugin process must be long-running. The official SDKs (`sdk/{python,nodejs,go}` in [anna-executa-examples](https://github.com/whtcjdtc2007/anna-executa-examples)) ship a single-reader-with-dispatch pattern that handles both Agent requests **and** host responses to your reverse RPCs. Use it.
-
----
-
-## 9a · Published executa shows no **Permission** button — `UPLOAD_NOT_GRANTED` / `-32201`
-
-**Symptom**
-
-You publish an App with a bundled executa via `anna-app apps publish` (or a standalone `executa publish`). The CLI reports success, the executa installs and runs — but its card on `/executa` has no **Permission** entry, so users cannot grant `host.upload` / `aps.*` / `llm.*`, and the first reverse-RPC call fails, e.g.:
-
-```json
-{ "code": -32201, "message": "Upload token missing — host did not authorize host/uploadFile",
-  "data": { "errorCode": "UPLOAD_NOT_GRANTED" } }
-```
-
-**Cause**
-
-The permission UI and every reverse-RPC token gate read the capability declaration from the executa's **protocol manifest registered on the server** (`manifest_cache`), not from the binary itself. CLI versions before `0.1.50` never uploaded that manifest, so the server had no idea which capabilities your plugin declares.
-
-**Fix**
-
-Upgrade to `anna-app` ≥ `0.1.50` and keep the plugin's `describe` manifest next to `executa.json` as `manifest.json` (or point at it with the `executa.json` `manifest_file` field). `executa publish` / `apps publish` / `apps push` then sync it to the server on every publish — the CLI prints `protocol manifest synced (host capabilities: …)` and warns when the file is missing.
-
-For executas already published without a manifest, any of these heals the row:
-
-- re-publish with CLI ≥ `0.1.50`;
-- a successful install / reinstall / upgrade on any Agent (the platform now caches the manifest the Agent gets from `describe`);
-- manually pasting the `describe` JSON in **/executa → My Tools → Edit → Manifest**.
-
-Note the capability strings are validated against the platform allow-list at write time — a typo like `host.uploadFile` is now rejected with HTTP 400 instead of silently hiding the Permission entry.
 
 ---
 
@@ -454,7 +417,7 @@ See the official demo `anna-executa-examples/examples/anna-app-long-task-demo`.
 `media.transcribe(...)` fails with `VIDEO_INVALID_REQUEST (-32122)` ("format is
 required for inline audio"), `AUDIO_TOO_LONG (-32143)`, or — after a few calls
 in the same invoke — `AUDIO_INVOKE_BUDGET_EXCEEDED (-32148)`. Or it simply
-returns `AUDIO_NOT_GRANTED (-32140)` even though the user granted audio.
+returns `AUDIO_NOT_GRANTED (-32140)`.
 
 **Cause**
 
@@ -469,10 +432,9 @@ returns `AUDIO_NOT_GRANTED (-32140)` even though the user granted audio.
    formats are estimated conservatively (25 s/MB) before the provider runs,
    then settled to the real duration — a 4 MB mp3 pre-reserves 100 s even if
    it is only 60 s long.
-4. **Separate capability.** `audio/transcribe` is gated by
-   `host_capabilities ∋ "llm.audio.transcribe"` **and** the user's
-   `media_grant.audio.transcribe` sub-toggle. Declaring `llm.audio.speak`
-   alone does not unlock it. An old host (pre 2026-10-12) answers
+4. **`-32140` means disabled or an old host.** `AUDIO_NOT_GRANTED` is
+   returned only when the user disabled the Executa (re-enable it under
+   Installed Apps). An old host (pre 2026-10-12) answers
    `method_not_found`, which the SDKs map to `-32140` as well.
 
 **Fix**
@@ -489,8 +451,6 @@ stt = await media.transcribe(audio_url=public_https_url)
   so both the 600 s cap and the invoke budget are precise.
 - Chunk by sentence/pause instead of sending one long buffer — it also gives
   the user earlier feedback.
-- Declare `"llm.audio.transcribe"` in `host_capabilities` and tell users to
-  enable the **transcribe** toggle in the media permission dialog.
 
 See [Media](/developers/tools/executa-media#audiotranscribe).
 
@@ -548,6 +508,47 @@ See [Sampling → Thinking models](/developers/tools/executa-sampling#thinking-m
 
 ---
 
+## 16 · Platform Chrome / Node — bundling what the Agent already has
+
+**Symptom**
+
+- Your Executa package is 300+ MiB because it ships a full Chrome and/or an
+  embedded Node runtime.
+- `puppeteer` re-downloads Chrome during `npm install` even though you meant
+  to use the platform browser.
+- Headless rendering works on your machine but crashes on Cloud Agents.
+- Your code pins an exact Chrome build (`146.0.7680.153`) and breaks on the
+  next platform upgrade.
+
+**Cause**
+
+Every Agent already provides Chrome for Testing and a shared Node 22 LTS via
+the discovery contract (`ANNA_CHROME_EXECUTABLE` / `ANNA_NODE_EXECUTABLE`).
+Common mistakes:
+
+- using the full `puppeteer` package — its postinstall silently downloads its
+  own Chrome (hundreds of MiB into your build);
+- forgetting `--no-sandbox --disable-dev-shm-usage` — Cloud Agents run as a
+  non-root user without user namespaces and with a tiny `/dev/shm`;
+- pinning to an exact Chrome build — the platform follows the Playwright pin
+  and only promises major-version stability windows.
+
+**Fix**
+
+- Use `puppeteer-core` + `executablePath: process.env.ANNA_CHROME_EXECUTABLE`,
+  and set `"puppeteer": {"skipDownload": true}` in `package.json`.
+- Always launch with `args: ["--no-sandbox", "--disable-dev-shm-usage"]` for
+  cloud compatibility (harmless on desktop).
+- Compare Chrome versions by **major** only, and declare
+  `runtime.requires` (e.g. `{"chrome": ">=140 <147"}`) so installs fail
+  loudly rather than render wrongly after an upgrade.
+- For Node tools, ship a shell-shim entrypoint that `exec`s
+  `$ANNA_NODE_EXECUTABLE` instead of embedding Node.
+
+See [Platform runtimes](/developers/tools/executa-platform-runtimes).
+
+---
+
 ## See also
 
 - [Lifecycle & Capability Negotiation](/developers/tools/executa-lifecycle)
@@ -555,3 +556,4 @@ See [Sampling → Thinking models](/developers/tools/executa-sampling#thinking-m
 - [Sampling](/developers/tools/executa-sampling)
 - [Persistent Storage](/developers/tools/executa-storage)
 - [Binary Distribution](/developers/tools/executa-binary)
+- [Platform runtimes](/developers/tools/executa-platform-runtimes)

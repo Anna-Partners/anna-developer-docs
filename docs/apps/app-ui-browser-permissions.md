@@ -4,7 +4,7 @@ description: "Declare the browser features (Permissions Policy) your App iframe 
 section: apps
 slug: app-ui-browser-permissions
 order: 18
-updated: 2026-10-23
+updated: 2026-11-02
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -18,13 +18,13 @@ unless your manifest asks for it. This is a different layer from the
 
 | Layer | What it controls | Who enforces it | Where you declare it |
 |---|---|---|---|
-| Host API ACL | Which host functions your bundle may call (`anna.audio.transcribe`, `anna.llm.complete`, …) — billing, quotas, server-side grants | Anna host (RPC dispatcher) | `ui.host_api.<namespace>: [method, …]` |
+| Host API | Host functions your bundle calls (`anna.audio.transcribe`, `anna.llm.complete`, …) — billing, quotas. Available to every installed App; only `credentials` / `agent.tools` are declared | Anna host (RPC dispatcher) | `ui.host_api.credentials` / `ui.host_api.agent.tools` ([capability declarations](/developers/apps/app-manifest#capability-declarations)) |
 | Browser permissions | Which **Web APIs** your iframe document may use (`getUserMedia`, `requestFullscreen`, `wakeLock.request`, …) | The **browser**, via the iframe `allow` attribute and the bundle's `Permissions-Policy` response header | `ui.browser_permissions: [feature, …]` |
 
 `microphone` is not a host function — the host does not *provide* a
 microphone, it only decides whether to delegate the browser feature to your
-document. That is why it has its own field instead of living inside
-`ui.host_api.audio`.
+document. That is why it has its own field rather than living inside
+`host_api`.
 
 ## Declaring features
 
@@ -32,7 +32,6 @@ document. That is why it has its own field instead of living inside
 {
   "ui": {
     "bundle": { "entry": "index.html" },
-    "host_api": { "audio": ["speak", "transcribe"] },
     "browser_permissions": ["microphone"]
   }
 }
@@ -61,10 +60,9 @@ Everything else (`payment`, `usb`, `midi`, `xr-spatial-tracking`,
 `clipboard-write` needs no declaration — the browser's default already allows
 it for your same-origin document.
 
-**Privacy-tier** features appear in the App's permission summary (install
-consent, App detail, reviewer view) as the codes above, whether you declared
-them explicitly or they were implied (below). Reviewers may ask you to
-explain their use in your listing description.
+**Privacy-tier** features are shown to reviewers alongside the manifest's
+[capability declarations](/developers/apps/app-manifest#capability-declarations).
+Reviewers may ask you to explain their use in your listing description.
 
 ## What the host does with it
 
@@ -82,20 +80,21 @@ asking the user, with `NotAllowedError: Permission denied` and a console line
 The iframe `sandbox` attribute is unrelated and is never changed by this
 field.
 
-## Implied grants
+## Implied features
 
-Two existing declarations keep implying features so published Apps do not
-change behaviour. Declaring the feature explicitly as well is allowed and
-recommended for clarity:
+One other declaration implies browser features:
 
 | You declare | Implied browser permission |
 |---|---|
-| `"host_api": { "audio": ["session"] }` ([realtime voice session](/developers/apps/app-ui-audio-session)) | `microphone` — the session captures the mic inside your iframe |
 | `"csp_overrides": { "frame-src": ["https://www.youtube.com"] }` ([embedded players](/developers/apps/app-ui-bundle)) | `autoplay`, `encrypted-media`, `fullscreen`, `picture-in-picture` — for your document **and** the declared embed origins, so the nested player can be re-delegated the feature |
 
-`"audio": ["transcribe"]` does **not** imply the microphone: transcription can
-run on uploaded files or URLs, so recording is a separate decision you make
-with `"browser_permissions": ["microphone"]`.
+Nothing in `host_api` implies the microphone any more. The
+[realtime voice session](/developers/apps/app-ui-audio-session) and
+`audio.transcribe` recordings both need an explicit
+`"browser_permissions": ["microphone"]`. Legacy manifests that declared
+`"host_api": { "audio": ["session"] }` are normalized on ingest — the host
+adds `microphone` to their `browser_permissions` — so published voice Apps
+keep working without a republish.
 
 ## Checking at runtime
 

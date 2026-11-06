@@ -1,7 +1,10 @@
 # Machine-checkable claims for docs/tools/executa-lifecycle.md (design §5.3.1).
 # Asserted by scripts/check_claims.py against the published @anna-ai/app-schema
-# bundle and against the article body (forum #248 item 1).
-capabilities:
-  - llm.sample
-  - aps.kv
-  - aps.files
+# bundle and against the article body. Since bundle 0.33.0 the plugin manifest
+# has no host_capabilities allow-list; the only declarable thing is a storage
+# scope.
+storage_scopes:
+  - user
+  - tool
+storage_modes:
+  - rw

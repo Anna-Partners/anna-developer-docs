@@ -21,10 +21,10 @@
           "type": "'auto' | 'fixed'",
           "default": null,
           "required": true,
-          "summary": "Tool-resolution mode. `auto` lets the LangGraph runner pick any tool the user's Executa Agent exposes (constrained by `manifest.ui.host_api.agent.tools`). `fixed` pins the run to a single `client_id` (one specific Executa) and rejects any other tool.",
+          "summary": "Tool-resolution mode. `auto` lets the LangGraph runner pick any tool the user's Executa Agent exposes (host-kit tools constrained by `manifest.ui.host_api.agent.tools`). `fixed` pins the run to a single `client_id` (one specific Executa) and rejects any other tool.",
           "notes": [
             "`invalid_arg` if absent or not exactly `'auto'` / `'fixed'`.",
-            "`permission_denied` if the chosen submode is `false` in `manifest.ui.host_api.agent.session.{auto,fixed}` — the manifest must opt into each submode explicitly."
+            "Both submodes are available to every installed App — nothing to declare."
           ]
         },
         {
@@ -35,7 +35,7 @@
           "summary": "Executa `client_id` the run is pinned to. Required for `submode='fixed'`; ignored for `submode='auto'`. SDK also accepts the camelCase alias `fixedClientId`.",
           "notes": [
             "`invalid_arg` if missing when `submode='fixed'`.",
-            "`permission_denied` if not present in `manifest.ui.host_api.agent.session.fixed.client_ids` (when that list is non-empty — an empty list means \"any user-owned Executa\")."
+            "`-32004 invalid request` if the client is not one of the current user's registered Agent clients; an offline client is accepted with a warning."
           ]
         },
         {
@@ -54,7 +54,7 @@
           "name": "quotaCaps",
           "type": "{allowed_tools?, inherit_host_tools?, …}",
           "required": false,
-          "summary": "Capability bounds for the session. `allowed_tools` narrows within the manifest-declared set — the effective surface is `AppToolRegistry ∩ ui.host_api.agent.tools ∩ allowed_tools` (declaration-is-consent: no per-tool user grant exists). `inherit_host_tools` is **deprecated-ignored for app sessions** (accepted, never 400; the run emits an `INHERIT_IGNORED` warning frame) — declare the tools you need instead, or declare `[\"*\"]` for the full platform registry. The numeric keys (`max_tokens_per_call`, `max_runs_per_day`, `max_concurrent_runs`) are likewise deprecated and ignored.",
+          "summary": "Capability bounds for the session. `allowed_tools` narrows the effective surface `requested ∩ (server_side ∪ (host_kit ∩ ui.host_api.agent.tools))` — server-side tools need no declaration; host-kit tools only resolve when declared (declaration-is-consent, no per-tool user toggle). `inherit_host_tools` is **deprecated-ignored for app sessions** (accepted, never 400; the run emits an `INHERIT_IGNORED` warning frame) — declare the tools you need instead, or declare `[\"*\"]` for every host-kit tool. The numeric keys (`max_tokens_per_call`, `max_runs_per_day`, `max_concurrent_runs`) are likewise deprecated and ignored.",
           "notes": [
             "Deprecated keys are accepted-and-ignored (server logs a warning; never a 400) — existing apps keep working unchanged.",
             "Requesting a tool name the manifest does not declare silently intersects it away — use `agent.session.catalog()` to check `blocked_by` before creating the session.",
@@ -64,7 +64,7 @@
       ],
       "returns": {
         "type": "{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}",
-        "desc": "• `app_session_uuid`: `aps_`-prefixed uuid; thread through every subsequent agent call.\n• `expires_in`: TTL in seconds for the cached capability token (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early). For absolute deadlines (`expires_at` / `max_lifetime_at` / `session_expires_in`) call `agent.session.refresh`.\n• `submode` / `fixed_client_id`: echoed back so the SDK can stash them on the `AgentSession` wrapper.\n• `system_prompt`: the validated per-session system prompt persisted on the row (or `null`).\n• `granted_tools`: the tool surface resolved for this session at creation time — `AppToolRegistry ∩ manifest ui.host_api.agent.tools (\"*\" expands to the full registry) ∩ quotaCaps.allowed_tools`. Runtime-accurate, NOT a raw manifest echo; identical for every user of the same app version.\n• `inherit_host_tools`: always `false` for app sessions (the inherit request semantics were removed — declaration-is-consent). When `granted_tools` is empty the agent is text-only (watch for the `run_meta` `NO_TOOLS_AVAILABLE` warning frame): declare the tools in `ui.host_api.agent.tools`."
+        "desc": "• `app_session_uuid`: `aps_`-prefixed uuid; thread through every subsequent agent call.\n• `expires_in`: TTL in seconds for the cached capability token (`_cache_aps_token` stores `ttl - 30s` to refresh slightly early). For absolute deadlines (`expires_at` / `max_lifetime_at` / `session_expires_in`) call `agent.session.refresh`.\n• `submode` / `fixed_client_id`: echoed back so the SDK can stash them on the `AgentSession` wrapper.\n• `system_prompt`: the validated per-session system prompt persisted on the row (or `null`).\n• `granted_tools`: the tool surface resolved for this session at creation time — `quotaCaps.allowed_tools ∩ (server_side ∪ (host_kit ∩ manifest ui.host_api.agent.tools))` (`\"*\"` = every host-kit tool). Runtime-accurate, NOT a raw manifest echo; identical for every user of the same app version.\n• `inherit_host_tools`: always `false` for app sessions (the inherit request semantics were removed — declaration-is-consent). When `granted_tools` is empty the agent is text-only (watch for the `run_meta` `NO_TOOLS_AVAILABLE` warning frame): declare the host-kit tools you need in `ui.host_api.agent.tools`."
       },
       "errors": [
         {
@@ -75,17 +75,17 @@
         {
           "name": "permission_denied",
           "code": "permission_denied",
-          "desc": "Manifest has no `host_api.agent` grant, the chosen submode is `false`, or `fixed_client_id` is not in the manifest's fixed allow-list."
+          "desc": "Window not yours / inactive."
         },
         {
           "name": "APP_NOT_GRANTED",
           "code": "APP_NOT_GRANTED",
-          "desc": "User has no `llm_grant.agent` block, no active subscription, or the user row vanished. `details.jsonrpc_code = -32001`."
+          "desc": "App not installed, disabled by the user, or no active subscription. `details.jsonrpc_code = -32001`."
         },
         {
           "name": "APP_AGENT_SUBMODE_MISMATCH",
           "code": "APP_AGENT_SUBMODE_MISMATCH",
-          "desc": "User's grant `submode` differs from the request. `details.jsonrpc_code = -32016`."
+          "desc": "Retained wire code; no longer raised (there is no per-user submode setting). `details.jsonrpc_code = -32016`."
         },
         {
           "name": "APP_INVALID_REQUEST",
@@ -103,11 +103,11 @@
           "desc": "Local-dev harness without an agent bridge."
         }
       ],
-      "example": "// Auto-submode: lean sandbox scoped to the manifest-declared tools.\nconst sess = await anna.agent.session.create({\n  submode: \"auto\",\n  label: \"daily-summary\",\n  quotaCaps: { allowed_tools: [\"doc_read\"] },  // narrows within ui.host_api.agent.tools\n});\n// → { app_session_uuid: \"aps_…\", expires_in: 3600, submode: \"auto\",\n//     fixed_client_id: null, granted_tools: [\"doc_read\"], inherit_host_tools: false }\n\n// Fixed-submode: pin to one Executa.\nconst pinned = await anna.agent.session.create({\n  submode: \"fixed\",\n  fixed_client_id: \"executa-write-notes-abc123\",\n});\n",
+      "example": "// Auto-submode: lean sandbox; doc_read is server-side, so nothing to declare.\nconst sess = await anna.agent.session.create({\n  submode: \"auto\",\n  label: \"daily-summary\",\n  quotaCaps: { allowed_tools: [\"doc_read\"] },  // narrows the effective surface\n});\n// → { app_session_uuid: \"aps_…\", expires_in: 3600, submode: \"auto\",\n//     fixed_client_id: null, granted_tools: [\"doc_read\"], inherit_host_tools: false }\n\n// Fixed-submode: pin to one Executa.\nconst pinned = await anna.agent.session.create({\n  submode: \"fixed\",\n  fixed_client_id: \"executa-write-notes-abc123\",\n});\n",
       "limitations": [
         "`AnnaAppSession` rows accumulate — call `agent.session.delete` (or rely on `expires_in`) to avoid leaking entries in admin views.",
-        "`granted_tools` is resolved at creation from the platform registry ∩ the installed version's manifest declaration — declaration-is-consent: there is NO per-tool user grant, so the surface is identical for every user. Host-kit tools (fs / exec / browser) still need the user's agent online to actually execute.",
-        "`quotaCaps.allowed_tools` cannot exceed the manifest declaration — undeclared names are silently intersected away (declare them in `ui.host_api.agent.tools`, or declare `[\"*\"]`, and republish).",
+        "`granted_tools` is resolved at creation as `requested ∩ (server_side ∪ (host_kit ∩ manifest.agent.tools))` — declaration-is-consent for local-device tools, no per-tool user toggle, so the surface is identical for every user of the same app version. Host-kit tools (fs / exec / browser) still need the user's agent online to actually execute.",
+        "`quotaCaps.allowed_tools` cannot add undeclared host-kit tools — they are silently intersected away (declare them in `ui.host_api.agent.tools`, or declare `[\"*\"]`, and republish). Server-side tools are always eligible.",
         "The high-level SDK helper `await anna.agent.session({...})` (note: callable, no `.create`) returns a JS `AgentSession` instance with `.run()` / `.cancel()` / `.history()` / `.delete()` methods bound to the new uuid — prefer it over manual uuid threading."
       ]
     },
@@ -121,15 +121,15 @@
       "summary": "Discover the platform-tool universe for agent sessions BEFORE creating one. Answers two questions that were previously unanswerable from an app: (1) what is the full set of legal `allowed_tools` names (the AppToolRegistry), and (2) which of them would actually resolve for THIS app — with a `blocked_by` diagnostic for each unavailable tool. Read-only: mints no session, consumes no quota, touches no LangGraph state.",
       "wire": {
         "json_rpc_method": "agent.session.catalog",
-        "auth": "Handled by the host page — same envelope as every agent.* method. Granted whenever ANY agent submode is enabled in `ui.host_api.agent.session`.",
+        "auth": "Handled by the host page — same envelope as every agent.* method. Available to every installed App.",
         "streaming": false,
-        "upstream": "Pure metadata read: AppToolRegistry (in-process) + the caller's `llm_grant` row. No facade / worker involvement."
+        "upstream": "Pure metadata read: AppToolRegistry (in-process) + the installed version's manifest. No facade / worker involvement."
       },
       "signature": "anna.agent.session.catalog() → Promise<CatalogResult>",
       "params": [],
       "returns": {
-        "type": "{platform_tools: {name, description, dev_safe, risk_group: 'server-side'|'host-kit', declared_in_manifest, user_granted, eligible, blocked_by?: 'manifest'}[], inherit_host_tools_granted: boolean, manifest_declared: string[], declared_wildcard: boolean, user_granted: string[]}",
-        "desc": "`platform_tools` enumerates the ENTIRE sandbox registry (not just your eligible subset) so developers can see what exists and what to request. Declaration-is-consent: `eligible` = `declared_in_manifest`; the only `blocked_by` value is `manifest` → add the tool to `ui.host_api.agent.tools` (or declare `[\"*\"]`) and republish. `risk_group` distinguishes server-side tools (doc_read / sheet_read / web_search) from host-kit tools (fs / exec / browser — real side effects on the user's machine, flagged ⚠ in the permission gate). `declared_wildcard` reports whether the manifest declares `[\"*\"]`; `manifest_declared` echoes the RESOLVED name list (wildcard expanded). Deprecated fields kept one release for SDK compatibility: `user_granted` (now an `eligible` echo) and `inherit_host_tools_granted` (always `false` — app-session inherit was removed)."
+        "type": "{platform_tools: {name, description, dev_safe, risk_group: 'server-side'|'host-kit', declared_in_manifest, eligible, blocked_by?: 'manifest'}[], manifest_declared: string[], declared_wildcard: boolean}",
+        "desc": "`platform_tools` enumerates the ENTIRE sandbox registry (not just your eligible subset) so developers can see what exists and what to request. `eligible` is `true` for every server-side tool and for host-kit tools that are `declared_in_manifest`; the only `blocked_by` value is `manifest` → add the host-kit tool to `ui.host_api.agent.tools` (or declare `[\"*\"]`) and republish. `risk_group` distinguishes server-side tools (doc_read / sheet_read / web_search) from host-kit tools (fs / exec / browser — real side effects on the user's machine; declaring any adds a *Local device access* line to the Store summary). `declared_wildcard` reports whether the manifest declares `[\"*\"]`; `manifest_declared` echoes the RESOLVED name list (wildcard expanded). The former `user_granted` / `inherit_host_tools_granted` echoes were removed."
       },
       "errors": [
         {
@@ -138,7 +138,7 @@
         },
         {
           "code": "APP_NOT_GRANTED",
-          "when": "The app is not installed / not enabled for this user (mirrors the create-time grant check)."
+          "when": "App not installed, disabled by the user, or no active subscription."
         },
         {
           "code": "not_implemented",
@@ -214,7 +214,7 @@
           "name": "modelPreferences",
           "type": "object",
           "required": false,
-          "summary": "Same shape as `llm.complete` — `hints` / `costPriority` / `speedPriority` / `intelligencePriority`. SOFT preference, never a hard requirement: a hint that doesn't resolve (or a model outside the user's grant) does NOT fail the run — the server falls back (hints → user's preferred model → default provider, plus a worker-side fallback if the dispatched model is unavailable at execution time). Verify the actual route via `run_meta.model` (pre-token) or `task_complete.model` (terminal) — forum #270."
+          "summary": "Same shape as `llm.complete` — `hints` / `costPriority` / `speedPriority` / `intelligencePriority`. SOFT preference, never a hard requirement: a hint that doesn't resolve (or a model the user cannot use) does NOT fail the run — the server falls back (hints → user's preferred model → default provider, plus a worker-side fallback if the dispatched model is unavailable at execution time). Verify the actual route via `run_meta.model` (pre-token) or `task_complete.model` (terminal) — forum #270."
         },
         {
           "name": "maxTokens",
@@ -274,7 +274,7 @@
         {
           "name": "APP_TOOL_NOT_GRANTED",
           "code": "APP_TOOL_NOT_GRANTED",
-          "desc": "Run tried to invoke a tool outside `manifest.ui.host_api.agent.tools` (or outside `allowed_tools` for this run). `details.jsonrpc_code = -32014`."
+          "desc": "Run tried to invoke a tool outside the session's effective tool set (undeclared host-kit tool, or outside `allowed_tools` for this run). `details.jsonrpc_code = -32014`."
         },
         {
           "name": "APP_PROVIDER_ERROR",

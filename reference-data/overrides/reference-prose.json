@@ -5,7 +5,7 @@
     "items": [
       {
         "name": "schema",
-        "desc": "Manifest schema version. Integer in [1, 2]. Defaults to 1.",
+        "desc": "Manifest schema version. Integer in [1, 4]; `4` is current. Schema 1–3 manifests are accepted at every ingest point and normalized to 4 (`permissions` dropped, `host_capabilities` `aps.scope.*` folded into `storage.scopes`, `ui.host_api` method lists dropped, `audio ∋ \"session\"` → `browser_permissions += microphone`, stray `host_api.tools` refs → `optional_executas`).",
         "tags": [
           {
             "label": "int"
@@ -23,28 +23,10 @@
       },
       {
         "name": "optional_executas",
-        "desc": "Executas the App can use if installed but does not require. Same shape as `required_executas`.",
+        "desc": "Executas the App can use if installed but does not require. Same shape as `required_executas`. Together with `required_executas` this is the only allow-list for `tools.invoke` from the bundle.",
         "tags": [
           {
             "label": "ManifestExecutaRef[]"
-          }
-        ]
-      },
-      {
-        "name": "host_capabilities",
-        "desc": "Strict allow-list of host-mediated capability strings (validated against `_ALLOWED_HOST_CAPABILITIES`): `aps.kv`, `aps.files`, `aps.scope.*`, `llm.sample`, `llm.complete`, `llm.embed`, `llm.agent.*`, `llm.image`, `web.*`, `host.upload`. Each bundled Executa must also declare its own `host_capabilities`; per-invoke tokens are gated on the Executa declaration + the user's grant.",
-        "tags": [
-          {
-            "label": "string[]"
-          }
-        ]
-      },
-      {
-        "name": "permissions",
-        "desc": "Coarse permission tokens shown to the user at install time and enforced at the dispatcher.",
-        "tags": [
-          {
-            "label": "string[]"
           }
         ]
       },
@@ -77,7 +59,7 @@
       },
       {
         "name": "ui",
-        "desc": "UI bundle section: declares bundle entry, views, host_api grants, CSP overrides. See \"UI manifest\".",
+        "desc": "UI bundle section: bundle entry, views, the `credentials` / `agent.tools` capability declarations, `browser_permissions`, CSP overrides. See \"UI manifest\".",
         "tags": [
           {
             "label": "UiManifestSection"
@@ -99,7 +81,7 @@
       },
       {
         "name": "storage",
-        "desc": "Structured APS storage declaration (schema 3, design aps-authorization-simplification §6.1): `{kv?: bool, files?: bool, scopes?: {…}}`. Replaces the legacy `aps.*` capability strings in `host_capabilities` — the two forms are mutually exclusive (validator-enforced). Normalization lives in `storage_decl.py`.",
+        "desc": "Cross-app data declaration: `{ scopes: { user | app | tool: \"r\" | \"w\" | \"rw\" } }`. Your own `scope=app` bucket needs no declaration; listed scopes are enforced by the iframe `storage.*` / `files.*` scope gate (`permission_denied` otherwise). Legacy `aps.scope.*` strings normalize to the same shape; `storage.kv` / `storage.files` (schema 3) are dropped on ingest.",
         "tags": [
           {
             "label": "schema 3"
@@ -116,7 +98,7 @@
     "items": [
       {
         "name": "agent.session.create",
-        "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Validates `submode` against the manifest grant and `fixed_client_id` against the allow-list; optional `systemPrompt` overrides the agent's system prompt. Tool surface is declaration-is-consent: `AppToolRegistry ∩ manifest ui.host_api.agent.tools (`[\"*\"]` = full registry) ∩ quotaCaps.allowed_tools` — no per-tool user grant exists. `quotaCaps.inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (accepted, never 400; inherit requests emit an `INHERIT_IGNORED` run warning). Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is the resolved intersection; `inherit_host_tools` is always `false` for app sessions).",
+        "desc": "Mint a server-side `AnnaAppSession` (kind=`agent`). Both submodes are available to every installed App; `fixed_client_id` must be one of the current user's registered Agent clients (otherwise `-32004`; offline is accepted with a warning). Optional `systemPrompt` overrides the agent's system prompt. Tool surface is declaration-is-consent: `requested ∩ (server_side ∪ (host_kit ∩ manifest ui.host_api.agent.tools))` — server-side tools never need declaring, host-kit tools (`fs_*` / `exec_*` / `browser_*`) only resolve when declared (`[\"*\"]` = every host-kit tool). `quotaCaps.inherit_host_tools` and the numeric keys (`max_tokens_per_call` / `max_runs_per_day`) are deprecated and ignored (accepted, never 400; inherit requests emit an `INHERIT_IGNORED` run warning). Returns `{app_session_uuid, expires_in, submode, fixed_client_id, system_prompt, granted_tools, inherit_host_tools}` (`granted_tools` is the resolved set; `inherit_host_tools` is always `false` for app sessions).",
         "tags": [
           {
             "label": "submode"
@@ -134,7 +116,7 @@
       },
       {
         "name": "agent.session.catalog",
-        "desc": "Pre-create discovery of the platform-tool universe: which names are legal in create-time `quotaCaps.allowed_tools` / per-run `allowed_tools`, and whether they would resolve for THIS app. Returns `{platform_tools: [{name, description, dev_safe, risk_group, declared_in_manifest, user_granted, eligible, blocked_by?}], inherit_host_tools_granted, manifest_declared, declared_wildcard, user_granted}`. Declaration-is-consent: the only `blocked_by` value is `manifest` (= not declared in `ui.host_api.agent.tools` — declare it, or declare `[\"*\"]`, and republish); `risk_group` separates server-side tools from host-kit tools (⚠ local side effects). `user_granted` / `inherit_host_tools_granted` are deprecated echoes kept one release. Read-only — mints no session, consumes no quota.",
+        "desc": "Pre-create discovery of the platform-tool universe: which names are legal in create-time `quotaCaps.allowed_tools` / per-run `allowed_tools`, and whether they would resolve for THIS app. Returns `{platform_tools: [{name, description, dev_safe, risk_group, declared_in_manifest, eligible, blocked_by?}], manifest_declared, declared_wildcard}`. The only `blocked_by` value is `manifest` (= a host-kit tool not declared in `ui.host_api.agent.tools` — declare it, or declare `[\"*\"]`, and republish); `risk_group` separates server-side tools from host-kit tools (⚠ local side effects). Read-only — mints no session, consumes no quota.",
         "tags": [
           {
             "label": "discovery"
@@ -273,16 +255,6 @@
             "kind": "stub"
           }
         ]
-      },
-      {
-        "name": "chat.read_history",
-        "desc": "Read prior turns of the chat thread. **Phase-3 stub — raises `not_implemented`.**",
-        "tags": [
-          {
-            "label": "stub",
-            "kind": "stub"
-          }
-        ]
       }
     ]
   },
@@ -291,7 +263,7 @@
     "items": [
       {
         "name": "llm.complete",
-        "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ model output cap, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences ∩ user-grant`. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED`, `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
+        "desc": "MCP-shaped single-shot completion. `messages` required (array, non-empty). Effective output cap = `min(maxTokens ∥ model output cap, model output cap, 8192 sync ceiling)` — echoed in `_meta.maxTokens` (`{requested, effective, limitedBy}`); long outputs belong on `llm.stream` (SDK ≥ 0.17.0 auto-routes `maxTokens > 8192` over the streaming channel). Provider + model resolved server-side from `modelPreferences` and the user's preferences. Returns `{role, content:{type:'text', text}, model, stopReason:'endTurn'|'maxTokens'|'contentFilter'|'toolUse', usage:{inputTokens, outputTokens, totalTokens}, _meta:{provider, latencyMs, quotaConsumed, appSessionUuid, maxTokens}}`. Errors: `APP_NOT_GRANTED` (App not installed / disabled / no subscription), `APP_INVALID_REQUEST`, `APP_QUOTA_EXCEEDED` (worst-case precheck; data carries `requiredCu`/`remainingCu`/`requestedMaxTokens`), `APP_PROVIDER_ERROR`.",
         "tags": [
           {
             "label": "MCP-shaped"
@@ -309,7 +281,7 @@
       },
       {
         "name": "llm.stream",
-        "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); omitted `maxTokens` defaults to the model's own output cap (host ≥ 1.1.0-beta.200 — the worst-case precheck follows, so low-balance users should pass a smaller `maxTokens`); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Grant via `manifest.ui.host_api.llm` containing `stream` (or `*`); same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
+        "desc": "Streaming L1 completion (SDK ≥ 0.10.0 / dispatcher ≥ 0.12.0). Same request shape as `llm.complete` but returns an async-iterable stream: `{event:'model_token', text}` frames followed by a terminal `{event:'complete', role, content, model, stopReason, usage, _meta}` over the shared `rpc.stream` topic. Output ceiling 65 536 tokens (vs 8 192 sync); omitted `maxTokens` defaults to the model's own output cap (host ≥ 1.1.0-beta.200 — the worst-case precheck follows, so low-balance users should pass a smaller `maxTokens`); terminal frames with > ~48 KB accumulated text omit `content.text` (`_meta.textOmitted` + `_meta.textLength`) — accumulate the token frames. Nothing to declare; same quota model as `complete`. Old hosts return `-32601` — feature-detect and fall back to `llm.complete`.",
         "tags": [
           {
             "label": "MCP-shaped"
@@ -324,7 +296,7 @@
       },
       {
         "name": "llm.catalog",
-        "desc": "Capability discovery: `{serviceType?: 'video_gen'|'image_gen'|'image_edit'|'tts'|'stt'}` → `{models:[{modelName, displayName, serviceTypes, isUserPreferred, capabilities, pricing}], quota:{remainingCU}}`. Only service types the App is **granted** are returned (ungranted → empty list, never an error) so you can feature-detect and degrade. Prices are in CU; TTS entries carry `voices`/`defaultVoice`/`options`/`maxCharsPerCall`, video entries carry `duration`/`resolutions`/`aspectRatios`/`imageToVideo`/`audio`."
+        "desc": "Capability discovery: `{serviceType?: 'video_gen'|'image_gen'|'image_edit'|'tts'|'stt'}` → `{models:[{modelName, displayName, serviceTypes, isUserPreferred, capabilities, pricing}], quota:{remainingCU}}`. A service type with no routable model yields an empty list, never an error, so you can feature-detect and degrade. Prices are in CU; TTS entries carry `voices`/`defaultVoice`/`options`/`maxCharsPerCall`, video entries carry `duration`/`resolutions`/`aspectRatios`/`imageToVideo`/`audio`."
       }
     ]
   },
@@ -337,12 +309,7 @@
       },
       {
         "name": "image.edit",
-        "desc": "Restyle / mask-edit an existing `image_url` per a text `prompt`. Optional `mask_url` for inpainting where the provider supports it. Source is not modified; results land in fresh R2 objects. Provider safety rejections now surface as `IMAGE_CONTENT_REJECTED` (-32115) instead of `APP_PROVIDER_ERROR`; artifacts stay re-signable via `image.resign`.",
-        "tags": [
-          {
-            "label": "edit grant"
-          }
-        ]
+        "desc": "Restyle / mask-edit an existing `image_url` per a text `prompt`. Optional `mask_url` for inpainting where the provider supports it. Source is not modified; results land in fresh R2 objects. Provider safety rejections now surface as `IMAGE_CONTENT_REJECTED` (-32115) instead of `APP_PROVIDER_ERROR`; artifacts stay re-signable via `image.resign`."
       },
       {
         "name": "image.generateAsync",
@@ -361,7 +328,7 @@
       },
       {
         "name": "image.editAsync",
-        "desc": "Submit an **async** edit job with the body of `image.edit` (`image_url`, optional `mask_url`) plus `clientTag?` / `idempotencyKey?` → `{jobId:'ijob_…', …}`. Requires `image_grant.allowEdit`; a `mask_url` on a model without `capabilities.edit.mask` fails with `IMAGE_EDIT_MASK_UNSUPPORTED` (-32312) — never a silent whole-image edit. Input images are re-hosted by the platform before submission so an expiring presigned input URL cannot break a queued job.",
+        "desc": "Submit an **async** edit job with the body of `image.edit` (`image_url`, optional `mask_url`) plus `clientTag?` / `idempotencyKey?` → `{jobId:'ijob_…', …}`. A `mask_url` on a model without `capabilities.edit.mask` fails with `IMAGE_EDIT_MASK_UNSUPPORTED` (-32312) — never a silent whole-image edit. Input images are re-hosted by the platform before submission so an expiring presigned input URL cannot break a queued job.",
         "tags": [
           {
             "label": "async job"
@@ -393,7 +360,7 @@
       },
       {
         "name": "image.resign",
-        "desc": "`{r2Keys: string[]}` (1–20) → `{urls:[{r2Key, url, expiresIn}]}` in input order: re-sign **already-paid** artifacts — `images[].r2_key` from a sync `image.generate` / `image.edit` response or `result.images[].r2Key` from a job — for up to 7 days after creation, instead of losing them after the 30-min URL TTL. Also accepts your own video / music artifact keys. Free, no quota. Any key that is not yours (or malformed) fails the **whole call** with `IMAGE_ASSET_NOT_FOUND` (-32117, `data.index`); no partial success. Needs only `image_grant.enabled`.",
+        "desc": "`{r2Keys: string[]}` (1–20) → `{urls:[{r2Key, url, expiresIn}]}` in input order: re-sign **already-paid** artifacts — `images[].r2_key` from a sync `image.generate` / `image.edit` response or `result.images[].r2Key` from a job — for up to 7 days after creation, instead of losing them after the 30-min URL TTL. Also accepts your own video / music artifact keys. Free, no quota. Any key that is not yours (or malformed) fails the **whole call** with `IMAGE_ASSET_NOT_FOUND` (-32117, `data.index`); no partial success. Available to every installed App.",
         "tags": [
           {
             "label": "re-sign"
@@ -547,7 +514,7 @@
       },
       {
         "name": "files.list",
-        "desc": "Page metadata-only rows under an optional `prefix`. Returns `path`, `etag`, `size_bytes`, `content_type`, `metadata`, `tags`, `updated_at`. Cursor-based. Optional `scope`/`owner` args (default: own app scope): with manifest `host_capabilities: [\"aps.scope.app.read\"]`, `owner` may reference ANOTHER app by its public ref (`@handle/slug` or numeric id — bare slugs rejected, slugs are only unique per developer namespace) to browse the objects it stores under the calling user (e.g. `anna.web.image_fetch` artifacts). Rows are always filtered by the calling user's id.",
+        "desc": "Page metadata-only rows under an optional `prefix`. Returns `path`, `etag`, `size_bytes`, `content_type`, `metadata`, `tags`, `updated_at`. Cursor-based. Optional `scope`/`owner` args (default: own app scope): with manifest `storage.scopes.app` (`r` or `rw`), `owner` may reference ANOTHER app by its public ref (`@handle/slug` or numeric id — bare slugs rejected, slugs are only unique per developer namespace) to browse the objects it stores under the calling user (e.g. `anna.web.image_fetch` artifacts). Rows are always filtered by the calling user's id.",
         "tags": [
           {
             "label": "paginated"
@@ -576,11 +543,11 @@
     "items": [
       {
         "name": "tools.list",
-        "desc": "Project the manifest's tool grants. Returns `{tools: [{tool_id, status?}]}` filtered through the `host_api.tools` whitelist; the optional `status` (`available` / `deploying` / `unavailable`, dispatcher ≥ 0.14.0) reflects live deploy-reconciliation facts — disable buttons before a click fails, and pair with `anna.tools.onChanged(cb)` (SDK ≥ 0.12.0) to re-list when `tools.changed` fires after a deploy lands. Pure ACL — no Agent / NATS round-trip; safe to call at bundle boot to decide which buttons to render."
+        "desc": "List the Executas the bundle may invoke — `required_executas` ∪ `optional_executas`. Returns `{tools: [{tool_id, status?}]}`; the optional `status` (`available` / `deploying` / `unavailable`, dispatcher ≥ 0.14.0) reflects live deploy-reconciliation facts — disable buttons before a click fails, and pair with `anna.tools.onChanged(cb)` (SDK ≥ 0.12.0) to re-list when `tools.changed` fires after a deploy lands. Pure manifest projection — no Agent / NATS round-trip; safe to call at bundle boot to decide which buttons to render."
       },
       {
         "name": "tools.invoke",
-        "desc": "Call one tool by id with structured `args` and an optional clamped `timeoutMs` (**max 90 s** — the public edge's held-request ceiling). Routes through the user's online Executa Agent over NATS, strips two envelope layers, and returns the plugin payload — or a stable error code (`tool_timeout`, `tool_failed`, `executa_unavailable`, `agent_unavailable`, `permission_denied`, `invalid_arg`). Calls that may outlive 90 s belong on `tools.invokeAsync`.",
+        "desc": "Call one tool by id with structured `args` and an optional clamped `timeoutMs` (**max 90 s** — the public edge's held-request ceiling). Routes through the user's online Executa Agent over NATS, strips two envelope layers, and returns the plugin payload — or a stable error code (`tool_timeout`, `tool_failed`, `executa_unavailable`, `agent_unavailable`, `permission_denied` (`tool_id` not in `required_executas` / `optional_executas`, or the Executa not installed / disabled), `invalid_arg`). Calls that may outlive 90 s belong on `tools.invokeAsync`.",
         "tags": [
           {
             "label": "timeoutMs"
@@ -642,7 +609,7 @@
       },
       {
         "name": "credentials.get_token",
-        "desc": "`{provider, account_id?}` → `{access_token, account_id, expires_at}`. Omit `account_id` for the user's default account. Dead credentials (revoked / needs re-auth) fail with `APP_NOT_GRANTED` carrying the reconnect hint.",
+        "desc": "`{provider, account_id?}` → `{access_token, account_id, expires_at}`. Omit `account_id` for the user's default account. `provider` must be listed in `ui.host_api.credentials` (otherwise `permission_denied`) and connected by the user. Dead credentials (revoked / needs re-auth) fail with `APP_NOT_GRANTED` carrying the reconnect hint.",
         "tags": [
           {
             "label": "per-call token",
@@ -657,7 +624,7 @@
     "items": [
       {
         "name": "web.search",
-        "desc": "`{query, max_results?, search_depth?, topic?, time_range?, region?, include_domains?, exclude_domains?}` → `{results: [{title, url, snippet, site, published_at?, score?}], provider_tier, quota_consumed}`. `score`/`published_at` are optional — never assume they exist. Out-of-cap params are REJECTED (`APP_INVALID_REQUEST`), never silently truncated. `search_depth: \"advanced\"` needs `web_grant.allowAdvanced`; usage is metered by the CU pool only (no per-minute/daily caps).",
+        "desc": "`{query, max_results?, search_depth?, topic?, time_range?, region?, include_domains?, exclude_domains?}` → `{results: [{title, url, snippet, site, published_at?, score?}], provider_tier, quota_consumed}`. `score`/`published_at` are optional — never assume they exist. Out-of-cap params are REJECTED (`APP_INVALID_REQUEST`), never silently truncated. Usage is metered by the CU pool only (no per-minute/daily caps); `max_results` is capped at 50.",
         "tags": [
           {
             "label": "billed per call"
@@ -669,7 +636,7 @@
       },
       {
         "name": "web.fetch",
-        "desc": "`{urls (1-10), format?, max_chars?, timeout_ms?}` → `{pages: [{url, final_url?, ok, title?, content?, truncated?, error?}], quota_consumed}` — same length & order as input, **per-item failure isolation** (check `pages[i].ok`; errors: `SSRF_BLOCKED`, `TIMEOUT`, `HTTP_<status>`, `PARSE_FAILED`, `TOO_LARGE`, `RESPONSE_BUDGET_EXCEEDED`, …). Hard SSRF policy: private/metadata IPs blocked after DNS resolution, re-validated per redirect hop. 512 KB response budget. `web_grant` shape: `{enabled, allowSearch, allowFetch, allowAdvanced, allowImageSearch, allowImageFetch, maxResultsPerCall (10)}` — default disabled; edited in the Installed-Apps permission modal; `anna-app dev` installs seed a fully-enabled dev grant (dev calls never billed). Pass `{timeoutMs: 90000}` for large batches (SDK web-namespace default is 60s).",
+        "desc": "`{urls (1-10), format?, max_chars?, timeout_ms?}` → `{pages: [{url, final_url?, ok, title?, content?, truncated?, error?}], quota_consumed}` — same length & order as input, **per-item failure isolation** (check `pages[i].ok`; errors: `SSRF_BLOCKED`, `TIMEOUT`, `HTTP_<status>`, `PARSE_FAILED`, `TOO_LARGE`, `RESPONSE_BUDGET_EXCEEDED`, …). Hard SSRF policy: private/metadata IPs blocked after DNS resolution, re-validated per redirect hop. 512 KB response budget. Pass `{timeoutMs: 90000}` for large batches (SDK web-namespace default is 60s).",
         "tags": [
           {
             "label": "billed per URL"
@@ -681,7 +648,7 @@
       },
       {
         "name": "web.image_search",
-        "desc": "`{query, max_results? (8, cap 50), min_width?, min_height?, aspect? (any|wide|tall|square)}` → `{results: [{image_url, thumbnail_url?, source_url, title?, width?, height?, mime_type?, license_hint?}], quota_consumed, cached?}`. **Safe-search is force-enabled platform-side** (`safe_search: false` is rejected). `license_hint` is best-effort — no copyright warranty. Needs `web_grant.allowImageSearch` (defaults OFF even when web is enabled). Results cached 10 min; cache hits bill the floor CU and set `cached: true`. Provider chain: serper (Google Images, when key configured) → ddgs.images → tavily include_images. SDK alias `anna.web.imageSearch`.",
+        "desc": "`{query, max_results? (8, cap 50), min_width?, min_height?, aspect? (any|wide|tall|square)}` → `{results: [{image_url, thumbnail_url?, source_url, title?, width?, height?, mime_type?, license_hint?}], quota_consumed, cached?}`. **Safe-search is force-enabled platform-side** (`safe_search: false` is rejected). `license_hint` is best-effort — no copyright warranty. Results cached 10 min; cache hits bill the floor CU and set `cached: true`. Provider chain: serper (Google Images, when key configured) → ddgs.images → tavily include_images. SDK alias `anna.web.imageSearch`.",
         "tags": [
           {
             "label": "billed per call"
@@ -693,7 +660,7 @@
       },
       {
         "name": "web.image_fetch",
-        "desc": "`{url, max_bytes? (5 MiB, cap 20 MiB), purpose?}` → `{path, get_url, mime_type, bytes_size, sha256, source_url, final_url, quota_consumed}` — an artifact REFERENCE (`get_url` is a 30-min presigned URL; field is `get_url`, not `url`), never bytes. Host downloads with the full SSRF policy + image MIME whitelist (jpeg/png/webp/gif) verified by **magic bytes**, then stores into the app's APS files self-scope (counts against storage quota; manage via `anna.files.*`). Needs `web_grant.allowImageFetch` (defaults OFF). 1.0 CU floor per image; failed downloads never billed. SDK alias `anna.web.imageFetch`.",
+        "desc": "`{url, max_bytes? (5 MiB, cap 20 MiB), purpose?}` → `{path, get_url, mime_type, bytes_size, sha256, source_url, final_url, quota_consumed}` — an artifact REFERENCE (`get_url` is a 30-min presigned URL; field is `get_url`, not `url`), never bytes. Host downloads with the full SSRF policy + image MIME whitelist (jpeg/png/webp/gif) verified by **magic bytes**, then stores into the app's APS files self-scope (counts against storage quota; manage via `anna.files.*`). 1.0 CU floor per image; failed downloads never billed. SDK alias `anna.web.imageFetch`.",
         "tags": [
           {
             "label": "billed per image"
@@ -773,7 +740,7 @@
     "items": [
       {
         "name": "mobile.share",
-        "desc": "System share sheet (anna-mobile shell only). At least one of `text` / `url` / `data_url` (data: URL ≤ 2MB decoded, written to a short-lived native temp file). User cancel resolves with `{shared: false}` — NOT an error. Requires manifest `ui.host_api.mobile`; desktop containers reject with `unsupported_container` (distinct from `permission_denied` = grant missing) so apps can render a clean degradation notice.",
+        "desc": "System share sheet (anna-mobile shell only). At least one of `text` / `url` / `data_url` (data: URL ≤ 2MB decoded, written to a short-lived native temp file). User cancel resolves with `{shared: false}` — NOT an error. Nothing to declare; desktop containers reject with `unsupported_container` so apps can render a clean degradation notice.",
         "tags": [
           {
             "label": "mobile shell only"
@@ -794,7 +761,7 @@
       },
       {
         "name": "mobile.camera_capture",
-        "desc": "Native camera capture: `{camera?: 'back'|'front', quality?: 0..1, max_bytes?}` → `{data_url, mime, width, height, byte_size}`. `max_bytes` caps the returned data URL (default 4MB, hard cap 8MB — bounded by the postMessage transport; oversized captures are re-compressed once, then reject with `too_large`). Persistence is the app's job (`upload` / `files` grants). Structured non-error rejections: `permission_denied_by_user` / `cancelled` / `too_large`.",
+        "desc": "Native camera capture: `{camera?: 'back'|'front', quality?: 0..1, max_bytes?}` → `{data_url, mime, width, height, byte_size}`. `max_bytes` caps the returned data URL (default 4MB, hard cap 8MB — bounded by the postMessage transport; oversized captures are re-compressed once, then reject with `too_large`). Persistence is the app's job (`upload.*` / `files.*`). Structured non-error rejections: `permission_denied_by_user` / `cancelled` / `too_large`.",
         "tags": [
           {
             "label": "mobile shell only"
@@ -887,36 +854,6 @@
       {
         "name": "artifact.delete",
         "desc": "Artifact delete — reserved.",
-        "tags": [
-          {
-            "label": "stub",
-            "kind": "stub"
-          }
-        ]
-      },
-      {
-        "name": "fs.read",
-        "desc": "Sandboxed filesystem read — reserved.",
-        "tags": [
-          {
-            "label": "stub",
-            "kind": "stub"
-          }
-        ]
-      },
-      {
-        "name": "fs.write",
-        "desc": "Sandboxed filesystem write — reserved.",
-        "tags": [
-          {
-            "label": "stub",
-            "kind": "stub"
-          }
-        ]
-      },
-      {
-        "name": "prefs.get",
-        "desc": "User preference reads — reserved.",
         "tags": [
           {
             "label": "stub",
@@ -1072,7 +1009,7 @@
       },
       {
         "name": "audio.transcribe",
-        "desc": "**Synchronous** STT: `{audioUrl | audioBase64 (+format), language?, model?}` → `{text, language, billedCostCU}`. Inline audio ≤10 MB, URL fetch ≤25 MB, duration ≤10 min (`AUDIO_TOO_LONG`). Routed to the user's preferred speech-to-text model; billed as `APP_STT`. For **live** recognition with partial results use the realtime `anna.audio.session()` surface instead (manifest `host_api.audio ∋ \"session\"`, same `media_grant` flags).",
+        "desc": "**Synchronous** STT: `{audioUrl | audioBase64 (+format), language?, model?}` → `{text, language, billedCostCU}`. Inline audio ≤10 MB, URL fetch ≤25 MB, duration ≤10 min (`AUDIO_TOO_LONG`). Routed to the user's preferred speech-to-text model; billed as `APP_STT`. For **live** recognition with partial results use the realtime `anna.audio.session()` surface instead (declare `ui.browser_permissions: [\"microphone\"]`).",
         "tags": [
           {
             "label": "sync ≤120s"

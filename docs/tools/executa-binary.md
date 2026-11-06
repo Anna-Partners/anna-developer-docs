@@ -259,7 +259,7 @@ Before launching the entrypoint the Agent injects:
 | `ANNA_RUNTIME_PROFILE` | where you run: `cloud-linux` \| `desktop-macos` \| `desktop-windows` \| `desktop-linux` |
 | `ANNA_AGENT_VERSION` | the Matrix Agent version (for capability gating) |
 | `ANNA_CHROME_EXECUTABLE` | absolute path to the platform Chrome for Testing (only set when ready to run) |
-| `ANNA_CHROME_VERSION` | four-part Chrome version, e.g. `145.0.7632.12` |
+| `ANNA_CHROME_VERSION` | four-part Chrome version, e.g. `145.0.7632.6` |
 | `ANNA_CHROME_PROVIDER` | always `playwright-cft` |
 | `ANNA_NODE_EXECUTABLE` | absolute path to the shared platform Node.js (only set when available) |
 | `ANNA_NODE_VERSION` | full Node version, e.g. `22.14.0` |

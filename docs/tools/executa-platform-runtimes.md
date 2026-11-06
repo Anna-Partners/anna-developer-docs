@@ -4,7 +4,7 @@ description: "Use the Agent's preinstalled Chrome for Testing and the shared Nod
 section: tools
 slug: executa-platform-runtimes
 order: 13
-updated: 2026-11-03
+updated: 2026-11-06
 estimated_minutes: 8
 ---
 
@@ -35,13 +35,13 @@ empty string.
 | Variable | Meaning | Example (cloud) | Example (macOS) |
 |---|---|---|---|
 | `ANNA_RUNTIME_PROFILE` | runtime flavour | `cloud-linux` | `desktop-macos` |
-| `ANNA_AGENT_VERSION` | Matrix Agent version | `2.31.0` | same |
-| `ANNA_CHROME_EXECUTABLE` | absolute Chrome path (resolved by the Agent — never guess directory names) | `/ms-playwright/chromium-1200/chrome-linux/chrome` | `~/Library/Caches/ms-playwright/chromium-1200/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing` |
-| `ANNA_CHROME_VERSION` | four-part version | `145.0.7632.12` | same |
+| `ANNA_AGENT_VERSION` | Matrix Agent version | `1.1.0-beta.49` | same |
+| `ANNA_CHROME_EXECUTABLE` | absolute Chrome path (resolved by the Agent — never guess directory names) | `/ms-playwright/chromium-1208/chrome-linux64/chrome` | `~/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing` |
+| `ANNA_CHROME_VERSION` | four-part version | `145.0.7632.6` | same |
 | `ANNA_CHROME_PROVIDER` | always `playwright-cft` | | |
 | `ANNA_NODE_EXECUTABLE` | absolute Node path | `/opt/anna/node/bin/node` | `~/.anna/runtimes/node-22/bin/node` |
 | `ANNA_NODE_VERSION` | full Node version | `22.14.0` | same |
-| `ANNA_RUNTIMES_JSON` | compact JSON of all of the above | `{"profile":…,"chrome":{…},"node":{…}}` | |
+| `ANNA_RUNTIMES_JSON` | compact JSON of all of the above | `{"profile":…,"agent_version":…,"chrome":{…},"node":{…}}` | |
 
 Semantics:
 
@@ -158,7 +158,7 @@ several Matrix versions behind.
 
 | Channel | Agent version | Chrome (CfT) | Node.js |
 |---|---|---|---|
-| Cloud (linux-x86_64) | — | — | — |
+| Cloud (linux-x86_64) | `1.1.0-beta.49` | `145.0.7632.6` | `22.14.0` |
 | Desktop macOS | — | — | — |
 | Desktop Windows | — | — | — |
 <!-- generated:version-matrix:end -->

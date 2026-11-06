@@ -9,8 +9,8 @@
       "since": "Matrix Agent runtime contract (forum #490)",
       "summary": "Absolute path + four-part version of the platform Chrome for Testing, resolved by the Agent — never guess `chromium-<rev>` directory names. `ANNA_CHROME_PROVIDER` is always `playwright-cft`.",
       "wire": {
-        "ANNA_CHROME_EXECUTABLE": "absolute path, e.g. `/ms-playwright/chromium-1200/chrome-linux/chrome` (cloud) · `~/Library/Caches/ms-playwright/chromium-1200/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing` (macOS)",
-        "ANNA_CHROME_VERSION": "four-part build, e.g. `145.0.7632.12`",
+        "ANNA_CHROME_EXECUTABLE": "absolute path, e.g. `/ms-playwright/chromium-1208/chrome-linux64/chrome` (cloud) · `~/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing` (macOS)",
+        "ANNA_CHROME_VERSION": "four-part build, e.g. `145.0.7632.6`",
         "ANNA_CHROME_PROVIDER": "playwright-cft",
         "semantics": "set only when Chrome is ready to run; absent (never empty) means not available on this Agent"
       },
@@ -52,8 +52,8 @@
       "summary": "Where you run, the Matrix Agent version for capability gating, and a compact JSON summary of the whole contract.",
       "wire": {
         "ANNA_RUNTIME_PROFILE": "`cloud-linux` | `desktop-macos` | `desktop-windows` | `desktop-linux`",
-        "ANNA_AGENT_VERSION": "Matrix Agent version, e.g. `2.31.0`",
-        "ANNA_RUNTIMES_JSON": "`{\"profile\": …, \"chrome\": {\"executable\", \"version\", \"provider\"}, \"node\": {\"executable\", \"version\"}}` — same facts as the individual variables"
+        "ANNA_AGENT_VERSION": "Matrix Agent version, e.g. `1.1.0-beta.49`",
+        "ANNA_RUNTIMES_JSON": "`{\"profile\": …, \"agent_version\": …, \"chrome\": {\"executable\", \"version\", \"provider\"}, \"node\": {\"executable\", \"version\", \"provider\"}}` — same facts as the individual variables"
       },
       "example": "const runtimes = process.env.ANNA_RUNTIMES_JSON\n  ? JSON.parse(process.env.ANNA_RUNTIMES_JSON)\n  : null;\n\nif (!runtimes) {\n  // Agent predates the contract: degrade gracefully (e.g. scan PLAYWRIGHT_BROWSERS_PATH)\n  // or declare runtime.requires so the install fails loudly instead.\n}\nconsole.error(\"profile\", runtimes?.profile, \"agent\", process.env.ANNA_AGENT_VERSION);\n",
       "limitations": [
@@ -128,12 +128,12 @@
       "name": "Cloud (linux-x86_64)",
       "kind": "Platform runtime channel",
       "group": "Release channels · current versions",
-      "summary": "Chrome for Testing (unpublished) · Node.js (unpublished) · Agent (unpublished)",
+      "summary": "Chrome for Testing 145.0.7632.6 · Node.js 22.14.0 · Agent 1.1.0-beta.49",
       "wire": {
         "channel": "cloud-linux",
-        "agent_version": "unpublished",
-        "chrome": "unpublished",
-        "node": "unpublished",
+        "agent_version": "1.1.0-beta.49",
+        "chrome": "145.0.7632.6",
+        "node": "22.14.0",
         "next": "none announced",
         "discovery": "`ANNA_CHROME_EXECUTABLE` · `ANNA_CHROME_VERSION` · `ANNA_NODE_EXECUTABLE` · `ANNA_NODE_VERSION` · `ANNA_RUNTIMES_JSON`",
         "source": "`GET /api/v1/platform/runtimes`"

@@ -2,8 +2,9 @@
 # Every literal is asserted against the published @anna-ai/app-schema bundle
 # by scripts/check_claims.py — see that script's docstring for the contract.
 # Schema 4 (@anna-ai/app-schema >= 0.33.0): permissions / host_capabilities
-# are gone; the only capability declarations are credentials / agent.tools /
-# storage.scopes (acl/capabilities.json closed vocabulary).
+# are gone; the capability declarations are credentials / agent.tools /
+# storage.scopes (acl/capabilities.json closed vocabulary) plus the boolean
+# ui.host_api.share (>= 0.34.0) and ui.host_api.conversation (>= 0.36.0).
 manifest_fields:
   - schema
   - required_executas

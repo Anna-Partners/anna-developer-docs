@@ -38,7 +38,7 @@
           "notes": [
             "Clamped against the platform per-call cap (**4**) and the model's `maxN` — exceeding → `IMAGE_PER_CALL_EXCEEDED` (`data.allowed.maxN`).",
             "The plugin-side path shares the same platform constants (4 per `generate`, 1 per `edit`, 4 per invoke).",
-            "The per-invoke rolling counter is **not** applied to App-side calls — it is scoped to Executa plugin `tool_invoke_id`, not to App sessions."
+            "There is no cumulative image counter on either surface — only the per-call cap applies."
           ]
         },
         {
@@ -181,7 +181,7 @@
         "CSP gotcha: the iframe's `img-src` must allow the host's R2 hostname. Either add `https:` (or the specific R2 domain) to `manifest.ui.csp_overrides.img-src`, or display the image via a same-origin proxy.",
         "Cross-Origin-Embedder-Policy: if the iframe is in `require-corp` mode, R2 presigned URLs that don't include `Cross-Origin-Resource-Policy: cross-origin` will be blocked (`ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep`). The default Anna App runtime does **not** set COEP for this reason — only opt in when SharedArrayBuffer is required.",
         "No streaming. Image responses are buffered; a slow provider (DALL·E 3 cold-start, FLUX queue) can take 30-60 s — the SDK default per-call timeout is `DEFAULT_TIMEOUTS_BY_NS.image = 180_000` ms (180 s), override via `opts.timeoutMs`.",
-        "Per-invoke rolling quota used by Executa plugin-side image calls is **not** applied here. Only the platform per-call cap (4) and plan-level quota apply.",
+        "Only the platform per-call cap (4) and plan-level quota apply.",
         "Returned `images[].r2_key` can be re-signed for 7 days with `anna.image.resign({r2Keys})` (v0.25.0) — the 30-min URL is no longer the only window."
       ]
     },

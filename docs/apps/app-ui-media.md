@@ -4,7 +4,7 @@ description: "Generate video and music (async jobs), synthesize speech and trans
 section: apps
 slug: app-ui-media
 order: 16
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 10
 category: "App UI"
 ---
@@ -358,7 +358,7 @@ errors, `allowed`.
 
 Executa plugins get the same capabilities through reverse RPC
 (`video/generate`, `video/get_job`, `video/cancel_job`, `music/generate`, `music/get_job`,
-`music/cancel_job`, `audio/speak`, `audio/transcribe`) using the `media_token` minted on every invoke (audio per-invoke budgets apply) —
+`music/cancel_job`, `audio/speak`, `audio/transcribe`) using the `media_token` minted on every invoke —
 see [Executa media](/developers/tools/executa-media). The image job surface
 (`image/generate_async`, `image/edit_async`, `image/get_job`, `image/cancel_job`,
 `image/resign`) rides the existing `image_token` — see [Executa image](/developers/tools/executa-image#async-jobs-re-signing).

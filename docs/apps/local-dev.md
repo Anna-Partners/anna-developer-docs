@@ -4,7 +4,7 @@ description: "Run an Anna App locally with `anna-app dev` — in-process dispatc
 section: apps
 slug: local-dev
 order: 16
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 5
 category: "Local Development & Testing"
 verified_cli: "0.1.54"
@@ -110,7 +110,7 @@ no grant simulation and nothing to toggle. Every Host API method and every
 Executa reverse-RPC token (`sampling_token`, `storage_token`, `image_token`,
 `media_token`, `upload_token`) is available locally just as it is for an
 installed App in production. The only manifest-driven checks, enforced
-identically in both places, are the three
+identically in both places, are the five
 [capability declarations](/developers/apps/app-manifest#capability-declarations):
 
 - `credentials.get_token(provider)` for a provider missing from
@@ -118,6 +118,9 @@ identically in both places, are the three
 - `storage.*` / `files.*` on a cross-app scope missing from `storage.scopes`
   → `permission_denied` (plugin side: `storage_token.allowed_scopes` only
   carries `tool` plus the scopes the Executa declares);
+- `share.*` without `ui.host_api.share: true` → `share_not_declared`, and
+  `conversation.*` without `ui.host_api.conversation: true` →
+  `conversation_not_declared` (CLI ≥ 0.1.68);
 - a sandbox agent session only sees the host-kit tools listed in
   `ui.host_api.agent.tools`.
 
@@ -174,6 +177,58 @@ Content above them must travel by reference: `host/uploadFile` or APS
   `⚠ bundled handle "0" → executas/error-journal: no executa discovered at that path`
   — the `"0"` is the array index being read as a handle name.
 
+## Executa reverse RPC under `anna-app dev`
+
+A bundled Executa can issue **every reverse RPC the production Agent
+accepts** (CLI ≥ 0.1.68 / `anna-app-runtime-local` ≥ 0.2.0a39 — earlier
+versions answered `-32601 Method not found` for the methods below,
+[forum #598](https://forum.anna.partners/t/anna-app-dev-executas-web-image-search-call-returns-32601-method-not-found/598)).
+Sampling, embeddings, agent sessions, storage KV, `files/*`, `web/search`,
+`web/fetch`, `image/generate`, `image/edit` and `host/uploadFile` were
+already supported. What answers the rest depends on how the harness was
+started:
+
+| Reverse RPC | Signed out or `--no-llm` | `--mock-llm` | Signed in |
+| --- | --- | --- | --- |
+| `web/image_search`, `web/image_fetch` | Local implementation (ddgs / native download, unbilled) | Same | Same by default; `--web real` uses the platform provider chain and APS artifacts |
+| `image/generate_async`, `image/edit_async`, `image/get_job`, `image/cancel_job`, `image/resign`, `video/*`, `music/*`, `audio/speak`, `audio/transcribe` | `llm_disabled` | The matching fixture line, else `not_implemented` | The real platform service |
+| `storage/quota_status` | `not_implemented` | `not_implemented` | The user's real quota with `--storage aps`; otherwise `not_implemented` |
+| `credentials/listAccounts`, `credentials/getToken` | `llm_disabled` | The matching fixture line, else `not_implemented` | Real accounts and a short-lived token; `APP_NOT_GRANTED` when the provider is not declared or not authorized |
+
+`--mock-llm` never fabricates a success for these methods: without a
+`{"ns": "<ns>", "method": "<method>", "result": {…}}` fixture line the
+plugin receives `not_implemented`.
+
+**Credentials.** The harness asks the plugin for its manifest (`describe`)
+and sends the declared `credentials[].name` list to the platform, which maps
+it to OAuth providers exactly as it does for an installed Executa. A
+provider your plugin does not declare answers `APP_NOT_GRANTED`, so a
+missing declaration fails locally instead of after publishing. Restart
+`anna-app dev` after changing the declaration. The page-side
+`anna.credentials.*` Host API is not served by the local harness.
+
+**Fake-IP DNS proxies.** `web.fetch` / `web.image_fetch` refuse a hostname
+that does not resolve to a public address. If a proxy on your machine runs in
+fake-IP mode (Clash / Surge / sing-box TUN — every name resolves to
+`198.18.x.x`), the harness detects it, says so in the boot banner, and
+verifies fetch targets over DNS-over-HTTPS instead; a name that really points
+at a private address is still refused. `ANNA_APP_RUNTIME_WEB_DOH_URL` selects
+another DoH JSON endpoint (default `https://dns.alidns.com/resolve`); the
+hostname being fetched is sent to that resolver. CLI versions before 0.1.68
+answer `SSRF_BLOCKED … resolves to private IP 198.18.x.x` for every URL.
+
+### Differences from production that remain
+
+| | Production | `anna-app dev` | What to do |
+| --- | --- | --- | --- |
+| JSON-RPC error codes | Per-family codes (web `-3252x`, credentials `-3206x`, …) | Three codes: `-32004` (not implemented), `-32602` (invalid params), `-32603` (everything else) | Branch on `error.data.errorCode` when debugging locally |
+| `web/image_fetch` → `get_url` | Short-lived https reference the platform can read | Under the default `--web local`: `http://localhost:<port>/_dev/web-images/…` — the harness keeps the image for the run and serves it back. Reachable from your machine only; no expiry, gone when the harness stops (CLI < 0.1.68 returned an inline `data:` URL) | Render it or read it from the page / plugin as usual. To hand it to a platform call (LLM vision, `image.edit`) use `--web real`, or read the bytes and pass them inline |
+| `web/image_fetch` → `path` | A real APS files object, usable with `files.*` | A placeholder under `--web local` — nothing is stored in APS | Use `--web real` for flows that depend on `path` |
+| `web/image_fetch` artifact owner | The Executa's `tool` scope | The dev App's `app` scope under `--web real` | Use `get_url`; do not assume `path` across environments |
+| Billing and ownership | Recorded against the Executa | Recorded against the dev App | Nothing |
+| Token expiry and renewal | Enforced | Not simulated | Verify long-running tools on the real platform before release |
+| `anna-app executa dev` | — | Web, media, embeddings and credentials reverse RPCs are not supported | Test them with `anna-app dev` and a bundled Executa |
+
 ## `manifest.dev` block
 
 The optional `dev` block lets you customise the harness without polluting
@@ -203,8 +258,11 @@ Disable with `--no-watch` if your editor's autosave is too chatty.
 
 ## What's not in `dev`
 
-- No `chat.read_history` / `chat.write_message` persistence — Phase 3 will
-  proxy these through real conversation storage.
+- `chat.append_artifact` / `chat.write_message` are deprecated no-ops (see
+  [App UI Host API](/developers/apps/app-ui-host-api)). For conversations,
+  `conversation.*` is forwarded to the real platform when you are logged in
+  (and replayed from fixtures with `--mock-llm`) — see
+  [Durable conversations](/developers/apps/app-ui-conversation#local-development).
 - `anna.llm.*` / `anna.agent.*` bridge to a real nexus by default (you must
   be logged in via `anna-app login`). Develop offline with `--no-llm` (calls
   return `llm_disabled`) or `--mock-llm <fixture>` (canned responses from a

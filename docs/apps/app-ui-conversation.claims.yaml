@@ -1,0 +1,12 @@
+# Machine-checkable claims for docs/apps/app-ui-conversation.md.
+host_api_methods:
+  - conversation.list
+  - conversation.create
+  - conversation.update
+  - conversation.delete
+  - conversation.messages
+  - conversation.send
+  - conversation.status
+  - conversation.cancel
+  - conversation.modify
+  - conversation.options

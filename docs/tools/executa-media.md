@@ -4,7 +4,7 @@ description: "Ask the host to generate short videos and music (async jobs), synt
 section: tools
 slug: executa-media
 order: 13
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 12
 ---
 
@@ -19,10 +19,13 @@ Available from Executa protocol **v2** onward; companion to [Image Generation](/
 
 End-to-end media generation requires **v2 negotiation**: the host sends `initialize`; the plugin replies with `protocolVersion: "2.0"` and lists `client_capabilities.video` / `client_capabilities.music` (and `audio.speak` / `audio.transcribe` for the audio methods).
 
-There is no manifest declaration and no user toggle: the host mints a `media_token` on **every** invoke of every installed, enabled Executa. `VIDEO_NOT_GRANTED (-32120)` / `MUSIC_NOT_GRANTED (-32160)` / `AUDIO_NOT_GRANTED (-32140)` in production mean the Executa is not installed or the user disabled it. There are **no per-feature rate caps** beyond that — the user's CU quota pool is the only user-level gate; a small **per-invoke budget** (TTS characters, STT seconds) protects against a runaway single invoke. Video and music jobs have no per-invoke cap: every job is pre-charged in CU before submission.
+There is no manifest declaration and no user toggle: the host mints a `media_token` on **every** invoke of every installed, enabled Executa. `VIDEO_NOT_GRANTED (-32120)` / `MUSIC_NOT_GRANTED (-32160)` / `AUDIO_NOT_GRANTED (-32140)` in production mean the Executa is not installed or the user disabled it. There are **no per-feature rate caps and no per-invoke budgets** beyond that — the user's CU quota pool is the only user-level gate. Video and music jobs are pre-charged in CU before submission.
 
 > [!NOTE]
 > `audio/transcribe` requires host **matrix ≥ 2026-10-12** (`METHOD_AUDIO_TRANSCRIBE`); `music/*` requires **matrix ≥ 2026-10-19 / nexus dispatcher 0.28.0** (`METHOD_MUSIC_GENERATE`). On an older host the SDK call fails with `method_not_found`, which the SDKs surface as `AUDIO_NOT_GRANTED` / `MUSIC_NOT_GRANTED` — treat it as "feature unavailable".
+
+> [!TIP]
+> **Local development:** a bundled Executa can call every method on this page under a signed-in `anna-app dev` (CLI ≥ 0.1.68); it reaches the real platform service and is billed to your dev App. With `--mock-llm` each method answers from a fixture line or `not_implemented`. See [Executa reverse RPC under `anna-app dev`](/developers/apps/local-dev#executa-reverse-rpc-under-anna-app-dev).
 
 ## Billing: pre-charge + refund
 
@@ -236,7 +239,7 @@ Synchronous speech-to-text for a recording of **≤ 10 minutes**. Send the audio
 
 `durationSec` is **exact** for `wav` (parsed from the header) and a byte-based **estimate** for compressed formats (`durationExact: false`). The 600 s cap is enforced exactly for `wav`; other formats are bounded by the byte caps. Billing is by audio duration (`EXECUTA_STT`).
 
-**Per-invoke seconds budget.** Like `audio/speak`'s character budget, the host reserves the estimated seconds against the `media_token` claim `max_audio_seconds` (default **600**, tracked per `tool_invoke_id` for 30 min) before calling the provider and settles to the real `durationSec` afterwards. Exceeding it fails fast with `AUDIO_INVOKE_BUDGET_EXCEEDED (-32148)` — split long recordings across invokes rather than retrying.
+There is no per-invoke seconds budget: only the per-call caps above apply.
 
 ## SDK examples
 
@@ -344,13 +347,13 @@ stt, err := c.TranscribeBytes(wavBytes, "wav", "zh", 90*time.Second)
 | `-32128` | `VIDEO_CONTENT_REJECTED`     | Provider safety system rejected the prompt/image. |
 | `-32140` | `AUDIO_NOT_GRANTED`          | Executa not installed or disabled by the user. Also what SDKs report when the host is too old to know `audio/transcribe`. |
 | `-32141` | `AUDIO_QUOTA_EXCEEDED`       | CU pool cannot cover the character-count / duration price. |
-| `-32142` | `AUDIO_TEXT_TOO_LONG`        | `text` exceeds the model's per-call character cap, **or** the per-invoke character budget (`max_audio_chars`, default 8000) is exhausted — the message says which. |
+| `-32142` | `AUDIO_TEXT_TOO_LONG`        | `text` exceeds the model's per-call character cap. |
 | `-32143` | `AUDIO_TOO_LONG`             | Input audio exceeds the transcription caps: > 10 MB inline, > 25 MB by URL, or > 600 s (`wav`). `error.data.allowed` carries the cap. |
 | `-32144` | `AUDIO_PROVIDER_ERROR`       | Upstream TTS/STT provider error, or the `audioUrl` could not be fetched. |
 | `-32145` | `AUDIO_VOICE_INVALID`        | Unknown `voice` — `error.data.allowed` lists valid voices. |
 | `-32146` | `AUDIO_MODEL_UNAVAILABLE`    | No active TTS/STT model matches the request. |
 | `-32147` | `AUDIO_CONTENT_REJECTED`     | Provider safety system rejected the text. |
-| `-32148` | `AUDIO_INVOKE_BUDGET_EXCEEDED` | Per-invoke transcription seconds budget exhausted (`max_audio_seconds`, default 600, per `tool_invoke_id`). |
+| `-32148` | `AUDIO_INVOKE_BUDGET_EXCEEDED` | **Reserved, not raised.** There is no per-invoke transcription budget. |
 | `-32160` | `MUSIC_NOT_GRANTED`          | Executa not installed or disabled by the user. Also what SDKs report when the host is too old to know `music/*`. |
 | `-32161` | `MUSIC_PROVIDER_ERROR`       | Upstream music provider failure (CU hold refunded). |
 | `-32162` | `MUSIC_INVALID_REQUEST`      | Malformed field (prompt too short/long, non-integer `durationSec`, unknown `options` key, bad `idempotencyKey` / `referenceImageUrl`). `error.data.allowed` carries the model's space. |
@@ -374,7 +377,7 @@ stt, err := c.TranscribeBytes(wavBytes, "wav", "zh", 90*time.Second)
 > **Model-dependent parameter spaces.** Don't hardcode durations or resolutions. A `VIDEO_INVALID_REQUEST (-32122)` response carries the allowed values in `error.data`; omit optional params to let the model's defaults apply. Music is stricter: `MUSIC_FEATURE_UNSUPPORTED (-32165)` means the model *cannot* do what you asked (e.g. lyrics on Stable Audio, `durationSec` on MiniMax / Lyria) — switch to one of `error.data.alternatives` or drop the feature; the host will not adapt the request for you.
 
 > [!TIP]
-> **Recording format for `audio/transcribe`.** Prefer **16 kHz mono PCM16 `wav`** for short push-to-talk clips: the host measures duration exactly (so the 600 s cap and the per-invoke budget are precise) and no decoder is involved. 10 min of 16 kHz mono wav is ≈ 19 MB — above the 10 MB inline cap — so for long recordings either chunk by sentence or upload once and pass `audioUrl`. Always set `format` for inline audio; omitting it is a `VIDEO_INVALID_REQUEST (-32122)`.
+> **Recording format for `audio/transcribe`.** Prefer **16 kHz mono PCM16 `wav`** for short push-to-talk clips: the host measures duration exactly (so the 600 s cap is precise) and no decoder is involved. 10 min of 16 kHz mono wav is ≈ 19 MB — above the 10 MB inline cap — so for long recordings either chunk by sentence or upload once and pass `audioUrl`. Always set `format` for inline audio; omitting it is a `VIDEO_INVALID_REQUEST (-32122)`.
 
 ## See also
 

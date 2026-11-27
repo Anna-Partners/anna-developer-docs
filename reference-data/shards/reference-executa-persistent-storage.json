@@ -52,32 +52,32 @@
       "errors": [
         {
           "name": "STORAGE_ERR_NOT_GRANTED",
-          "code": -32101,
-          "desc": "Agent did not mint a storage_token for this invoke."
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
         },
         {
           "name": "STORAGE_ERR_INVALID_REQUEST",
-          "code": -32104,
+          "code": -32028,
           "desc": "Required field (key/path) missing or wrong type."
         },
         {
           "name": "STORAGE_ERR_NOT_FOUND",
-          "code": -32108,
+          "code": -32022,
           "desc": "Key/path does not exist (normalised on `get`)."
         },
         {
           "name": "STORAGE_ERR_PRECONDITION_FAILED",
-          "code": -32112,
+          "code": -32023,
           "desc": "if_match ETag did not match current generation."
         },
         {
           "name": "STORAGE_ERR_QUOTA_EXCEEDED",
-          "code": -32102,
+          "code": -32024,
           "desc": "User APS quota exhausted."
         },
         {
           "name": "STORAGE_ERR_UPSTREAM",
-          "code": -32199,
+          "code": -32029,
           "desc": "Nexus REST returned a non-success status."
         }
       ],
@@ -201,32 +201,32 @@
       "errors": [
         {
           "name": "STORAGE_ERR_NOT_GRANTED",
-          "code": -32101,
-          "desc": "Agent did not mint a storage_token for this invoke."
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
         },
         {
           "name": "STORAGE_ERR_INVALID_REQUEST",
-          "code": -32104,
+          "code": -32028,
           "desc": "Required field (key/path) missing or wrong type."
         },
         {
           "name": "STORAGE_ERR_NOT_FOUND",
-          "code": -32108,
+          "code": -32022,
           "desc": "Key/path does not exist (normalised on `get`)."
         },
         {
           "name": "STORAGE_ERR_PRECONDITION_FAILED",
-          "code": -32112,
+          "code": -32023,
           "desc": "if_match ETag did not match current generation."
         },
         {
           "name": "STORAGE_ERR_QUOTA_EXCEEDED",
-          "code": -32102,
+          "code": -32024,
           "desc": "User APS quota exhausted."
         },
         {
           "name": "STORAGE_ERR_UPSTREAM",
-          "code": -32199,
+          "code": -32029,
           "desc": "Nexus REST returned a non-success status."
         }
       ],
@@ -300,32 +300,32 @@
       "errors": [
         {
           "name": "STORAGE_ERR_NOT_GRANTED",
-          "code": -32101,
-          "desc": "Agent did not mint a storage_token for this invoke."
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
         },
         {
           "name": "STORAGE_ERR_INVALID_REQUEST",
-          "code": -32104,
+          "code": -32028,
           "desc": "Required field (key/path) missing or wrong type."
         },
         {
           "name": "STORAGE_ERR_NOT_FOUND",
-          "code": -32108,
+          "code": -32022,
           "desc": "Key/path does not exist (normalised on `get`)."
         },
         {
           "name": "STORAGE_ERR_PRECONDITION_FAILED",
-          "code": -32112,
+          "code": -32023,
           "desc": "if_match ETag did not match current generation."
         },
         {
           "name": "STORAGE_ERR_QUOTA_EXCEEDED",
-          "code": -32102,
+          "code": -32024,
           "desc": "User APS quota exhausted."
         },
         {
           "name": "STORAGE_ERR_UPSTREAM",
-          "code": -32199,
+          "code": -32029,
           "desc": "Nexus REST returned a non-success status."
         }
       ],
@@ -413,32 +413,32 @@
       "errors": [
         {
           "name": "STORAGE_ERR_NOT_GRANTED",
-          "code": -32101,
-          "desc": "Agent did not mint a storage_token for this invoke."
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
         },
         {
           "name": "STORAGE_ERR_INVALID_REQUEST",
-          "code": -32104,
+          "code": -32028,
           "desc": "Required field (key/path) missing or wrong type."
         },
         {
           "name": "STORAGE_ERR_NOT_FOUND",
-          "code": -32108,
+          "code": -32022,
           "desc": "Key/path does not exist (normalised on `get`)."
         },
         {
           "name": "STORAGE_ERR_PRECONDITION_FAILED",
-          "code": -32112,
+          "code": -32023,
           "desc": "if_match ETag did not match current generation."
         },
         {
           "name": "STORAGE_ERR_QUOTA_EXCEEDED",
-          "code": -32102,
+          "code": -32024,
           "desc": "User APS quota exhausted."
         },
         {
           "name": "STORAGE_ERR_UPSTREAM",
-          "code": -32199,
+          "code": -32029,
           "desc": "Nexus REST returned a non-success status."
         }
       ],
@@ -451,6 +451,51 @@
         "Soft-deleted entries are excluded; expired (TTL-past) entries are excluded lazily.",
         "Result is a point-in-time view per page — concurrent writes/deletes between pages can cause an entry to appear twice or be skipped. For exact snapshots, write a single key containing an index.",
         "Requires manifest `storage.read`. Per-scope access is gated by the `storage_token`'s `allowed_scopes` claim (`user` / `app` / `tool`)."
+      ]
+    },
+    {
+      "slug": "storage-quota-status",
+      "name": "storage/quota_status",
+      "kind": "Reverse RPC method · APS",
+      "group": "Persistent storage · KV",
+      "since": "protocol v2.0 · Anna Agent built on or after 2026-11-20 (older Agents answer `-32601`)",
+      "direction": "Plugin → Agent → Nexus REST",
+      "summary": "The **user's** global APS quota status. Quota is enforced per user across every scope and bucket (`user`, every App, every tool), so this is the only correct denominator for a \"storage used / available\" display — do not derive it from a `storage/list` size sum of one bucket. No params; returns aggregate numbers only.",
+      "wire": {
+        "json_rpc_method": "storage/quota_status",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "default_timeout_s": 15,
+        "max_timeout_s": 60,
+        "max_frame_bytes": null
+      },
+      "signature": "quota_status() -> dict",
+      "params": [],
+      "returns": {
+        "type": "dict",
+        "desc": "**`{used_bytes, quota_bytes, entries_count, percent, plan_name, plan_label}`**\n\n• `used_bytes: int` — bytes the user currently stores across all scopes and buckets\n• `quota_bytes: int` — the plan's storage quota; `-1` means unlimited\n• `entries_count: int` — number of stored entries\n• `percent: float` — `used_bytes / quota_bytes` as a `0`–`1` fraction, capped at `1`; `0` on an unlimited plan\n• `plan_name: str | None`, `plan_label: str | None` — the user's plan identifier and display label"
+      },
+      "errors": [
+        {
+          "name": "STORAGE_ERR_NOT_GRANTED",
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
+        },
+        {
+          "name": "STORAGE_ERR_UPSTREAM",
+          "code": -32029,
+          "desc": "Nexus REST returned a non-success status."
+        },
+        {
+          "name": "Method not found",
+          "code": -32601,
+          "desc": "The Agent predates `storage/quota_status` (built before 2026-11-20). Treat the quota as unknown and keep working."
+        }
+      ],
+      "example": "# Refuse a large export early instead of failing half-way with QUOTA_EXCEEDED.\n# `rpc` is your reverse-RPC helper: it writes the request to stdout and awaits\n# the response with the same id (see the Sampling page for the dispatch loop).\nasync def has_room(rpc, needed_bytes: int) -> bool:\n    try:\n        q = await rpc(\"storage/quota_status\", {})\n    except RpcError as e:\n        if e.code == -32601:          # older Agent — unknown, let the write decide\n            return True\n        raise\n    if q[\"quota_bytes\"] < 0:           # unlimited plan\n        return True\n    return q[\"quota_bytes\"] - q[\"used_bytes\"] >= needed_bytes\n",
+      "limitations": [
+        "User-global only: `scope` does not apply and there is no per-bucket breakdown.",
+        "A point-in-time read. Another App or tool can consume the headroom before your write — still handle `STORAGE_ERR_QUOTA_EXCEEDED` on the write itself.",
+        "Under `anna-app dev` it returns the real quota only with `--storage aps` (CLI ≥ 0.1.68); the default in-memory mode answers `not_implemented` (`-32004`)."
       ]
     },
     {
@@ -559,32 +604,32 @@
       "errors": [
         {
           "name": "STORAGE_ERR_NOT_GRANTED",
-          "code": -32101,
-          "desc": "Agent did not mint a storage_token for this invoke."
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
         },
         {
           "name": "STORAGE_ERR_INVALID_REQUEST",
-          "code": -32104,
+          "code": -32028,
           "desc": "Required field (key/path) missing or wrong type."
         },
         {
           "name": "STORAGE_ERR_NOT_FOUND",
-          "code": -32108,
+          "code": -32022,
           "desc": "Key/path does not exist (normalised on `get`)."
         },
         {
           "name": "STORAGE_ERR_PRECONDITION_FAILED",
-          "code": -32112,
+          "code": -32023,
           "desc": "if_match ETag did not match current generation."
         },
         {
           "name": "STORAGE_ERR_QUOTA_EXCEEDED",
-          "code": -32102,
+          "code": -32024,
           "desc": "User APS quota exhausted."
         },
         {
           "name": "STORAGE_ERR_UPSTREAM",
-          "code": -32199,
+          "code": -32029,
           "desc": "Nexus REST returned a non-success status."
         }
       ],
@@ -697,32 +742,32 @@
       "errors": [
         {
           "name": "STORAGE_ERR_NOT_GRANTED",
-          "code": -32101,
-          "desc": "Agent did not mint a storage_token for this invoke."
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
         },
         {
           "name": "STORAGE_ERR_INVALID_REQUEST",
-          "code": -32104,
+          "code": -32028,
           "desc": "Required field (key/path) missing or wrong type."
         },
         {
           "name": "STORAGE_ERR_NOT_FOUND",
-          "code": -32108,
+          "code": -32022,
           "desc": "Key/path does not exist (normalised on `get`)."
         },
         {
           "name": "STORAGE_ERR_PRECONDITION_FAILED",
-          "code": -32112,
+          "code": -32023,
           "desc": "if_match ETag did not match current generation."
         },
         {
           "name": "STORAGE_ERR_QUOTA_EXCEEDED",
-          "code": -32102,
+          "code": -32024,
           "desc": "User APS quota exhausted."
         },
         {
           "name": "STORAGE_ERR_UPSTREAM",
-          "code": -32199,
+          "code": -32029,
           "desc": "Nexus REST returned a non-success status."
         }
       ],
@@ -820,32 +865,32 @@
       "errors": [
         {
           "name": "STORAGE_ERR_NOT_GRANTED",
-          "code": -32101,
-          "desc": "Agent did not mint a storage_token for this invoke."
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
         },
         {
           "name": "STORAGE_ERR_INVALID_REQUEST",
-          "code": -32104,
+          "code": -32028,
           "desc": "Required field (key/path) missing or wrong type."
         },
         {
           "name": "STORAGE_ERR_NOT_FOUND",
-          "code": -32108,
+          "code": -32022,
           "desc": "Key/path does not exist (normalised on `get`)."
         },
         {
           "name": "STORAGE_ERR_PRECONDITION_FAILED",
-          "code": -32112,
+          "code": -32023,
           "desc": "if_match ETag did not match current generation."
         },
         {
           "name": "STORAGE_ERR_QUOTA_EXCEEDED",
-          "code": -32102,
+          "code": -32024,
           "desc": "User APS quota exhausted."
         },
         {
           "name": "STORAGE_ERR_UPSTREAM",
-          "code": -32199,
+          "code": -32029,
           "desc": "Nexus REST returned a non-success status."
         }
       ],
@@ -947,32 +992,32 @@
       "errors": [
         {
           "name": "STORAGE_ERR_NOT_GRANTED",
-          "code": -32101,
-          "desc": "Agent did not mint a storage_token for this invoke."
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
         },
         {
           "name": "STORAGE_ERR_INVALID_REQUEST",
-          "code": -32104,
+          "code": -32028,
           "desc": "Required field (key/path) missing or wrong type."
         },
         {
           "name": "STORAGE_ERR_NOT_FOUND",
-          "code": -32108,
+          "code": -32022,
           "desc": "Key/path does not exist (normalised on `get`)."
         },
         {
           "name": "STORAGE_ERR_PRECONDITION_FAILED",
-          "code": -32112,
+          "code": -32023,
           "desc": "if_match ETag did not match current generation."
         },
         {
           "name": "STORAGE_ERR_QUOTA_EXCEEDED",
-          "code": -32102,
+          "code": -32024,
           "desc": "User APS quota exhausted."
         },
         {
           "name": "STORAGE_ERR_UPSTREAM",
-          "code": -32199,
+          "code": -32029,
           "desc": "Nexus REST returned a non-success status."
         }
       ],
@@ -1047,32 +1092,32 @@
       "errors": [
         {
           "name": "STORAGE_ERR_NOT_GRANTED",
-          "code": -32101,
-          "desc": "Agent did not mint a storage_token for this invoke."
+          "code": -32021,
+          "desc": "No `storage_token` available: the Executa is not installed or is disabled, or — outside an invoke — background credentials could not be obtained."
         },
         {
           "name": "STORAGE_ERR_INVALID_REQUEST",
-          "code": -32104,
+          "code": -32028,
           "desc": "Required field (key/path) missing or wrong type."
         },
         {
           "name": "STORAGE_ERR_NOT_FOUND",
-          "code": -32108,
+          "code": -32022,
           "desc": "Key/path does not exist (normalised on `get`)."
         },
         {
           "name": "STORAGE_ERR_PRECONDITION_FAILED",
-          "code": -32112,
+          "code": -32023,
           "desc": "if_match ETag did not match current generation."
         },
         {
           "name": "STORAGE_ERR_QUOTA_EXCEEDED",
-          "code": -32102,
+          "code": -32024,
           "desc": "User APS quota exhausted."
         },
         {
           "name": "STORAGE_ERR_UPSTREAM",
-          "code": -32199,
+          "code": -32029,
           "desc": "Nexus REST returned a non-success status."
         }
       ],

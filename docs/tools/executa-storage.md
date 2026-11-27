@@ -4,7 +4,7 @@ description: "Per-user durable KV + object store hosted by Anna — no cloud acc
 section: tools
 slug: executa-storage
 order: 11
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 9
 verified_runtime: "1.1.0-beta.135"
 verified_cli: "0.1.49"
@@ -29,7 +29,7 @@ If your data is bigger than a few KB or is binary, prefer object storage — KV 
 
 ## Pre-conditions
 
-End-to-end APS access requires **v2 negotiation** only: the plugin echoes `protocolVersion: "2.0"` and exposes the storage capability in its `initialize` response (`capabilities.storage = {}` is sufficient). The host mints a `storage_token` on **every** invoke of every installed, enabled Executa — there is no `host_capabilities` declaration and no user switch. `-32021 STORAGE_NOT_GRANTED` in production means exactly one thing: the Executa is not installed or the user disabled it.
+End-to-end APS access requires **v2 negotiation** only: the plugin echoes `protocolVersion: "2.0"` and exposes the storage capability in its `initialize` response (`capabilities.storage = {}` is sufficient). The host mints a `storage_token` on **every** invoke of every installed, enabled Executa — there is no `host_capabilities` declaration and no user switch. `-32021 STORAGE_NOT_GRANTED` in production means the Executa is not installed or the user disabled it — or, on a call issued outside an invoke, that [background credentials](/developers/tools/executa-lifecycle#background-execution) could not be obtained.
 
 What the manifest *does* decide is **which scopes** the token carries (`allowed_scopes` claim):
 
@@ -45,18 +45,17 @@ Legacy `aps.kv` / `aps.files` / other `host_capabilities` strings are ignored (`
 | Scope | Owner | Visibility |
 |---|---|---|
 | `user` | The end user | Their own dashboards & every plugin that declares `storage.scopes.user`. |
-| `app`  | The Anna App bundle | Shared across the same app for one user. Reachable from the App-side Host API, and from plugin reverse RPCs **only when the invoke comes from that App's context** (window `tools.invoke` or an async job) — see the warning below. |
+| `app`  | The Anna App bundle | Shared across the same app for one user. Reachable from the App-side Host API, and from the reverse RPCs of **an Executa bundled with that App** — see the warning below. |
 | `tool` | The Executa plugin | Strictly local to (user × executa). |
 
 > [!WARNING]
 > Plugin-side `storage_token`s carry `scope='tool'` always and `scope='user'` only when declared. Calling `storage/*` / `files/*` with `scope: "app"` outside the conditions below fails with `storage_token does not permit scope='app'; allowed=['tool', 'user']`.
 >
-> **App-context exception (host-attested).** When the invoke is dispatched from an Anna App context, the host mints the App's own identity into the token (`app_id`/`app_slug` claims + `"app"` in `allowed_scopes`) and the plugin may read/write **that App's own** bucket. Both conditions must hold:
+> **Bundled Executas carry their App's identity (host-attested).** An Executa that ships inside an Anna App (`app_bundled`) belongs to that one App. The host mints the App's identity into its token (`app_id`/`app_slug` claims + `"app"` in `allowed_scopes`) and the plugin may read/write **that App's own** bucket — on every path: window `tools.invoke`, async jobs, chat, and [background execution](/developers/tools/executa-lifecycle#background-execution). The one condition is that the App is installed and enabled for the user.
 >
-> 1. the invoke comes from an App context — window `tools.invoke` or an async tool job (chat / agent-session invokes never qualify);
-> 2. the hosting App is installed and enabled for the user.
+> An Executa that does not belong to an App (`public` / `private`) gets `"app"` only while it is invoked from an App's window or async job, and then for that hosting App.
 >
-> Failing either only drops `"app"` from the token — `user`/`tool` access is unaffected. The bucket owner always comes from the token claims: passing `owner` in the request is ignored, and another App's bucket is **never** reachable from a plugin (cross-owner app access is iframe-only via the App's `storage.scopes.app`). For per-user data from a plugin, prefer `scope: "user"`.
+> Not meeting the condition only drops `"app"` from the token — `user`/`tool` access is unaffected. The bucket owner always comes from the token claims: passing `owner` in the request is ignored, and another App's bucket is **never** reachable from a plugin (cross-owner app access is iframe-only via the App's `storage.scopes.app`). For per-user data from a plugin, prefer `scope: "user"`.
 
 Always pass `scope` explicitly on every call — client and host defaults differ. To write into the end user's drive, pass `scope: "user"` on the same `files/*` methods — the scope check is the `storage_token`'s `allowed_scopes` claim, not the method name.
 
@@ -91,6 +90,7 @@ The Agent forwards every storage RPC over HTTP to Nexus's `/api/v1/storage/*` en
 | `storage/set` | Write one JSON value | `key`, `value`, `ttl_seconds?`, `if_match?` |
 | `storage/delete` | Soft-delete a key | `key`, `scope` |
 | `storage/list` | List keys by prefix (paged) | `prefix`, `cursor?`, `limit?` |
+| `storage/quota_status` | Read the user's global storage quota | — (no params) |
 | `files/upload_begin` | Mint a presigned PUT URL | `path`, `content_type`, `size_bytes` |
 | `files/upload_complete` | Commit after PUT succeeds | `path`, `etag` |
 | `files/download_url` | Mint a time-limited GET URL | `path` |
@@ -108,6 +108,7 @@ Pass `scope: "user"` on any `files/*` method to target the user drive; the reque
 | `storage/set` | `{"etag": "…", "size_bytes": …}` |
 | `storage/delete` | `{"deleted": true}` |
 | `storage/list` | `{"items": [...], "next_cursor": …}` |
+| `storage/quota_status` | `{"used_bytes": …, "quota_bytes": …, "entries_count": …, "percent": …, "plan_name": "…", "plan_label": "…"}` |
 | `files/upload_begin` | `{"presigned_url": "https://…", "fields": {…}, "expires_at": …}` |
 | `files/upload_complete` | `{"path": "…", "etag": "…", "size_bytes": …}` |
 | `files/download_url` | `{"url": "https://…", "expires_at": …}` |
@@ -179,21 +180,25 @@ The two-step shape lets the bytes go directly to R2 without round-tripping throu
 | Per-user total bytes | **5 GB** | `PlanMetric.storage_quota_bytes`, plan-overridable |
 | Single KV value | **64 KB** (advisory; hard cap configured per env) | `STORAGE_ERR_VALUE_TOO_LARGE` if exceeded |
 | Single object | platform `objectMaxBytes` constant | host returns `-32024 QUOTA_EXCEEDED` |
-| Per-invoke storage RPCs | **200** (default `max_calls` in `storage_token`) | `STORAGE_ERR_RATE_LIMITED` if exceeded |
 | `storage_token` TTL | **600 s** | JWT `aud=aps-storage` |
 
-Treat `RATE_LIMITED` and `QUOTA_EXCEEDED` as **non-retryable** within the same invocation; treat `UPSTREAM_ERROR` as retryable with backoff.
+`storage/quota_status` reports where the user stands against the first row: quota is enforced **per user** across every scope and bucket (`user`, every App, every tool), so it is the only correct denominator for a "storage used" display — a size sum over `storage/list` of your own bucket is not. `quota_bytes` is `-1` on an unlimited plan and `percent` is a `0`–`1` fraction. The method takes no params (`scope` does not apply) and returns aggregate numbers only. It needs an Anna Agent built on or after **2026-11-20**; an older Agent answers `-32601` (method not found) — treat that as "unknown" and keep working.
+
+There is no cap on the number of storage RPCs per invoke. Treat `QUOTA_EXCEEDED` as **non-retryable** within the same invocation; treat `UPSTREAM_ERROR` as retryable with backoff.
+
+> [!TIP]
+> **Local development:** `storage/quota_status` returns your real quota under `anna-app dev --storage aps` (CLI ≥ 0.1.68) and `not_implemented` in the default in-memory mode — the harness never invents quota numbers. See [Executa reverse RPC under `anna-app dev`](/developers/apps/local-dev#executa-reverse-rpc-under-anna-app-dev).
 
 ## Error codes
 
 | Code | Name | Meaning |
 |---|---|---|
-| `-32021` | `STORAGE_NOT_GRANTED` | Executa not installed or disabled by the user. |
+| `-32021` | `STORAGE_NOT_GRANTED` | Executa not installed or disabled by the user; outside an invoke, also when [background credentials](/developers/tools/executa-lifecycle#background-execution) are unavailable. |
 | `-32022` | `NOT_FOUND` | Key / path does not exist (only surfaced where it's not normalised away). |
 | `-32023` | `PRECONDITION_FAILED` | `if_match` etag mismatch. |
 | `-32024` | `QUOTA_EXCEEDED` | Plan storage quota exhausted. |
 | `-32025` | `VALUE_TOO_LARGE` | KV value above per-call ceiling. |
-| `-32026` | `RATE_LIMITED` | Per-invoke RPC budget exhausted. |
+| `-32026` | `RATE_LIMITED` | **Reserved, not raised.** There is no per-invoke RPC budget. |
 | `-32027` | `INVALID_PATH` | Reserved / out-of-bucket path. |
 | `-32028` | `INVALID_REQUEST` | Missing required field, wrong type. |
 | `-32029` | `UPSTREAM_ERROR` | Network / 5xx from Nexus REST. Also surfaces Nexus 403s — e.g. `storage_token does not permit scope='app'; allowed=['tool', 'user']` when a plugin requests the `app` scope outside an App-context invoke (see [Scopes](#scopes)). |
@@ -211,7 +216,7 @@ The agent never sees the raw RPC; the tool wraps each call in a soft **5-write /
 
 ## Best practices
 
-1. **Default to `tool` scope.** Use `user` only when the data is genuinely user-owned. (`app` scope is not available to plugins — it belongs to the App-side Host API.)
+1. **Default to `tool` scope.** Use `user` only when the data is genuinely user-owned, and `app` (bundled Executas only) for data the App's page and its Executa share.
 2. **Encode metadata in the key, not the value.** `notes/{noteId}` is searchable via `storage/list`; embedded JSON fields are not.
 3. **Keep individual KV values small** — anything bigger than a few KB belongs in objects.
 4. **Always pass `if_match` on overwrite.** Lost updates are silent and miserable to debug.

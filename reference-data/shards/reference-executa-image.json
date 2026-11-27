@@ -40,7 +40,6 @@
           "notes": [
             "**Host hard cap `_MAX_N = 8`**. Enforced by the matrix Agent's `_validate_generate` BEFORE the request leaves the plugin host. `n > 8` → `MAX_IMAGES_EXCEEDED` (`-32106`) with `data.hostCap = 8`.",
             "**Per-call cap** = `image_token.max_per_call_generate` (platform constant **4**). Enforced by the Nexus gate AFTER token decode. `n > max_per_call_generate` → `IMAGE_PER_CALL_EXCEEDED` (`-32107`).",
-            "**Per-invoke rolling counter** `img:invoke:{tool_invoke_id}` (Redis HASH `images` field, **30-min TTL** = `_INVOKE_TTL_SECONDS`). Caps the cumulative total across all `image/generate` + `image/edit` calls in the same `tool_invoke_id` at `image_token.max_images` (default **4** = `DEFAULT_IMAGE_MAX_IMAGES`). Exceed → `MAX_IMAGES_EXCEEDED` (`-32106`) with `data.images` and `data.maxImages` set.",
             "Not every provider supports `n > 1` (DALL·E 3 does not). The host attempts to batch and silently degrades to N serial single-image calls when the provider can't batch — billing is identical; latency is N×."
           ]
         },
@@ -201,7 +200,7 @@
         {
           "name": "IMAGE_MAX_IMAGES_EXCEEDED",
           "code": -32106,
-          "desc": "Either (a) matrix Agent local check: `n > _MAX_N (8)` with `data.hostCap = 8`; or (b) Nexus invoke-rolling counter exceeded with `data == {\"images\": <int>, \"maxImages\": <int>}`. SDK constant: `IMAGE_ERR_MAX_IMAGES_EXCEEDED`."
+          "desc": "matrix Agent local check: `n > _MAX_N (8)` with `data.hostCap = 8`. There is no per-invoke image budget. SDK constant: `IMAGE_ERR_MAX_IMAGES_EXCEEDED`."
         },
         {
           "name": "IMAGE_PER_CALL_EXCEEDED",
@@ -232,7 +231,7 @@
       "example": "# Inside an Executa plugin (executa_sdk).\nfrom executa_sdk import ImageClient, ImageError, IMAGE_ERR_NOT_GRANTED, IMAGE_ERR_QUOTA_EXCEEDED\n\nimage = ImageClient()                       # uses default stdout write_frame\n\nasync def make_poster(req_id: str, invoke_id: str, prompt: str) -> dict:\n    try:\n        result = await image.generate(\n            prompt=prompt,\n            n=2,\n            size=\"1024x1024\",\n            metadata={\"executa_invoke_id\": invoke_id},  # billing correlation — always include\n            timeout=120.0,\n        )\n    except ImageError as e:\n        if e.code == IMAGE_ERR_NOT_GRANTED:\n            return {\"success\": False, \"error\": \"executa disabled or not installed\"}\n        if e.code == IMAGE_ERR_QUOTA_EXCEEDED:\n            return {\"success\": False, \"error\": \"image quota exhausted; ask the user to upgrade\"}\n        raise\n\n    # Each url is a transient host-stored HTTPS URL (~30 min TTL).\n    # Persist via `host/uploadFile` if you need it long-term.\n    urls = [img[\"url\"] for img in result[\"images\"]]\n    return {\"success\": True, \"data\": {\"images\": urls, \"model\": result[\"model\"]}}\n",
       "limitations": [
         "**Returned URLs expire in ~30 min** (`R2_TRANSIENT_PRESIGN_EXPIRY = 1800`). The exact remaining seconds are reported in `images[i].expires_in`. Do not cache `url` in user-visible state without re-presigning. For durable storage, GET the bytes within the TTL and round-trip through `host/uploadFile` or `files/upload_begin`.",
-        "**Three different error codes guard `n`** — do not lump them together: `n > 8` (host hard cap) → `IMAGE_MAX_IMAGES_EXCEEDED` (-32106) with `data.hostCap`; `n > image_token.max_per_call_generate` → `IMAGE_PER_CALL_EXCEEDED` (-32107); cumulative invoke total exceeds `image_token.max_images` → `IMAGE_MAX_IMAGES_EXCEEDED` (-32106) with `data.images`/`data.maxImages`. Tell the user which one tripped — UX language differs.",
+        "**Two different error codes guard `n`** — do not lump them together: `n > 8` (host hard cap) → `IMAGE_MAX_IMAGES_EXCEEDED` (-32106) with `data.hostCap`; `n > image_token.max_per_call_generate` → `IMAGE_PER_CALL_EXCEEDED` (-32107). There is no cumulative per-invoke cap. Tell the user which one tripped — UX language differs.",
         "**No streaming.** Generation is fully buffered — your `invoke` blocks until the provider returns or `timeout` fires. Set `timeout ≥ 60 s` and tell the LLM how long to wait if user-facing.",
         "**SDK-local timeout vs upstream timeout look different on the wire**: `IMAGE_TIMEOUT` (-32105) only fires inside the SDK's `asyncio.wait_for`. An upstream timeout becomes `IMAGE_PROVIDER_ERROR` (-32103) with `error_name == \"subcall_timeout\"` and `data.subcall == \"image\"`. Match on those, not on numeric code, for retry/fallback logic.",
         "**Nothing to declare in the manifest** — the host mints an `image_token` (generate + edit) on every invoke of every installed, enabled Executa. Legacy `host_capabilities: [\"llm.image\"]` strings are ignored (`anna-app validate` warns).",
@@ -395,7 +394,7 @@
         {
           "name": "MAX_IMAGES_EXCEEDED",
           "code": -32106,
-          "desc": "`n` exceeds host or per-call cap, or per-invoke rolling counter exhausted."
+          "desc": "`n` exceeds host or per-call cap."
         },
         {
           "name": "NOT_NEGOTIATED",
@@ -439,7 +438,7 @@
       "group": "Image · async jobs",
       "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/image/generate_async`",
-      "summary": "Submit an async text-to-image / reference-image job (same body as `image/generate` + `clientTag?` / `idempotencyKey?`; snake_case `job_id` / `client_tag` also accepted) → `{jobId:'ijob_…', kind:'image', state:'queued', estimatedCostCU, deadlineAt, idempotentReplay}`. Same `image_token` as the sync call — nothing to declare. Per-invoke `max_images` is **reserved by `n` at submit** and not released if the job later fails (guardrail, not billing — the CU hold is refunded). Use the SDK wrapper `generate_await` or return `jobId` from the invoke and resume with `image/get_job` for renders longer than the invoke budget.",
+      "summary": "Submit an async text-to-image / reference-image job (same body as `image/generate` + `clientTag?` / `idempotencyKey?`; snake_case `job_id` / `client_tag` also accepted) → `{jobId:'ijob_…', kind:'image', state:'queued', estimatedCostCU, deadlineAt, idempotentReplay}`. Same `image_token` as the sync call — nothing to declare. Use the SDK wrapper `generate_await` or return `jobId` from the invoke and resume with `image/get_job` for renders longer than the invoke budget.",
       "wire": {
         "json_rpc_method": "image/generate_async",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -467,7 +466,7 @@
           "name": "idempotencyKey",
           "type": "string",
           "required": false,
-          "summary": "`^[A-Za-z0-9_\\-:.]{1,64}$`; recommended `f\"{tool_invoke_id}:{attempt}\"`. 24h replay returns the existing job, no second charge (and releases the per-invoke reservation).",
+          "summary": "`^[A-Za-z0-9_\\-:.]{1,64}$`; recommended `f\"{tool_invoke_id}:{attempt}\"`. 24h replay returns the existing job, no second charge.",
           "notes": []
         }
       ],
@@ -497,7 +496,7 @@
         {
           "name": "IMAGE_MAX_IMAGES_EXCEEDED",
           "code": -32106,
-          "desc": "Per-invoke `max_images` would be exceeded — reserved by `n` at submit time (`data.{images, maxImages}`).",
+          "desc": "`n` exceeds the host hard cap (8; `data.hostCap`). There is no per-invoke image budget.",
           "retryable": false
         },
         {
@@ -588,7 +587,7 @@
         {
           "name": "IMAGE_MAX_IMAGES_EXCEEDED",
           "code": -32106,
-          "desc": "Per-invoke `max_images` would be exceeded — reserved by `n` at submit time (`data.{images, maxImages}`).",
+          "desc": "`n` exceeds the host hard cap (8; `data.hostCap`). There is no per-invoke image budget.",
           "retryable": false
         },
         {
@@ -678,7 +677,7 @@
       "group": "Image · async jobs",
       "since": "protocol v2.0 · image_token (aud executa-image) · matrix ≥ image-jobs reverse-RPC release / nexus dispatcher 0.29.0 (2026-10-21)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/image/cancel_job`",
-      "summary": "Cancel: `queued` = guaranteed + full refund (`{state:'cancelled', refunded:true}`); `running` = best-effort — provider may refuse (`{state:'running', cancelPending:false}`), the job then runs to terminal and is billed. The per-invoke `max_images` reservation is **not** released.",
+      "summary": "Cancel: `queued` = guaranteed + full refund (`{state:'cancelled', refunded:true}`); `running` = best-effort — provider may refuse (`{state:'running', cancelPending:false}`), the job then runs to terminal and is billed.",
       "wire": {
         "json_rpc_method": "image/cancel_job",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",

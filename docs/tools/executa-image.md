@@ -4,7 +4,7 @@ description: "Ask the host to generate or edit images on the user's behalf, with
 section: tools
 slug: executa-image
 order: 12
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 8
 ---
 
@@ -19,7 +19,10 @@ Available from Executa protocol **v2** onward; companion to [Sampling](/develope
 
 End-to-end image generation requires **v2 negotiation**: the host sends `initialize`; the plugin replies with `protocolVersion: "2.0"` and lists `client_capabilities.image` (and `image.edit` if you use `image/edit`). Without it the host returns `IMAGE_NOT_NEGOTIATED (-32107)`.
 
-There is no manifest declaration and no user toggle: the host mints an `image_token` on **every** invoke of every installed, enabled Executa, for both `generate` and `edit`. `IMAGE_NOT_GRANTED (-32101)` in production means the Executa is not installed or the user disabled it. Per-call / per-invoke caps are platform constants (4 images per `generate` call, 1 per `edit`, 4 per invoke).
+There is no manifest declaration and no user toggle: the host mints an `image_token` on **every** invoke of every installed, enabled Executa, for both `generate` and `edit`. `IMAGE_NOT_GRANTED (-32101)` in production means the Executa is not installed or the user disabled it. Per-call caps are platform constants (4 images per `generate` call, 1 per `edit`); there is no per-invoke cap.
+
+> [!TIP]
+> **Local development:** the async job methods and `image/resign` are available to a bundled Executa under a signed-in `anna-app dev` (CLI ≥ 0.1.68), alongside the synchronous `image/generate` / `image/edit`. See [Executa reverse RPC under `anna-app dev`](/developers/apps/local-dev#executa-reverse-rpc-under-anna-app-dev).
 
 ## Wire protocol
 
@@ -119,10 +122,6 @@ Rules that differ from the sync calls:
   actual image count (shortfall refunded; failed / cancelled / expired /
   provider-rejected → full refund). `request_type` is `EXECUTA_IMAGE_GEN` /
   `EXECUTA_IMAGE_EDIT` as before.
-- **Per-invoke `max_images`** is reserved by `n` **at submit time** and is *not*
-  released when the job later fails or is cancelled — it is a runaway guard,
-  not billing (the CU hold is). A rejected submit or an idempotent replay does
-  release it.
 - **Idempotency.** Pass `idempotencyKey` (`^[A-Za-z0-9_\-:.]{1,64}$`, suggested
   `f"{tool_invoke_id}:{attempt}"`); the same key within 24 h returns the
   existing job with `idempotentReplay: true` and never charges twice.
@@ -222,7 +221,7 @@ res, err := c.Generate(imageclient.GenerateRequest{
 | `-32103` | `IMAGE_PROVIDER_ERROR`   | Upstream provider 5xx / model error. |
 | `-32104` | `IMAGE_INVALID_REQUEST`  | Bad `size`, empty `prompt`, etc. |
 | `-32105` | `IMAGE_TIMEOUT`          | Provider exceeded host wall-clock. |
-| `-32106` | `IMAGE_MAX_IMAGES_EXCEEDED` | Per-invoke image budget (4) exhausted. |
+| `-32106` | `IMAGE_MAX_IMAGES_EXCEEDED` | `n` of a single call exceeds the host hard cap (8; `data.hostCap`). There is no per-invoke image budget. |
 | `-32107` | `IMAGE_NOT_NEGOTIATED`   | v2 not negotiated (`client_capabilities.image` missing). |
 | `-32108` | `IMAGE_USER_DENIED`      | User declined an in-the-moment confirm prompt. |
 | `-32109` | `IMAGE_NO_MODEL_AVAILABLE` | User has no image provider configured. |
@@ -242,7 +241,7 @@ res, err := c.Generate(imageclient.GenerateRequest{
 ## Pitfalls
 
 > [!WARNING]
-> **`n` is capped per-call AND per-invoke.** A single `generate` call accepts at most 4 images (`edit`: 1), and one invoke may produce at most 4 in total; the user's CU pool is the only other limit. Surface the canonical error code — never silently retry with smaller `n`.
+> **`n` is capped per call.** A single `generate` call accepts at most 4 images (`edit`: 1); the user's CU pool is the only other limit. Surface the canonical error code — never silently retry with smaller `n`.
 
 > [!IMPORTANT]
 > **Returned URLs expire.** R2 presigned URLs last ~30 min. Keep `images[].r2_key` (sync) / `result.images[].r2Key` (job) instead and call `image/resign` to get a fresh URL for up to 7 days; for durable storage persist via [`host/uploadFile`](/developers/tools/executa-host-upload). Treat the URL as an ephemeral artifact, not durable storage.

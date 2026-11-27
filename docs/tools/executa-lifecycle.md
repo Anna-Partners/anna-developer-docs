@@ -4,7 +4,7 @@ description: "How the Agent spawns, initializes, calls, and shuts down an Execut
 section: tools
 slug: executa-lifecycle
 order: 6
-updated: 2026-11-02
+updated: 2026-11-25
 estimated_minutes: 7
 verified_runtime: "1.1.0-beta.135"
 ---
@@ -49,7 +49,6 @@ The Agent always tries v2 first. The handshake exchanges two pieces of informati
       "sampling": {
         "modalities": ["text"],
         "maxTokensPerCall": 8192,
-        "maxCallsPerInvoke": 8,
         "responseFormat": ["json_object", "json_schema"]
       },
       "fileTransport": true
@@ -90,7 +89,7 @@ The `initialize` handshake is all a plugin needs to use the reverse-RPC surface.
 
 The one thing a plugin manifest can still declare is a **cross-boundary storage scope**: by default `storage_token.allowed_scopes` is `["tool"]` (your private bucket); declaring `"storage": { "scopes": { "user": "rw" } }` (or the legacy `aps.scope.user.read` / `.write` strings, still accepted) adds `"user"`. See [Persistent Storage](/developers/tools/executa-storage#scopes). Legacy `host_capabilities` strings such as `llm.sample` / `aps.kv` / `aps.files` are ignored (not rejected) — `anna-app validate` warns so you can delete them.
 
-The remaining `*_NOT_GRANTED` errors (`-32001` sampling, `-32021` storage, `-32101` image, `-32201` upload, `-3212x` / `-3214x` / `-3216x` media) mean exactly one thing in production: the Executa is not installed or the user disabled it.
+The remaining `*_NOT_GRANTED` errors (`-32001` sampling, `-32021` storage, `-32101` image, `-32201` upload, `-3212x` / `-3214x` / `-3216x` media) mean the Executa is not installed or the user disabled it. On a reverse RPC issued outside an invoke they can also mean the background credentials could not be obtained — see [Background execution](#background-execution).
 
 ## Per-invoke context injection
 
@@ -115,12 +114,63 @@ Once v2 is live, every `invoke` request also carries a `context` block beside `t
 | Field | Source | Used for |
 |---|---|---|
 | `credentials` | [Platform Authorization](/developers/tools/executa-authorization) + per-plugin overrides | Talking to third-party APIs |
-| `invoke_id` | Auto-minted by the Agent (UUID hex) | Audit correlation; reverse-RPC budget keying |
+| `invoke_id` | Auto-minted by the Agent (UUID hex) | Audit correlation; matching reverse RPCs to their invoke |
 | `sampling_token` | Nexus, JWT `aud=executa-sampling`, TTL 600 s | `sampling/createMessage` and `agent/*` authorization |
 | `storage_token`  | Nexus, JWT `aud=aps-storage`, TTL 600 s | `storage/*` & `files/*` authorization (`allowed_scopes` claim) |
 | `image_token` / `media_token` / `upload_token` | Nexus, per-invoke JWTs | `image/*`, `video/*` / `music/*` / `audio/*`, `host/uploadFile` |
 
-Tokens are bound to (`user_id`, `executa_tool_id`, `tool_invoke_id`) and expire shortly after the invoke completes — **never** persist them across invocations. When the invoke is dispatched from an Anna App context (window `tools.invoke` / async job), the `storage_token` additionally carries host-attested `app_id`/`app_slug` claims that unlock the hosting App's own `scope="app"` bucket — see [Persistent Storage § Scopes](/developers/tools/executa-storage#scopes) for the exact conditions.
+Tokens are bound to (`user_id`, `executa_tool_id`, `tool_invoke_id`) and expire shortly after the invoke completes — **never** persist them across invocations. For an Executa bundled with an Anna App, the `storage_token` additionally carries host-attested `app_id`/`app_slug` claims that unlock that App's own `scope="app"` bucket — see [Persistent Storage § Scopes](/developers/tools/executa-storage#scopes) for the exact conditions.
+
+## Background execution
+
+A plugin process outlives every single invoke, and it may issue reverse RPCs at any time: when it starts, from a timer, or from work that continues after an invoke has returned. The host serves those with **background credentials** — the same token set an invoke gets, issued to the Executa itself.
+
+**What counts as outside an invoke.** The Agent matches every reverse RPC to an invoke:
+
+| The request… | Served with |
+|---|---|
+| carries the `context.invoke_id` of an active invoke | that invoke's tokens |
+| carries no `invoke_id` while exactly one invoke is active | that invoke's tokens |
+| carries no `invoke_id` while no invoke, or more than one, is active | background credentials |
+| carries the `invoke_id` of an invoke that has already finished | background credentials |
+
+The SDKs stamp `invoke_id` on everything issued inside `bind_invoke` (Python) / `bindInvoke` (Node). A task started inside a handler inherits that binding, so work meant to outlive its invoke should detach explicitly:
+
+```python
+async def long_running_work():
+    with bind_invoke(None):
+        ...  # reverse RPCs here are background
+```
+
+**What you get**
+
+- **Every reverse RPC an invoke can issue** — storage, files, web, sampling, agent sessions, embeddings, image, video, music, audio, host upload, credentials. There is no separate allow-list.
+- **From process start.** It does not depend on an earlier invoke.
+- **The same identity as an invoke.** An Executa bundled with an App acts as that App: `scope="app"` is the App's bucket and agent sessions it creates belong to the App. Any other Executa gets its `tool` scope plus the `user` scope it declares.
+- **Nothing to manage.** The Agent holds the tokens (valid for 30 minutes) and replaces them ahead of expiry. The plugin never sees them.
+
+**What it costs.** Background calls are billed in CU exactly like calls inside an invoke, and there is no cumulative cap — a loop that keeps calling keeps spending. The user's CU balance is the only limit.
+
+**When it stops**
+
+- **The user disables or uninstalls the Executa.** The next credential rotation is refused; tokens already issued stay valid for at most 30 minutes.
+- **The Agent is not running.** A Cloud Agent suspends 120 minutes after its last invoke, and background activity does not keep it awake. The process is frozen with its memory intact and continues on the next invoke.
+- **The process restarts** (Agent upgrade, crash). In-memory state is gone — persist what you need.
+
+When background credentials are unavailable, a reverse RPC outside an invoke fails with its family's `*_NOT_GRANTED` code. Agents that predate background execution answer the same way, so code written for it degrades cleanly.
+
+### Backend-owned tasks
+
+Background execution is what lets an Executa own a long task instead of the page:
+
+| Situation | How | Who owns the task and its state |
+|---|---|---|
+| Ask and answer | `tools.invoke`; reverse RPCs inside the invoke | — |
+| **Backend-owned task** — the page only triggers; work continues after the window closes; reopening shows the complete current state | `tools.invoke` to trigger (returns a task id at once), work outside any invoke, `tools.invoke` to read by id | Your Executa |
+| Host-managed job — you want the host's progress stream, cancel, timeout and cleanup | [`tools.invokeAsync`](/developers/apps/app-ui-sdk) | The host |
+| Work nobody triggers — periodic sync, backup, startup checks | Background, from process start | Your Executa |
+
+Owning the task means owning its progress, cancellation, timeouts and retries, and writing its state somewhere durable (workspace or [Persistent Storage](/developers/tools/executa-storage)). The reference implementation is [`anna-app-background-demo`](https://github.com/whtcjdtc2007/anna-executa-examples/tree/main/examples/anna-app-background-demo): a health check that runs every reverse RPC family in the background and reports the task's complete state whenever the page asks.
 
 ## Health probe (optional)
 

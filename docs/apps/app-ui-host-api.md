@@ -4,14 +4,14 @@ description: "RPC namespaces and methods your iframe can call on the host, with 
 section: apps
 slug: app-ui-host-api
 order: 14
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 6
 category: "App UI"
 ---
 
 Every call from your iframe goes through `postMessage → Host Bridge → POST /api/v1/anna-apps/runtime/rpc → anna_app_rpc_dispatcher.dispatch`. The dispatcher authenticates the call — `decode_window_token(t)` against the JWT bound to `(window_uuid, user_id, app_id, version_id)` (TTL 120s, audience `anna-app-window`) — then dispatches to the namespace handler.
 
-**There is no method-level ACL and no per-app user grant.** Every method below is available to an installed, enabled App; the user's CU quota is the only usage gate. The only manifest-driven checks are the three [capability declarations](/developers/apps/app-manifest#capability-declarations): `credentials.*` for undeclared providers, `storage.*` / `files.*` for undeclared cross-app scopes, and `tools.invoke` for an Executa outside `required_executas` / `optional_executas` all fail with `permission_denied`. Any failure returns `{ ok: false, error: { code, message, details? } }`.
+**There is no method-level ACL and no per-app user grant.** Every method below is available to an installed, enabled App; the user's CU quota is the only usage gate. The only manifest-driven checks are the five [capability declarations](/developers/apps/app-manifest#capability-declarations): `credentials.*` for undeclared providers, `share.*` without `ui.host_api.share: true`, `conversation.*` without `ui.host_api.conversation: true`, `storage.*` / `files.*` for undeclared cross-app scopes, and `tools.invoke` for an Executa outside `required_executas` / `optional_executas` all fail with `permission_denied` (or `share_not_declared` / `conversation_not_declared` for those two namespaces). Any failure returns `{ ok: false, error: { code, message, details? } }`.
 
 ## RPC envelope
 
@@ -291,11 +291,29 @@ for (const job of jobs) {
 
 ### `chat`
 
+> **Deprecated.** `chat.append_artifact` and `chat.write_message` still return successfully, but the dashboard no longer has a conversation surface, so nothing renders what they send. Do not build on them. For conversations your App owns, use [`conversation.*`](#conversation).
+
 | method | status | args | result |
 |---|---|---|---|
-| `append_artifact` | ✅ | `{ artifact: { kind: "app_event"\|"text"\|"image"\|…, summary?, data?, payload_ref?, app_slug? } }` — note the **nested `artifact` wrapper** and the `data` field (inline JSON); a flat arg object or a `payload` field is silently dropped | `{ artifact_id }` — attaches a transient card to the current conversation (realtime-only: not persisted, not part of the assistant turn / LLM context yet — thread persistence is a later phase) |
-| `read_history` | ⏳ | `{ limit?, before? }` | future |
-| `write_message` | ⏳ | `{ role, content }` | future |
+| `append_artifact` | ⚠️ deprecated | `{ artifact: { kind: "app_event"\|"text"\|"image"\|…, summary?, data?, payload_ref?, app_slug? } }` — note the **nested `artifact` wrapper** and the `data` field (inline JSON); a flat arg object or a `payload` field is silently dropped | `{ artifact_id }` — emits an `artifact_appended` event that no surface displays any more |
+| `write_message` | ⚠️ deprecated | `{ role, content }` | `{ message_id }` — never persisted; emits an event that no surface displays |
+
+### `conversation`
+
+Durable conversations with the user's memory, persisted history and full agent, isolated per App. Requires `ui.host_api.conversation: true` in the manifest. Methods: `conversation.list` / `conversation.create` / `conversation.update` / `conversation.delete` / `conversation.messages` / `conversation.send` / `conversation.status` / `conversation.cancel` / `conversation.modify` / `conversation.options`. Full guide: [Durable conversations](/developers/apps/app-ui-conversation).
+
+| method | status | args | result |
+|---|---|---|---|
+| `list` | ✅ | `{}` | `{ conversations: Conversation[] }` — ensures the default conversation exists |
+| `create` | ✅ | `{ name?, zen?, override_model? }` | `Conversation` |
+| `update` | ✅ | `{ conversation_uuid, name?, is_pinned?, override_model?, thinking?, pinned_agent_id?, pinned_mentions? }` | `Conversation` |
+| `delete` | ✅ | `{ conversation_uuid }` | `{ deleted: true }` |
+| `messages` | ✅ | `{ conversation_uuid, limit?, after_id? }` | `{ messages, … }` — persisted history |
+| `send` | ✅ | `{ conversation_uuid, message, attachments?, executa_ids?, app_ids?, mention_modes?, thinking? }` | `{ task_id, stream_id }` — frames arrive as `rpc.stream` events on `stream_id` |
+| `status` | ✅ | `{ conversation_uuid }` | `{ task, stream_id }` — `task` is `null` when idle |
+| `cancel` | ✅ | `{ conversation_uuid, task_id, reason? }` | Stops the running task |
+| `modify` | ✅ | `{ conversation_uuid, task_id, instruction }` | Sends a correction to the running task |
+| `options` | ✅ | `{}` | `{ models, executas, agents, settings }` |
 
 ### `storage` (per-window `runtime_state`, or APS in nexus)
 
@@ -315,6 +333,16 @@ entry (otherwise `permission_denied`).
 | `set` | ✅ | `{ key, value, if_match?, metadata?, tags?, ttl_seconds? }` | `{ ok: true }` (runtime_state) or `{ etag, generation, size_bytes }` (APS) |
 | `delete` | ✅ | `{ key, if_match? }` | `{ ok: true }` / `{ deleted: true }` |
 | `list` | ✅ | `{ prefix?, cursor?, limit?=100 }` | `{ items: [{ key, etag, size_bytes, metadata, tags, updated_at }], next_cursor }` |
+| `quota` | ✅ 0.35.0 | `{}` | `{ used_bytes, quota_bytes, entries_count, percent, plan_name, plan_label }` — the **user's** global storage quota |
+
+`storage.quota` takes no arguments and needs no declaration. Quota is
+enforced per user across every scope and every app's bucket, so this is the
+only correct denominator for a "storage used" bar — do not sum `list`
+results. `quota_bytes` is `-1` when the plan is unlimited; `percent` is a
+`0`–`1` fraction (`0` when unlimited). Only aggregate numbers are returned,
+never keys or values. `anna-app dev` answers `not_implemented` in its default
+in-memory storage mode and returns the real quota with `--storage aps`
+(CLI ≥ 0.1.68) — degrade silently (hide the bar) on `not_implemented`.
 
 `list` always returns the APS shape; the runtime_state backend fills
 `metadata`/`tags`/`updated_at` with `null` and synthesises a weak
@@ -461,12 +489,23 @@ Invoke-scoped, transient artifact upload to host R2.
 
 Declared in the dispatcher but stubbed today (`not_implemented`): `artifact.create` / `update` / `delete`. The former `fs.*` / `prefs.get` / `chat.read_history` placeholders were removed from the dispatcher table.
 
-`llm.complete` / `llm.stream` / `llm.embed` are **implemented** (host-side calls bound to the user's quota) — see [LLM & Agent](/developers/apps/llm-and-agent); `llm.catalog` (media capability / CU-pricing discovery) is covered in [App UI Media](/developers/apps/app-ui-media#discover-before-you-call). `files.*` (APS object storage), `web.*` (host-managed search/fetch), `apps.*` (launcher) and `credentials.*` (platform accounts — providers listed in `ui.host_api.credentials`) are implemented nexus-side; `mobile.*` executes only inside the anna-mobile shell.
+### `share`
+
+Publish rendered static files (finalized `files.*` objects in your app's own scope) as a platform-hosted, long-lived, revocable public URL. Requires `ui.host_api.share: true` in the manifest. Methods: `share.publish` / `share.list` / `share.revoke` / `share.update`. Full guide: [Public share links](/developers/apps/app-public-share).
+
+| method | status | args | result |
+|---|---|---|---|
+| `publish` | ✅ | `{ paths: string[], entry, title, description?, thumbnail_path?, path_map?, expires_at?, pub_id? }` | `{ pub_id, url, version, entry, title, total_bytes, file_count, status, expires_at, created_at }` — pass `pub_id` to republish (URL unchanged, `version += 1`) |
+| `list` | ✅ | `{ cursor?, limit? }` | `{ items: PublicationInfo[], next_cursor? }` — non-revoked publications of this `(user, app)` |
+| `revoke` | ✅ | `{ pub_id }` | `PublicationInfo` — the URL turns into a tombstone immediately (CDN residue ≤ 5 min); quota bytes are released |
+| `update` | ✅ | `{ pub_id, title?, description?, expires_at? }` | `PublicationInfo` — metadata only, never touches the snapshot |
+
+`llm.complete` / `llm.stream` / `llm.embed` are **implemented** (host-side calls bound to the user's quota) — see [LLM & Agent](/developers/apps/llm-and-agent); `llm.catalog` (media capability / CU-pricing discovery) is covered in [App UI Media](/developers/apps/app-ui-media#discover-before-you-call). `files.*` (APS object storage), `web.*` (host-managed search/fetch), `apps.*` (launcher), `share.*` (public share links — requires `ui.host_api.share: true`), `conversation.*` (durable conversations — requires `ui.host_api.conversation: true`) and `credentials.*` (platform accounts — providers listed in `ui.host_api.credentials`) are implemented nexus-side; `mobile.*` executes only inside the anna-mobile shell.
 
 ## What gates a call
 
 1. **Installed and enabled.** The App must be installed by the user and not disabled (`is_enabled`); otherwise the window token is not minted in the first place. Quota exhaustion surfaces as the facade's quota error, not as a permission error.
-2. **The three declarations**, enforced from the manifest projected onto the window's bound version row: `credentials.*` provider ∈ `ui.host_api.credentials`; `storage.*` / `files.*` cross-app scope ∈ `storage.scopes`; `tools.*` `tool_id` ∈ `required_executas` ∪ `optional_executas` (and that Executa installed and enabled). Each failure is `permission_denied`.
+2. **The five declarations**, enforced from the manifest projected onto the window's bound version row: `credentials.*` provider ∈ `ui.host_api.credentials`; `share.*` requires `ui.host_api.share: true` (fails with `share_not_declared`); `conversation.*` requires `ui.host_api.conversation: true` (fails with `conversation_not_declared`); `storage.*` / `files.*` cross-app scope ∈ `storage.scopes`; `tools.*` `tool_id` ∈ `required_executas` ∪ `optional_executas` (and that Executa installed and enabled). Each other failure is `permission_denied`.
 
 For **working-draft installs** (`0.0.0-draft`) the manifest is re-projected on every `anna-app apps push`, so a newly declared provider / scope / executa takes effect immediately for already-open draft windows — no reinstall needed (a newly added `required_executas` entry still needs the Executa installed, which `apps install` does).
 
@@ -486,6 +525,14 @@ For **working-draft installs** (`0.0.0-draft`) the manifest is re-projected on e
 | `rate_limited` | Too many in-flight RPCs (per-window cap) |
 | `state_too_large` | `storage.set` / runtime_state would exceed 256 KB |
 | `not_implemented` | Method exists in the contract but is still a stub |
+| `share_not_declared` | `share.*` without `ui.host_api.share: true` in the manifest |
+| `conversation_not_declared` | `conversation.*` without `ui.host_api.conversation: true` in the manifest |
+| `share_invalid_entry` | `share.publish` `entry` not in `paths`, or not `text/html` |
+| `share_type_not_allowed` | `share.publish` file (or thumbnail) content type outside the [whitelist](/developers/apps/app-public-share#limits) |
+| `share_limit_exceeded` | Snapshot over 100 MB / 200 files / 50 MB per file, or more than 20 active publications per app |
+| `share_quota_exceeded` | Snapshot bytes would exceed your APS storage quota |
+| `share_rate_limited` | More than 10 `share.publish` calls per hour |
+| `share_not_found` | Unknown / foreign / revoked `pub_id`, or a `paths` entry that is not a finalized object |
 | `internal_error` | Unhandled server exception (logged) |
 
 For the LLM-facing side of the same surface (`open_app_view` etc.), see [App UI LLM Integration](/developers/apps/app-ui-llm).

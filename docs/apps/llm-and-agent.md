@@ -4,7 +4,7 @@ description: "Call llm.complete and run a multi-turn agent session from inside y
 section: apps
 slug: llm-and-agent
 order: 16
-updated: 2026-11-02
+updated: 2026-11-20
 estimated_minutes: 9
 category: "App UI"
 ---
@@ -629,22 +629,31 @@ Stdio Executa plugins reach the **same** `/copilot/app/*` surface as iframe apps
 but never hold a bearer themselves. Use the `executa_sdk` Python SDK:
 
 ```python
-from executa_sdk import AgentSessionClient, dispatch_message
+from executa_sdk import AgentSessionClient, SamplingClient
 
 agent = AgentSessionClient(write_frame=write_frame)
+sampling = SamplingClient(write_frame=write_frame)
 
-# Wire response routing — same loop you already use for SamplingClient/StorageClient
+# Wire your stdin loop — responses first, then live-frame notifications
 def on_msg(msg: dict) -> bool:
-    return agent.dispatch_response(msg) or sampling.dispatch_response(msg)
+    if "method" not in msg:
+        return agent.dispatch_response(msg) or sampling.dispatch_response(msg)
+    return agent.dispatch_notification(msg)   # live agent/session.frame
 
 # Inside an `invoke`:
 session = await agent.create(kind="agent", agent_submode="auto", label="my plugin")
-async for frame in session.run("hello world"):
+async for frame in session.run("hello world"):   # yields each frame as it arrives
     if frame["event"] == "delta":
         ...
     elif frame["event"] == "final":
         result_text = frame.get("text", "")
 await session.delete()
+
+# Continue a session by uuid — for example one your page created:
+session = await agent.attach(app_session_uuid)
+
+# Plugin-side twin of agent.session.catalog():
+catalog = await agent.catalog()
 ```
 
 Or for L1 stateless completion:
@@ -663,16 +672,35 @@ caches the token internally keyed by `(user_id, plugin_name, app_session_uuid)`,
 and **never** returns it to the plugin. All subsequent `agent/session.run|cancel|delete`
 calls look the cached token up by `app_session_uuid`.
 
-**Wire format**: `agent/session.run` uses *buffered streaming* in v2 — the host
-accumulates SSE frames and returns `{run_id, stream_id, frames: [...], final}`
-once the run completes. The SDK iterates those frames so your code is identical
-to anna-app's `agent.session().run()`. A future protocol bump will switch to
-real-time push without changing the SDK API.
+**Wire format**: `agent/session.run` delivers frames live. While the run is in
+flight the host pushes each frame to the plugin as an `agent/session.frame`
+notification (the SDK asks for it with `stream: true`), and the response still
+carries the complete, authoritative `{run_id, stream_id, frames: [...], final}`.
+The SDK yields the live frames as they arrive and fills in the rest from the
+response, so your loop has the same structure as anna-app's
+`agent.session().run()`. If the stdin loop is not wired as above, or either side
+predates live frames, you get the response only — nothing breaks. See
+[Streaming choice](/developers/tools/executa-agent#streaming-choice-live-frames-authoritative-response).
 
-**Manifest**: nothing to declare — every installed, enabled Executa receives a
-`sampling_token` on each invoke. See the
-[`executa-agent-demo` example](https://github.com/talentai/anna-executa-examples/tree/main/examples/executa-agent-demo)
-for an end-to-end working plugin.
+**Session ownership**: a session an Executa creates belongs to the App that
+hosts the invoke; the Executa is recorded as its creator. When your page invokes
+an Executa, the two share your App's sessions: `anna.agent.list()` includes the
+sessions the Executa created, and the Executa can continue a page-created session
+with `attach`. Those sessions resolve your App's `ui.host_api.agent.tools`
+declaration (§1.1) — they no longer inherit the conversation's tools, so declare
+what they need. See
+[Session ownership](/developers/tools/executa-agent#session-ownership).
+
+**Manifest**: nothing to declare for access — every installed, enabled Executa
+receives a `sampling_token` on each invoke. Live frames, `attach` and `catalog`
+need Python `executa-sdk` 0.4.0; the host versions that introduce each
+capability are listed under
+[Local development](/developers/tools/executa-agent#local-development).
+
+**Example**: [`anna-app-session-demo`](https://github.com/whtcjdtc2007/anna-executa-examples/tree/main/examples/anna-app-session-demo)
+is the authoritative session example — one App that drives every session method
+over both channels (the page's Host API and a bundled Executa's reverse RPC) and
+continues the same session across them.
 
 ---
 

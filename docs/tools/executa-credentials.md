@@ -4,7 +4,7 @@ description: "How plugins declare and consume API keys / tokens injected by the 
 section: tools
 slug: executa-credentials
 order: 7
-updated: 2026-05-11
+updated: 2026-11-23
 estimated_minutes: 6
 ---
 
@@ -127,6 +127,16 @@ For local iteration there is no Agent running, so use environment variables and 
 WEATHER_API_KEY=your_key python plugin.py
 GMAIL_ACCESS_TOKEN=ya29… node plugin.js
 ```
+
+The on-demand multi-account calls (`credentials/listAccounts`,
+`credentials/getToken`) do work locally when the Executa is bundled in an
+Anna App and run with a signed-in `anna-app dev` (CLI ≥ 0.1.68): they return
+the accounts you have really authorized and a short-lived access token. The
+providers you may query are the ones your manifest's `credentials[].name`
+entries map to — the harness reads the list from your plugin's `describe`
+response, the same manifest the platform caches when the Executa is
+installed. Anything else answers `APP_NOT_GRANTED`. See
+[Executa reverse RPC under `anna-app dev`](/developers/apps/local-dev#executa-reverse-rpc-under-anna-app-dev).
 
 ## Security guidelines
 

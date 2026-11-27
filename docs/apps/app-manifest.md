@@ -1,10 +1,10 @@
 ---
 title: "App Manifest"
-description: "The manifest JSON that declares which Executas an app bundles, how the assistant should behave when it is mentioned, and the three capability declarations."
+description: "The manifest JSON that declares which Executas an app bundles, how the assistant should behave when it is mentioned, and the capability declarations."
 section: apps
 slug: app-manifest
 order: 4
-updated: 2026-11-02
+updated: 2026-11-24
 estimated_minutes: 6
 ---
 
@@ -65,17 +65,19 @@ The manifest is parsed by the `AppManifest` Pydantic model with `extra="forbid"`
 
 **Installing an App is the consent.** Every Host API namespace — `llm.*`, `image.*`, `video.*`, `music.*`, `audio.*`, `web.*`, `upload.*`, `files.*`, `storage.*` (own app scope), `chat.*`, `artifact.*`, `window.*`, `apps.*`, `tools.*` for your declared Executas, `mobile.*`, `agent.session.*` — is available to an installed, enabled App **without any manifest declaration and without a user toggle**. The App only ever spends the installing user's own CU quota, so that quota is the only usage gate; the user's controls are *disable* and *uninstall*.
 
-The manifest declares exactly the three things that touch a second principal — a third-party account, data shared with the user's other apps, or the user's own machine:
+The manifest declares exactly the five things that touch a second principal — a third-party account, the open internet, the user's memory and main agent, data shared with the user's other apps, or the user's own machine:
 
 | Declaration | Where | Protects | Enforcement |
 |---|---|---|---|
 | `ui.host_api.credentials: [provider id, …]` | `ui` section | The user's **third-party accounts** (`google`, …). `credentials.list_accounts` / `credentials.get_token` only work for listed providers — and the user must also have connected that provider on the platform | Undeclared provider → iframe `permission_denied`; the Executa `credentials_token` only carries declared providers |
+| `ui.host_api.share: true` | `ui` section | The **open internet / platform reputation**: `share.*` publishes static snapshots to platform-hosted public URLs — a public-UGC abuse surface. See [Public share links](/developers/apps/app-public-share) | Undeclared → iframe `share_not_declared` |
+| `ui.host_api.conversation: true` | `ui` section | The user's **memory, persona and main agent**: `conversation.*` runs durable conversations with everything the user's own agent can do, including tools on their machine. See [Durable conversations](/developers/apps/app-ui-conversation) | Undeclared → iframe `conversation_not_declared` |
 | `ui.host_api.agent.tools: [tool id, …] \| ["*"]` | `ui` section | The user's **local device**: host-kit tools (`fs_*`, `exec_*`, `browser_*`) a sandbox agent session created by the App may use. `"*"` = every host-kit tool. Server-side tools (`doc_read`, `sheet_read`, `web_search`, …) never need declaring | Effective session tool set = `requested ∩ (server_side ∪ (host_kit ∩ declared))` — see [LLM & Agent](/developers/apps/llm-and-agent) |
 | `storage.scopes: { scope: mode }` | top level | **Data shared with the user's other apps**: `user` (user-wide), `app` (another app's bucket via `owner`), `tool` (an Executa's cache); mode `r` / `w` / `rw`. Your own `scope=app` bucket needs no declaration | Undeclared scope → iframe `permission_denied`; a bundled Executa's `storage_token.allowed_scopes` = `["tool"]` + `"user"` iff the Executa declares it |
 
 Plus the browser-mandated [`ui.browser_permissions`](/developers/apps/app-ui-browser-permissions) (`microphone`, `camera`, …), which is a Permissions-Policy delegation, not a platform capability — a realtime voice App declares `microphone` explicitly.
 
-Schema-4 shape with all three declarations:
+Schema-4 shape with all five declarations:
 
 ```jsonc
 {
@@ -87,6 +89,8 @@ Schema-4 shape with all three declarations:
     "views": [ /* … */ ],
     "host_api": {
       "credentials": ["google"],                             // optional: third-party accounts
+      "share": true,                                         // optional: public share links
+      "conversation": true,                                  // optional: durable conversations
       "agent": { "tools": ["fs_read_file", "exec_run"] }     // optional: local-device tools (host-kit only)
     },
     "browser_permissions": ["microphone"],                   // optional: browser features
@@ -129,8 +133,18 @@ Pydantic validation (`extra="forbid"`) runs **after** normalization, so any othe
 
 Behavioural difference between the two arrays:
 
-- **`required_executas`** — automatically installed for the user when the app is installed (a `UserExecuta` row is created if missing). Tool documentation is injected into the system prompt whenever the app is `#`mentioned.
-- **`optional_executas`** — **not** auto-installed. Tool documentation is still injected when the app is `#`mentioned, but the user must have the Executa installed for it to actually run.
+- **`required_executas`** — automatically installed for the user when the app is installed (a `UserExecuta` row is created if missing). Tool documentation is injected into the system prompt whenever the app is `#`mentioned. They also **gate the app's UI**: the host does not load your bundle until every required Executa is deployed on the user's Agent and that Agent is online, and it freezes a window that is already running if that stops being true. While the gate is closed the user sees a "Preparing tools" overlay whose only actions are **Repair** and **Close window** — your code is not running, so there is nothing for it to handle.
+- **`optional_executas`** — **not** auto-installed. Tool documentation is still injected when the app is `#`mentioned, but the user must have the Executa installed for it to actually run. They never gate the UI, so your app can start while one is missing or its Agent is asleep — see [calling Executas from the UI](/developers/apps/app-ui-sdk) for the errors to handle.
+
+**A bundled Executa belongs to one App.** The first App of yours that references an `app_bundled` Executa becomes its owner, and the Executa then acts with that App's identity everywhere it runs (see [Persistent Storage § Scopes](/developers/tools/executa-storage#scopes)). Referencing it from a second App is rejected on push:
+
+```
+Executa '<tool_id>' belongs to app '<slug>'. An app-bundled Executa can be referenced by exactly one app. To share it between apps, set its visibility to 'public'; otherwise register a separate Executa for this app.
+```
+
+A `public` Executa has no owner: it acts as itself, not as any App that references it.
+
+Declare an Executa as required only when the app cannot work at all without it. A tool that backs a single feature belongs in `optional_executas`: a required one that fails to deploy keeps the whole app closed.
 
 A given `tool_id` may appear at most once across both arrays combined. Together the two arrays are also the set of Executas your iframe may call through [`tools.invoke`](/developers/apps/app-ui-host-api#tools) — there is no separate allow-list.
 

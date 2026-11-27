@@ -4,7 +4,7 @@ description: "The `ui` section of a schema ≥ 2 manifest: bundle, views, the cr
 section: apps
 slug: app-ui-manifest
 order: 10
-updated: 2026-11-02
+updated: 2026-11-24
 estimated_minutes: 6
 category: "App UI"
 ---
@@ -129,11 +129,13 @@ The publish validator emits non-blocking lint warnings when these baselines are 
 
 ### `host_api`
 
-`host_api` is **not** an allow-list of methods. Every Host API namespace — `window.*`, `storage.*`, `files.*`, `llm.*`, `agent.session.*`, `image.*`, `video.*`, `music.*`, `audio.*`, `web.*`, `upload.*`, `chat.*`, `artifact.*`, `apps.*`, `mobile.*`, and `tools.*` for the Executas in `required_executas` / `optional_executas` — is callable by an installed, enabled App; the user's CU quota is the only usage gate. The block holds the two declarations that involve something other than the user's own account:
+`host_api` is **not** an allow-list of methods. Every Host API namespace — `window.*`, `storage.*`, `files.*`, `llm.*`, `agent.session.*`, `image.*`, `video.*`, `music.*`, `audio.*`, `web.*`, `upload.*`, `chat.*`, `artifact.*`, `apps.*`, `mobile.*`, and `tools.*` for the Executas in `required_executas` / `optional_executas` — is callable by an installed, enabled App; the user's CU quota is the only usage gate. The block holds the declarations that involve something other than the user's own account:
 
 | Key | Type | Declares |
 |---|---|---|
 | `credentials` | array of **provider ids** (e.g. `"google"`) | Third-party accounts your iframe may read via `credentials.list_accounts` / `credentials.get_token`. The user must also have connected the provider on the platform. An undeclared provider → `permission_denied` |
+| `share` | `true` | Public share links: `share.*` publishes static snapshots to platform-hosted public URLs. Undeclared → `share_not_declared`. See [Public share links](/developers/apps/app-public-share) |
+| `conversation` | `true` | Durable conversations: `conversation.*` runs long-lived threads with the user's memory, persona and full agent. Undeclared → `conversation_not_declared`. See [Durable conversations](/developers/apps/app-ui-conversation) |
 | `agent` | `{ "tools": [tool id, …] }` or `{ "tools": ["*"] }` | Host-kit tools that run on the user's machine (`fs_*`, `exec_*`, `browser_*`) which sandbox agent sessions created by this App may use; `"*"` = all of them. Server-side tools (`doc_read`, `web_search`, …) never need declaring. Effective set per session = `requested ∩ (server_side ∪ (host_kit ∩ declared))` — see [LLM & Agent](/developers/apps/llm-and-agent#1-what-you-declare) |
 
 Anything else inside `host_api` is rejected on a `schema: 4` manifest. Older manifests that still carry the pre-schema-4 method tables (`"storage": ["get", "set"]`, `"tools": ["required:*"]`, `"agent": { "session": … }`, …) are accepted and [normalized](/developers/apps/app-manifest#legacy-manifests-schema-13): the method tables are dropped, `tools` refs become `optional_executas`, and `"audio": ["session"]` becomes `browser_permissions: ["microphone"]`.

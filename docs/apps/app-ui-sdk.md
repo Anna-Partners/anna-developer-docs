@@ -4,7 +4,7 @@ description: "Embed the Anna App SDK in your bundle and call host APIs from insi
 section: apps
 slug: app-ui-sdk
 order: 13
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 5
 category: "App UI"
 ---
@@ -111,7 +111,7 @@ interface AnnaAppRuntime {
 }
 ```
 
-Every namespace proxy covers the full Host API surface of the host you are running on (`window.hello` only reports `capabilities.host_api_version`; there are no per-namespace scopes). Every method is available to an installed App; the only `permission_denied` cases are the three [capability declarations](/developers/apps/app-manifest#capability-declarations) (undeclared `credentials` provider, undeclared cross-app storage scope, `tools.invoke` on an Executa outside `required_executas` / `optional_executas`) — you cannot escalate from the client.
+Every namespace proxy covers the full Host API surface of the host you are running on (`window.hello` only reports `capabilities.host_api_version`; there are no per-namespace scopes). Every method is available to an installed App; the only refusals come from the manifest's [capability declarations](/developers/apps/app-manifest#capability-declarations): `permission_denied` for an undeclared `credentials` provider, an undeclared cross-app storage scope, or `tools.invoke` on an Executa outside `required_executas` / `optional_executas`, and `share_not_declared` / `conversation_not_declared` for `share.*` / `conversation.*` without their declaration — you cannot escalate from the client.
 
 ## Resume vs first open
 
@@ -180,6 +180,8 @@ The host resolves the `tool_id` against `(plugin_name, tool_name)` from the Exec
 
 Only the `tool_id`s in `required_executas` / `optional_executas` can be invoked, and the Executa must be installed and enabled for the user.
 
+Required Executas are deployed and reachable by the time your bundle starts — the host [does not load the app](/developers/apps/app-manifest) until they are. Optional ones carry no such guarantee: `tools.invoke` can fail with `executa_not_deployed` (the platform is already deploying it) or `agent_waking` (the user's Cloud Agent is starting). Both are raised before the tool runs and carry `details.retriable: true`. The host retries once on its own; if the error still reaches you, back off and retry, and subscribe to `anna.tools.onChanged(cb)` to re-run `tools.list` when a deployment lands. A call to a required Executa can surface the same two errors when a running window loses its Agent for longer than the host holds the call.
+
 ## Title, resize, close
 
 ```js
@@ -219,6 +221,26 @@ Migration in three steps:
 These are one-way host → app broadcasts (`theme.changed`, `locale.changed`), not RPC
 methods — nothing to declare.
 
+## Durable conversations
+
+`anna.conversation` (SDK ≥ 0.29.0) wraps the `conversation.*` namespace: long-lived
+conversations with the user's memory, persisted history and full agent. It needs
+`ui.host_api.conversation: true` in the manifest.
+
+```js
+const { conversations } = await anna.conversation.list();
+const stream = anna.conversation.send({
+  conversation_uuid: conversations.find((c) => c.is_default).uuid,
+  message: "What did we decide yesterday?",
+});
+for await (const frame of stream) { /* render the reply as it streams */ }
+```
+
+`send` returns the stream synchronously; `stream.ready` resolves to `{ task_id, stream_id }`
+once the run is queued. After a reload, `anna.conversation.status()` tells you whether a
+run is still going and `anna.conversation.attach()` resumes it. Full guide:
+[Durable conversations](/developers/apps/app-ui-conversation).
+
 ## Errors
 
 Every RPC returns a Promise that resolves with a structured response:
@@ -237,6 +259,8 @@ Common codes:
 | `invalid_arg` | Schema mismatch on RPC args |
 | `not_found` | Window already closed; storage key missing; etc. |
 | `agent_unavailable` | `tools.invoke` could not reach the user's Anna Agent |
+| `executa_not_deployed` | `tools.invoke`: the Executa is not on the Agent yet; a deployment is under way. Retriable |
+| `agent_waking` | `tools.invoke`: the user's Cloud Agent is still starting. Retriable |
 | `bundle_not_ready` | (At `open_app_view` time) the version's bundle is still `draft` |
 | `rate_limited` | Too many RPCs in flight |
 

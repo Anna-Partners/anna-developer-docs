@@ -117,12 +117,12 @@
         {
           "name": "SAMPLING_ERR_MAX_TOKENS_EXCEEDED",
           "code": -32007,
-          "desc": "Per-invoke total token budget exceeded."
+          "desc": "`maxTokens` of a single call exceeds the host cap (8 192; `data.hostCap`). There is no per-invoke token budget."
         },
         {
           "name": "SAMPLING_ERR_MAX_CALLS_EXCEEDED",
           "code": -32006,
-          "desc": "Per-invoke sampling call cap exceeded."
+          "desc": "Reserved, not raised. There is no per-invoke call cap."
         },
         {
           "name": "SAMPLING_ERR_TIMEOUT",

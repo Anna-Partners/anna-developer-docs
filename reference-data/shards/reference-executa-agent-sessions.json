@@ -64,8 +64,8 @@
           "desc": "",
           "summary": "Per-session quota / tool-scope override.",
           "notes": [
-            "**Default when omitted**: Anna server injects `inherit_host_tools=True`, so the agent session inherits the host Copilot's full tool kit (`granted_tools` returns `['*']`).",
-            "To restrict tools (lean sandbox session), pass an explicit dict, e.g. `{\"inherit_host_tools\": False, \"allowed_tools\": [\"tool_a\", \"tool_b\"]}`. Declaration-is-consent: the effective surface is `platform registry ∩ the executa manifest's agent_tools declaration (`[\"*\"]` = full registry) ∩ allowed_tools` — an executa with no `agent_tools` declaration resolves ZERO sandbox tools.",
+            "**The tool surface follows the App hosting the invoke.** In the conversation the default when omitted is `inherit_host_tools=True`: the session inherits the conversation's full tool kit (`granted_tools` returns `['*']`). Inside an App the session gets that App's surface instead — server-side tools plus the host-kit tools declared in the App manifest's `ui.host_api.agent.tools` — and never inherits; requesting `inherit_host_tools: True` there is ignored and reported as an `INHERIT_IGNORED` warning in `run_meta`.",
+            "To restrict tools (lean sandbox session), pass an explicit dict, e.g. `{\"inherit_host_tools\": False, \"allowed_tools\": [\"tool_a\", \"tool_b\"]}`. Declaration-is-consent: in the conversation the effective surface is `platform registry ∩ the executa manifest's agent_tools declaration (`[\"*\"]` = full registry) ∩ allowed_tools` — an executa with no `agent_tools` declaration resolves ZERO sandbox tools; inside an App the hosting App's declaration takes the executa declaration's place.",
             "The effective value is reflected back in `granted_tools` on the response."
           ]
         },
@@ -128,7 +128,7 @@
       "group": "Agent sessions",
       "since": "protocol v2.0",
       "direction": "Plugin → Anna agent → Anna server /copilot/app/*",
-      "summary": "Submit one turn on an existing agent session. The Anna agent consumes the upstream SSE stream from Anna server `/copilot/app/agent`, tags every frame with `seq` + `stream_id`, and returns the full ordered `frames` array in a single JSON-RPC response — i.e. **buffered streaming**, not true streaming. Hard-capped at `_MAX_FRAMES_PER_RUN = 4096` frames per run; exceeding the cap aborts with `AGENT_ERR_PROVIDER_ERROR` (-32046).",
+      "summary": "Submit one turn on an existing agent session. The Anna agent consumes the upstream SSE stream from Anna server `/copilot/app/agent`, tags every frame with `seq` + `stream_id`, and returns the full ordered `frames` array in a single JSON-RPC response. With `stream: true` it additionally pushes every frame to the plugin **while the run is in flight** as an `agent/session.frame` notification; the response stays complete and authoritative either way. Hard-capped at `_MAX_FRAMES_PER_RUN = 4096` frames per run; exceeding the cap aborts with `AGENT_ERR_PROVIDER_ERROR` (-32046).",
       "wire": {
         "json_rpc_method": "agent/session.run",
         "transport": "stdio JSON-RPC 2.0 (line-delimited)",
@@ -136,9 +136,10 @@
           "sampling_token"
         ],
         "buffered_streaming": true,
+        "live_notification": "`agent/session.frame` — host → plugin, no `id`, params `{run_id, seq, frame}`. Sent only when the request carries `stream: true`; the response still carries the full `frames` array.",
         "max_frames_per_run": 4096
       },
-      "signature": "session_run(*, app_session_uuid: str, content: str, attachments: list[dict] | None = None, recursion_limit: int = 8, run_id: str | None = None, allowed_tools: list[str] | None = None, modelPreferences: dict | None = None, system: str | None = None) -> dict",
+      "signature": "session_run(*, app_session_uuid: str, content: str, attachments: list[dict] | None = None, recursion_limit: int = 8, run_id: str | None = None, stream: bool = False, allowed_tools: list[str] | None = None, modelPreferences: dict | None = None, system: str | None = None) -> dict",
       "params": [
         {
           "name": "app_session_uuid",
@@ -195,7 +196,22 @@
           "summary": "Idempotency / correlation id for `session.cancel`.",
           "notes": [
             "Auto-generated as `run_{16hex}` when omitted.",
-            "Echoed back in the response and required by `agent/session.cancel`."
+            "Echoed back in the response and required by `agent/session.cancel`.",
+            "**Required with `stream: true`** — it is the only key that ties `agent/session.frame` notifications to the run before the response arrives (the Python SDK generates one for you)."
+          ]
+        },
+        {
+          "name": "stream",
+          "type": "bool",
+          "default": "False",
+          "required": false,
+          "desc": "",
+          "summary": "`true` = also deliver frames live as `agent/session.frame` notifications.",
+          "notes": [
+            "Notification shape (host → plugin, no `id`): `{\"jsonrpc\":\"2.0\",\"method\":\"agent/session.frame\",\"params\":{\"run_id\",\"seq\",\"frame\"}}`. `seq` starts at 0 and always equals the frame's index in the response `frames`; `frame` is identical to `frames[seq]`.",
+            "Best-effort and never blocking: the host stops pushing for this run the first time a frame cannot be written (plugin stdin backlog above 1 MiB, or stdin closed). What was pushed is always a contiguous prefix `seq = 0..k`; the remaining frames arrive with the response.",
+            "All live notifications of a run are written before its response. The synthesized `final` frame is not pushed live — it arrives with the response.",
+            "Hosts that predate this field ignore it and answer with the buffered response only, so no capability negotiation is needed."
           ]
         },
         {
@@ -239,7 +255,7 @@
       ],
       "returns": {
         "type": "dict",
-        "desc": "Response shape: `{run_id, stream_id, frames, final, frame_count}`.\n\n**Frame envelope** — every entry in `frames` is `{event, seq, stream_id, ...}`. `seq` and `stream_id` are injected by the Anna agent so plugin SDKs can later upgrade to true streaming without protocol churn.\n\n**Event types** carried from upstream: `delta` (incremental text), `tool_call`, `tool_result`, `model_token`, `usage`, and `final`. The upstream `run_meta` frame (tool surface) and the `complete` frame's `task_complete` payload additionally carry `model` / `provider` — the model Anna server ACTUALLY routed to after `modelPreferences` resolution and any fallback (forum #270); both pass through the bridge verbatim.\n\n**Synthesized final** — Anna server's OpenAI-style SSE does not emit a `final` event; when no upstream `final` arrived, the Anna agent appends a synthesized one: `{event: 'final', text: <joined deltas>, stream_id, seq, synthesized: True}`. This guarantees the plugin always has a single authoritative terminal frame.\n\nThere is **no top-level `text` field** — aggregated assistant text lives in `final.text`."
+        "desc": "Response shape: `{run_id, stream_id, frames, final, frame_count}`.\n\n**Frame envelope** — every entry in `frames` is `{event, seq, stream_id, ...}`. `seq` (always the frame's index in `frames`) and `stream_id` are injected by the Anna agent; `seq` is what live `agent/session.frame` notifications key on.\n\n**Event types** carried from upstream: `delta` (incremental text), `tool_call`, `tool_result`, `model_token`, `usage`, and `final`. The upstream `run_meta` frame (tool surface) and the `complete` frame's `task_complete` payload additionally carry `model` / `provider` — the model Anna server ACTUALLY routed to after `modelPreferences` resolution and any fallback (forum #270); both pass through the bridge verbatim.\n\n**Synthesized final** — Anna server's OpenAI-style SSE does not emit a `final` event; when no upstream `final` arrived, the Anna agent appends a synthesized one: `{event: 'final', text: <joined deltas>, stream_id, seq, synthesized: True}`. This guarantees the plugin always has a single authoritative terminal frame.\n\nThere is **no top-level `text` field** — aggregated assistant text lives in `final.text`."
       },
       "errors": [
         {
@@ -281,10 +297,10 @@
       "limitations": [
         "⚠ **Wire `error_name` ≠ SDK constant** — see `session.create` Known limitations for the full mapping. `session.run` is the most exposed surface: 7 distinct codes, 4 of them propagated verbatim from Anna server.",
         "⚠ **Original upstream `errorCode` is lost** when the bridge wraps an upstream failure in `AGENT_ERR_PROVIDER_ERROR` via the `except Exception` arm (e.g. HTTP 422 from Anna server pydantic for `recursion_limit > 32`). Plugins cannot distinguish 'quota' / 'rate limit' / 'recursion-limit' failures from each other by code alone — only the message string `upstream error: …` differs. To preserve upstream codes, Anna server must emit a proper `_ServerRpcError` (`-32044`/`-32045`/`-32047`/`-32048`), which the `except _ServerRpcError: raise` arm propagates verbatim.",
-        "**Buffered streaming, not true streaming.** Every upstream SSE frame is buffered in-memory and the full ordered array is returned in a single JSON-RPC response. Hard-capped at `_MAX_FRAMES_PER_RUN = 4096` per run (host keepalive frames are filtered out and do NOT count); exceeding the cap raises `AGENT_ERR_PROVIDER_ERROR`, drops everything buffered so far, and best-effort cancels the run upstream.",
+        "**Live frames are best-effort; the response is authoritative.** Every upstream SSE frame is buffered in-memory and the full ordered array is always returned in a single JSON-RPC response. With `stream: true` the same frames are also pushed live as `agent/session.frame` notifications, but the host never blocks on them: the first frame that cannot be written ends live push for that run, with no retry and no catch-up — the rest arrives with the response. Hard-capped at `_MAX_FRAMES_PER_RUN = 4096` per run (host keepalive frames are filtered out and do NOT count); exceeding the cap raises `AGENT_ERR_PROVIDER_ERROR`, drops everything buffered so far (frames already pushed live are not retracted), and best-effort cancels the run upstream.",
         "**Client-side abort cleans up upstream.** If the buffered consume fails (600 s reverse-RPC budget exhausted, frame cap, transport error), the bridge sends `agent/session.cancel` upstream before raising — the run no longer keeps executing server-side for up to 30 min after the plugin has given up. `error.data.cancelled_upstream: true` marks this path.",
         "**Per-user concurrency.** The owning user is limited to 10 concurrent agent runs platform-wide (`APP_CONCURRENCY_LIMIT`, jsonrpc `-32020`, retryable) — counted together with iframe Host-API runs of the same user.",
-        "**Synthesized `final` frame** — Anna server's OpenAI-style SSE never emits a true `final` event, so when text was accumulated but no upstream `final` arrived, the bridge appends `{event: 'final', text: <joined deltas>, stream_id, seq, synthesized: True}`. Plugin SDKs should treat the last frame as authoritative regardless of `synthesized`."
+        "**Synthesized `final` frame** — Anna server's OpenAI-style SSE never emits a true `final` event, so when text was accumulated but no upstream `final` arrived, the bridge appends `{event: 'final', text: <joined deltas>, stream_id, seq, synthesized: True}`. Plugin SDKs should treat the last frame as authoritative regardless of `synthesized`. It is produced when the turn closes, so it is never pushed live — it arrives with the response."
       ],
       "example": ""
     },
@@ -498,6 +514,49 @@
         "⚠ **Wire `error_name` ≠ SDK constant** — see `session.create` Known limitations.",
         "**Idempotent — does NOT raise `SESSION_NOT_FOUND`.** Calling on an unknown or already-deleted uuid returns `{deleted: True, app_session_uuid, already_gone: True}` and never hits the upstream. Distinct from `session.cancel` / `session.run` / `session.history`, which all hard-fail on cache miss.",
         "**Cache eviction is unconditional.** Even when the upstream DELETE raises `PROVIDER_ERROR`, the bridge has already evicted the cached token in the `finally` clause. A retry will therefore see `already_gone: True` (idempotent path), masking the underlying upstream failure."
+      ],
+      "example": ""
+    },
+    {
+      "slug": "agent-session-catalog",
+      "name": "agent/session.catalog",
+      "kind": "Reverse RPC method · Agent",
+      "group": "Agent sessions",
+      "since": "protocol v2.0",
+      "direction": "Plugin → Anna agent → Anna server /copilot/app/*",
+      "summary": "Discover which platform tools a session created by this plugin **right now** would resolve — the reverse-RPC twin of the iframe `agent.session.catalog`. The tool surface follows the App hosting the invoke: inside an App it is that App's manifest declaration; in the conversation it is the plugin's own `agent_tools` declaration plus the conversation's tool kit. Read-only — mints no session, consumes no quota.",
+      "wire": {
+        "json_rpc_method": "agent/session.catalog",
+        "transport": "stdio JSON-RPC 2.0 (line-delimited)",
+        "ctx_required": [
+          "sampling_token"
+        ],
+        "buffered_streaming": false
+      },
+      "signature": "session_catalog() -> dict",
+      "params": [],
+      "returns": {
+        "type": "dict",
+        "desc": "Response shape: `{platform_tools, manifest_declared, declared_wildcard, inherit_host_tools?}`.\n\n`platform_tools` — one entry per platform tool: `{name, description, dev_safe, risk_group, declared_in_manifest, eligible, blocked_by?}`. `blocked_by: \"manifest\"` marks a host-kit tool that is not declared.\n\n`manifest_declared` — the declared tool names that exist on the platform; `declared_wildcard` — whether the declaration covers every host-kit tool.\n\n`inherit_host_tools: true` is present only when the invoke is hosted by the conversation: sessions then also inherit the conversation's tool kit, which this catalog does not enumerate."
+      },
+      "errors": [
+        {
+          "name": "AGENT_NOT_GRANTED",
+          "code": -32041,
+          "desc": "`sampling_token` missing from handler `ctx`. SDK constant: `AGENT_ERR_NOT_GRANTED`."
+        },
+        {
+          "name": "PROVIDER_ERROR",
+          "code": -32046,
+          "desc": "Upstream catalog fetch failed at the transport level (network error or timeout). SDK constant: `AGENT_ERR_PROVIDER_ERROR`."
+        }
+      ],
+      "limitations": [
+        "⚠ **Wire `error_name` ≠ SDK constant** — see `session.create` Known limitations.",
+        "**Read-only and session-independent.** Authenticates with the per-invoke `sampling_token` alone — it takes no `app_session_uuid`, needs no cached session token, and is safe to call before any `session.create`.",
+        "**The answer depends on the invoke.** The declaration it reports is the one a session created from *this* invoke would resolve, so the same plugin gets a different catalog inside an App than in the conversation.",
+        "**Not exhaustive in the conversation.** With `inherit_host_tools: true` the session also inherits the conversation's tool kit, which is not listed here.",
+        "**Older hosts reject it.** An Anna agent that predates this method answers `-32601` (method not found)."
       ],
       "example": ""
     },

@@ -425,11 +425,11 @@
             },
             {
               "name": "-32006 SAMPLING_MAX_CALLS_EXCEEDED",
-              "desc": "Per-invoke call cap reached (default 8)."
+              "desc": "Reserved, not raised. There is no per-invoke call cap."
             },
             {
               "name": "-32007 SAMPLING_MAX_TOKENS_EXCEEDED",
-              "desc": "Per-invoke cumulative token cap reached (default 32k)."
+              "desc": "`maxTokens` of a single call exceeds the host cap (8 192). There is no per-invoke cumulative token cap."
             },
             {
               "name": "-32008 SAMPLING_NOT_NEGOTIATED",
@@ -686,7 +686,7 @@
       "id": "executa-agent-sessions",
       "kicker": "Executa · reverse RPC (v2.1+) · Agent sessions",
       "title": "Agent sessions — multi-turn tool-using runs",
-      "sub": "Drive **stateful, tool-using Anna Agent sessions** from a stdio Executa plugin through reverse JSON-RPC — the same surface area an in-iframe `anna-app` gets, with the same auth boundaries, the same tool model, and the same wire frames. Builds on top of sampling: sampling is single-turn; agent sessions are stateful, support tool calls the host runs, emit streaming frames (`delta`, `tool_call`, `tool_result`, `final`), and support cancellation.\n\n**Pre-requisites.** v2 negotiation only. The per-invoke `sampling_token` (minted for every installed, enabled Executa) unlocks both `agent/complete` (L1 single-turn) and `agent/session.*` (L2 multi-turn) — nothing to declare, no user toggle.\n\n**Auth chain.** The plugin **never holds a bearer token**. Matrix host owns the secret: the plugin sends `agent/session.create` carrying the per-invoke `sampling_token`; the host mints an `app_session_token` via Nexus `POST /copilot/app/sessions/from_sampling`, caches it keyed by `(user_id, hash(plugin_name))`, and attaches it to outbound HTTP for every `run|cancel|delete`. The token is never returned to the plugin.\n\n**Plugin/anna-app symmetry.** A Python plugin and a TypeScript anna-app should be **drop-in interchangeable** for the same agent workload. The only difference is transport: anna-app uses a postMessage channel, plugin uses stdio JSON-RPC.\n\n**v2 limitations.** `agent/session.run` is **buffered** — host accumulates SSE frames and returns once `done=true`. SDK API (`async for frame`) matches the future real-time path. Hard cap: **4,096 frames per run** → `-32045 QUOTA_EXCEEDED`. `agent/session.history` returns `[]` until a public GET endpoint lands.",
+      "sub": "Drive **stateful, tool-using Anna Agent sessions** from a stdio Executa plugin through reverse JSON-RPC — the same surface area an in-iframe `anna-app` gets, with the same auth boundaries, the same tool model, and the same wire frames. Builds on top of sampling: sampling is single-turn; agent sessions are stateful, support tool calls the host runs, emit streaming frames (`delta`, `tool_call`, `tool_result`, `final`), and support cancellation.\n\n**Pre-requisites.** v2 negotiation only. The per-invoke `sampling_token` (minted for every installed, enabled Executa) unlocks both `agent/complete` (L1 single-turn) and `agent/session.*` (L2 multi-turn) — nothing to declare, no user toggle.\n\n**Auth chain.** The plugin **never holds a bearer token**. Matrix host owns the secret: the plugin sends `agent/session.create` carrying the per-invoke `sampling_token`; the host mints an `app_session_token` via Nexus `POST /copilot/app/sessions/from_sampling`, caches it keyed by `(user_id, hash(plugin_name))`, and attaches it to outbound HTTP for every `run|cancel|delete`. The token is never returned to the plugin.\n\n**Plugin/anna-app symmetry.** A Python plugin and a TypeScript anna-app should be **drop-in interchangeable** for the same agent workload. The only difference is transport: anna-app uses a postMessage channel, plugin uses stdio JSON-RPC.\n\n**v2 limitations.** `agent/session.run` returns the whole turn in one response once it ends; with `stream: true` the host also pushes each frame live as an `agent/session.frame` notification (best-effort — the response stays authoritative). Hard cap: **4,096 frames per run** → `-32045 QUOTA_EXCEEDED`. `agent/session.history` returns `[]` until a public GET endpoint lands.",
       "detail_source": "/static/data/reference-executa-agent-sessions.json",
       "groups": [
         {
@@ -712,11 +712,10 @@
             },
             {
               "name": "agent/session.run",
-              "desc": "Submit a turn; receive buffered SSE frames (`delta`, `tool_call`, `tool_result`, `final`). 4,096-frame cap per run.",
+              "desc": "Submit a turn; the response carries the full ordered frames (`delta`, `tool_call`, `tool_result`, `final`), and with `stream: true` each frame is also pushed live as an `agent/session.frame` notification. 4,096-frame cap per run.",
               "tags": [
                 {
-                  "label": "buffered streaming",
-                  "kind": "warm"
+                  "label": "live frames"
                 }
               ]
             },
@@ -731,6 +730,15 @@
             {
               "name": "agent/session.delete",
               "desc": "Idempotent teardown; drops the cached `app_session_token` and tells Nexus to delete the session."
+            },
+            {
+              "name": "agent/session.catalog",
+              "desc": "Which platform tools a session created right now would resolve — the reverse-RPC twin of the iframe `agent.session.catalog`. Mints no session, consumes no quota.",
+              "tags": [
+                {
+                  "label": "read-only"
+                }
+              ]
             }
           ]
         }
@@ -1014,7 +1022,7 @@
             },
             {
               "name": "IMAGE_MAX_IMAGES_EXCEEDED (-32106)",
-              "desc": "Per-invoke rolling counter (4 images) exhausted."
+              "desc": "`n` of a single call exceeds the host hard cap (8). There is no per-invoke image budget."
             },
             {
               "name": "IMAGE_PROVIDER_ERROR (-32103)",
@@ -1094,7 +1102,7 @@
             },
             {
               "name": "UPLOAD_MAX_FILES_EXCEEDED (-32211)",
-              "desc": "Per-invoke files counter exhausted (charged on inline + confirm, NOT on negotiate)."
+              "desc": "Reserved, not raised. There is no per-invoke file-count or total-bytes cap."
             },
             {
               "name": "UPLOAD_NOT_FOUND (-32212)",
@@ -1954,7 +1962,7 @@
             },
             {
               "name": "`-32007 max_tokens_exceeded` on a single small call",
-              "desc": "The cap is **cumulative across the same `invoke_id`**, not per-call — a fixed platform constant of 32 000 tokens per invoke (no longer adjustable in Anna Admin). Send fewer / smaller sampling calls per tool invocation, or split the workload across invokes.",
+              "desc": "Only on older platforms: the cumulative 32 000-token and 8-call caps per `invoke_id` have been removed. `-32007` now only means a single call asked for more than 8 192 `maxTokens`.",
               "tags": [
                 {
                   "label": "-32007"
@@ -2182,7 +2190,7 @@
       "id": "ui-manifest",
       "kicker": "Manifest · ui section",
       "title": "UI manifest — windows, views, declarations",
-      "sub": "The `ui` block describes the iframe bundle, the windows it can open, the browser features it needs, and the two capability declarations (`credentials`, `agent.tools`) that involve a second principal. The Host API itself needs no declaration.",
+      "sub": "The `ui` block describes the iframe bundle, the windows it can open, the browser features it needs, and the four capability declarations that live under `ui.host_api` (`credentials`, `share`, `conversation`, `agent.tools`) and involve a second principal. The Host API itself needs no declaration.",
       "groups": [
         {
           "label": "Bundle (UiBundleSection)",
@@ -2319,7 +2327,7 @@
             },
             {
               "name": "host_api",
-              "desc": "Capability declarations: `credentials` (third-party account provider ids) and `agent.tools` (local-device host-kit tools). Not a method allow-list — every Host API method is available to an installed App. See \"Capability declarations\".",
+              "desc": "Capability declarations: `credentials` (third-party account provider ids), `share` (public share links), `conversation` (durable conversations) and `agent.tools` (local-device host-kit tools). Not a method allow-list — every other Host API method is available to an installed App. See \"Capability declarations\".",
               "tags": [
                 {
                   "label": "UiHostApiSpec"
@@ -2353,7 +2361,7 @@
       "id": "ui-host-api",
       "kicker": "Manifest · capability declarations",
       "title": "Capability declarations",
-      "sub": "Installing an App is the consent: every Host API method (`llm.*`, `image.*`, `video.*`, `music.*`, `audio.*`, `web.*`, `upload.*`, `files.*`, own-scope `storage.*`, `chat.*`, `artifact.*`, `window.*`, `apps.*`, `mobile.*`, `agent.session.*`, `tools.*` for declared Executas) is available to an installed, enabled App without a manifest entry or user toggle; the user's CU quota is the only usage gate. Exactly three things are declared because they touch a second principal. Schema ≤ 3 manifests with the old `ui.host_api` method tables are normalized on ingest.",
+      "sub": "Installing an App is the consent: every Host API method (`llm.*`, `image.*`, `video.*`, `music.*`, `audio.*`, `web.*`, `upload.*`, `files.*`, own-scope `storage.*`, `chat.*`, `artifact.*`, `window.*`, `apps.*`, `mobile.*`, `agent.session.*`, `tools.*` for declared Executas) is available to an installed, enabled App without a manifest entry or user toggle; the user's CU quota is the only usage gate. Exactly five things are declared because they touch a second principal: a third-party account, the open internet, the user's memory and main agent, data shared with the user's other apps, or the user's own machine. Schema ≤ 3 manifests with the old `ui.host_api` method tables are normalized on ingest.",
       "items": [
         {
           "name": "ui.host_api.credentials",
@@ -2362,6 +2370,24 @@
             {
               "label": "provider ids",
               "kind": "warm"
+            }
+          ]
+        },
+        {
+          "name": "ui.host_api.share",
+          "desc": "`true` to let the bundle publish static snapshots to platform-hosted public URLs with `share.*` — content leaves the platform for the open internet. Undeclared → `share_not_declared`. Guide: [Public share links](/developers/apps/app-public-share).",
+          "tags": [
+            {
+              "label": "bool"
+            }
+          ]
+        },
+        {
+          "name": "ui.host_api.conversation",
+          "desc": "`true` to let the bundle run durable conversations with `conversation.*` (and `audio.session` with `llm: \"conversation\"`) — they carry the user's memory and persona and run the user's full agent, including tools on their machine. Undeclared → `conversation_not_declared`. Guide: [Durable conversations](/developers/apps/app-ui-conversation).",
+          "tags": [
+            {
+              "label": "bool"
             }
           ]
         },
@@ -2907,24 +2933,90 @@
       "group": "Host API",
       "id": "host-api-chat",
       "kicker": "Host API · chat.*",
-      "title": "chat.* — write back into the conversation",
-      "sub": "Post messages and artifacts back into the user-facing chat thread from your App. Available to every installed App — nothing to declare. **Status:** `append_artifact` is fully implemented; `write_message` is a Phase-3 functional stub (emits a `chat_message_from_app` event but does NOT persist); the former `read_history` placeholder was removed from the dispatcher table.",
+      "title": "chat.* — deprecated",
+      "sub": "**Deprecated.** These two methods pushed cards and messages into the dashboard's built-in chat panel, which no longer exists. They still return successfully so existing Apps keep working, but nothing displays what they send. For conversations your App owns, use `conversation.*`.",
       "source": "host_api",
       "detail_source": "/static/data/reference-host-api-chat.json",
       "items": [
         {
           "name": "chat.append_artifact",
-          "desc": "Attach a generated artifact to the current turn. Reads `args.artifact` (object); fields `kind` (≤40 chars, default `app_event`), `app_slug`, `summary` (≤1000 chars), `payload_ref`, `data`. Emits an `artifact_appended` event and returns `{artifact_id}` (`app-<window_uuid[:8]>-<unix_ts>`). Fully implemented."
+          "desc": "**Deprecated.** Reads `args.artifact` (object: `kind`, `app_slug`, `summary`, `payload_ref`, `data`), emits an `artifact_appended` event and returns `{artifact_id}`. The call still succeeds, but no surface displays the card any more.",
+          "tags": [
+            {
+              "label": "deprecated",
+              "kind": "warm"
+            }
+          ]
         },
         {
           "name": "chat.write_message",
-          "desc": "Append a message authored by the App. `role` (default `assistant`), `content` (string, truncated to ≤4000 chars). Emits a `chat_message_from_app` event and returns `{message_id}` (`msg-<unix_ms>`). **Phase-3 functional stub — does NOT persist.**",
+          "desc": "**Deprecated.** Takes `role` and `content`, emits a `chat_message_from_app` event and returns `{message_id}`. Never persisted, and no surface displays it. Use `conversation.*` for conversations your App owns.",
           "tags": [
             {
-              "label": "stub",
-              "kind": "stub"
+              "label": "deprecated",
+              "kind": "warm"
             }
           ]
+        }
+      ]
+    },
+    {
+      "group": "Host API",
+      "id": "host-api-conversation",
+      "kicker": "Host API · conversation.*",
+      "title": "conversation.* — durable conversations",
+      "sub": "Long-lived conversations that carry the user's memory and persona, keep their history on the platform, and run the user's full agent — isolated per App. Requires `ui.host_api.conversation: true` in the manifest; without it every method fails with `conversation_not_declared`. A `conversation_uuid` owned by another App answers `not_found`. Guide: [Durable conversations](/developers/apps/app-ui-conversation).",
+      "source": "host_api",
+      "items": [
+        {
+          "name": "conversation.list",
+          "desc": "List this `(user, app)`'s conversations as `{conversations}`. Creates the default conversation (`is_default`) first if it does not exist."
+        },
+        {
+          "name": "conversation.create",
+          "desc": "Create a conversation. Optional `name`, `zen` (minimal system prompt, no memory / persona) and `override_model`. Returns the `Conversation`."
+        },
+        {
+          "name": "conversation.update",
+          "desc": "Update `name`, `is_pinned`, `override_model`, `thinking`, `pinned_agent_id` or `pinned_mentions`. An empty string clears `override_model` / `pinned_agent_id`; an empty object clears `thinking`. Returns the `Conversation`."
+        },
+        {
+          "name": "conversation.delete",
+          "desc": "Delete a conversation and its history; returns `{deleted: true}`. The default conversation cannot be deleted."
+        },
+        {
+          "name": "conversation.messages",
+          "desc": "Persisted history of one conversation. `limit` 1..500 (default 200); `after_id` returns only messages with a greater id. Attachment URLs are re-signed on every call.",
+          "tags": [
+            {
+              "label": "paginated"
+            }
+          ]
+        },
+        {
+          "name": "conversation.send",
+          "desc": "Send a user message and start a run of the user's full agent. Resolves with `{task_id, stream_id}` once queued; frames arrive as `rpc.stream` events on `stream_id` and are replayable with `agent.session.frames`. One run per conversation at a time. `message` may be empty when `attachments` are present.",
+          "tags": [
+            {
+              "label": "streaming"
+            }
+          ]
+        },
+        {
+          "name": "conversation.status",
+          "desc": "Running task of a conversation as `{task, stream_id}`. `task` is `null` when idle; `stream_id` is `null` when the run was started outside the Host API or is older than one hour."
+        },
+        {
+          "name": "conversation.cancel",
+          "desc": "Cancel the running task. `task_id` must belong to this conversation, otherwise `not_found`."
+        },
+        {
+          "name": "conversation.modify",
+          "desc": "Send a correction (`instruction`) to the running task; the agent applies it at its next checkpoint."
+        },
+        {
+          "name": "conversation.options",
+          "desc": "What a composer needs, as `{models, executas, agents, settings}`: chat models, the user's installed Executas, their Agents with the auto-selection preview, and `preferred_model` / `thinking_default` / `sandbox_enabled` / `sandbox_path`."
         }
       ]
     },
@@ -3231,6 +3323,10 @@
         {
           "name": "storage.delete",
           "desc": "Soft-delete a key; quota bytes are reclaimed immediately. Accepts `if_match` (APS only). APS raises `not_found` on a missing key; the legacy backend silently no-ops."
+        },
+        {
+          "name": "storage.quota",
+          "desc": "The calling user's global storage quota: `used_bytes`, `quota_bytes` (`-1` = unlimited), `entries_count`, `percent`, `plan_name`, `plan_label` — aggregated across every scope and app. Quota is enforced per user, so this is the denominator for a usage bar. The local dev harness answers `not_implemented`; degrade silently."
         }
       ]
     },
@@ -3343,6 +3439,37 @@
               "label": "soft-delete"
             }
           ]
+        }
+      ]
+    },
+    {
+      "group": "Host API",
+      "id": "host-api-share",
+      "kicker": "Host API · share.*",
+      "title": "share.* — public share links",
+      "sub": "Publish rendered static files as a platform-hosted, revocable public URL that opens in any browser without an Anna account. Requires `ui.host_api.share: true` in the manifest; without it every method fails with `share_not_declared`. Guide: [Public share links](/developers/apps/app-public-share).",
+      "source": "host_api",
+      "items": [
+        {
+          "name": "share.publish",
+          "desc": "Publish finalized `files.*` objects from your app's own scope as a platform-hosted, long-lived public URL. Takes `paths` (≤200), an HTML `entry` and a `title`; pass an existing `pub_id` to republish (URL unchanged, `version += 1`)."
+        },
+        {
+          "name": "share.list",
+          "desc": "List this `(user, app)`'s non-revoked publications as `{items, next_cursor?}`. `limit` 1..100.",
+          "tags": [
+            {
+              "label": "paginated"
+            }
+          ]
+        },
+        {
+          "name": "share.revoke",
+          "desc": "Revoke a publication. The public URL turns into a tombstone immediately (CDN residue ≤ 5 min) and its quota bytes are released."
+        },
+        {
+          "name": "share.update",
+          "desc": "Update `title`, `description` or `expires_at` of a publication without touching the snapshot."
         }
       ]
     },

@@ -4,7 +4,7 @@ description: "Let your plugin ask the host to perform an LLM completion on the u
 section: tools
 slug: executa-sampling
 order: 9
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 12
 ---
 
@@ -32,7 +32,7 @@ Sampling collapses all three into one capability advertised by the host.
 
 End-to-end sampling needs **v2 negotiation**: the host sends `initialize`; the plugin replies with the same `protocolVersion: "2.0"` and lists `capabilities.sampling = {}`. See [Lifecycle](/developers/tools/executa-lifecycle#v2-capability-handshake). Without it the host returns `-32008 SAMPLING_NOT_NEGOTIATED` and your reverse RPC is rejected before reaching a model.
 
-There is no manifest declaration and no user switch: the host mints a `sampling_token` on **every** invoke of every installed, enabled Executa. Per-invoke limits are platform constants.
+There is no manifest declaration and no user switch: the host mints a `sampling_token` on **every** invoke of every installed, enabled Executa. Per-call limits are platform constants.
 
 ## Wire protocol
 
@@ -266,18 +266,16 @@ if result.get("stopReason") == "maxTokens" and usage.get("outputTokens", 0) - us
 
 SDKs: Python `create_message(..., thinking=False | {"effort": "low"})`; Node `createMessage({ thinking })`; Go `CreateMessageRequest{Thinking: false}` / `&sampling.Thinking{Effort: "low"}` (SDK ≥ 0.2.0).
 
-## Per-invoke caps
+## Limits
 
 | Cap | Value | Where enforced |
 |---|---|---|
 | `maxTokens` per call | **8 192** | `DEFAULT_SAMPLING_MAX_TOKENS_PER_CALL` (host pre-check) — the platform additionally clamps to `min(requested, model output cap, 8 192)` and echoes the result in `_meta.maxTokens` |
-| Calls per `invoke_id` | **8** | Platform constant (fixed; not user-adjustable) |
-| Total tokens per `invoke_id` | **32 000** | Platform constant (fixed; not user-adjustable) |
 | `sampling_token` TTL | **600 s** | JWT `aud=executa-sampling` |
 | `includeContext` values | only `"none"` | host rejects others as `-32004 SAMPLING_INVALID_REQUEST` |
 | `thinking` default | **off** (when the model can disable it) | Platform policy for programmatic calls — reasoning tokens count inside `maxTokens`; see [Thinking models](#thinking-models-thinking) |
 
-Both call-count and total-token caps are **terminal** within the same `invoke_id` — your plugin cannot retry past them; it must shrink the workload or exit gracefully.
+There is no cap on the number of calls or the total tokens per invoke: every call is checked against, and billed to, the user's CU balance. Bound your own loops — a runaway chain spends real quota.
 
 ## Error codes
 
@@ -290,8 +288,8 @@ All sampling errors come back as JSON-RPC errors with stable codes:
 | `-32003` | `SAMPLING_PROVIDER_ERROR` | Upstream LLM provider failed. |
 | `-32004` | `SAMPLING_INVALID_REQUEST` | Malformed params (e.g. `includeContext != "none"`, `messages` empty, `responseFormat` schema over limits, `thinking` not a boolean / object). |
 | `-32005` | `SAMPLING_TIMEOUT` | The completion did not finish in time. |
-| `-32006` | `SAMPLING_MAX_CALLS_EXCEEDED` | Per-invoke call-count cap reached. |
-| `-32007` | `SAMPLING_MAX_TOKENS_EXCEEDED` | Per-invoke cumulative token cap reached. |
+| `-32006` | `SAMPLING_MAX_CALLS_EXCEEDED` | **Reserved, not raised.** There is no per-invoke call-count cap. |
+| `-32007` | `SAMPLING_MAX_TOKENS_EXCEEDED` | `maxTokens` of a single call exceeds the host cap (8 192; `data.hostCap`). There is no per-invoke cumulative token cap. |
 | `-32008` | `SAMPLING_NOT_NEGOTIATED` | Host didn't negotiate v2 (plugin skipped or failed `initialize`). |
 | `-32009` | `SAMPLING_USER_DENIED` | User explicitly rejected this sampling request. |
 | `-32010` | `SAMPLING_UNSUPPORTED_RESPONSE_FORMAT` | Model can't honour the requested `responseFormat` and `onUnsupported` is `"error"`. `data` = `{requested, modelName}`. |
@@ -383,9 +381,9 @@ All three SDKs ship a single-reader / multi-writer dispatcher so you don't have 
 ## Common pitfalls
 
 - **Don't `process.exit()` after writing the invoke result.** Sampling responses arrive asynchronously; exiting early drops in-flight reverse RPCs. Keep the long-running stdin loop. ([Pitfall #1](/developers/tools/executa-pitfalls#1-plugin-process-exits-after-one-request))
-- **Always echo `invoke_id` in `metadata`.** Nexus uses it to attribute usage and enforce per-invoke caps.
+- **Always echo `invoke_id` in `metadata`.** Nexus uses it to attribute usage.
 - **Don't ship API keys.** If you reach for `OPENAI_API_KEY` from env, you almost certainly want sampling instead.
-- **Treat `SAMPLING_MAX_TOKENS_EXCEEDED` and `SAMPLING_USER_DENIED` as terminal** — not retryable inside the same invoke.
+- **Treat `SAMPLING_QUOTA_EXCEEDED` and `SAMPLING_USER_DENIED` as terminal** — not retryable inside the same invoke.
 - **Empty text + `stopReason: "maxTokens"` + `reasoningTokens ≈ outputTokens` means the thinking model ate your budget.** Keep the default (`thinking` off), or raise `maxTokens` / lower `effort` when you opt in. ([Pitfall #15](/developers/tools/executa-pitfalls#15-sampling-empty-text-stopreason-maxtokens-and-4050-s-latency-on-a-thinking-model))
 - **Don't trust `structuredValid` as a parse.** It's informational; always `json.loads` with a fallback — and prefer `onUnsupported: "json_object"` over the default `"error"` unless your tool is useless without strict schemas.
 

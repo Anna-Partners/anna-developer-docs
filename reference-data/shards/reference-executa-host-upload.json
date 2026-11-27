@@ -27,7 +27,7 @@
           "desc": "",
           "summary": "Logical filename, used for `Content-Disposition` and the storage key suffix.",
           "notes": [
-            "Empty → `UPLOAD_INVALID_REQUEST` (`-32203` on the wire, `-32204` in Nexus gate — see Errors).",
+            "Empty → `UPLOAD_INVALID_REQUEST` (`-32203`).",
             "The host runs `_safe_filename(filename)` before setting `Content-Disposition`; unsafe characters are stripped. The original name is **not** preserved in the storage key — keys are opaque (`exec-uploads/{env}/{user_uuid}/{tool_id}/{invoke_id}/{purpose}/{sha-suffix}`)."
           ]
         },
@@ -39,7 +39,7 @@
           "desc": "",
           "summary": "Full MIME type, e.g. `\"image/png\"`, `\"application/pdf\"`, `\"text/markdown\"`.",
           "notes": [
-            "Validated against the host's hard-coded denylist only (executables, `image/svg+xml`) — the per-token MIME allowlist was removed (forum #218): any non-blocked type is accepted, Office formats included. Reject → `UPLOAD_MIME_REJECTED` (`-32205` wire / `-32210` gate).",
+            "Validated against the host's hard-coded denylist only (executables, `image/svg+xml`) — the per-token MIME allowlist was removed (forum #218): any non-blocked type is accepted, Office formats included. Reject → `UPLOAD_MIME_REJECTED` (`-32205`).",
             "Drives `Content-Disposition`, which is **signed into every download URL** (client cannot strip it): `image/*` / `audio/*` / `video/*` (except SVG) and `application/pdf` → `inline`; everything else → `attachment`. Pick `text/plain` over `application/octet-stream` when the real type is known — readers like `sheet_read` / `doc_read` select parsers by MIME."
           ]
         },
@@ -51,7 +51,7 @@
           "desc": "",
           "summary": "Raw bytes; the SDK base64-encodes before sending (you do NOT pre-encode).",
           "notes": [
-            "**Hard cap 8 MiB** raw (`INLINE_MAX_BYTES = 8 * 1024 * 1024`); larger → `UPLOAD_TOO_LARGE` (`-32204` wire / `-32211` gate). The SDK pre-checks (`MAX_INLINE_BYTES`) and raises `UploadError` locally to avoid wasting a round-trip.",
+            "**Hard cap 8 MiB** raw (`INLINE_MAX_BYTES = 8 * 1024 * 1024`); larger → `UPLOAD_TOO_LARGE` (`-32204`). The SDK pre-checks (`MAX_INLINE_BYTES`) and raises `UploadError` locally to avoid wasting a round-trip.",
             "Empty bytes → `UPLOAD_INVALID_REQUEST`.",
             "The wire payload is ~4/3× larger than `content` due to base64; budget your `_clientTimeoutS` for the upstream transfer."
           ]
@@ -65,7 +65,7 @@
           "summary": "Storage purpose tag. One of `image_input` / `image_reference` / `user_artifact` (default).",
           "notes": [
             "Defaults to `\"user_artifact\"` server-side when omitted (see `executa_upload_gate.handle_upload_inline_request`).",
-            "Validated against `ALLOWED_PURPOSES = {\"image_input\", \"image_reference\", \"user_artifact\"}` AND against `upload_token.allowed_purposes` when set. Reject → `UPLOAD_PURPOSE_REJECTED` (`-32206` wire / `-32212` gate).",
+            "Validated against `ALLOWED_PURPOSES = {\"image_input\", \"image_reference\", \"user_artifact\"}` AND against `upload_token.allowed_purposes` when set. Reject → `UPLOAD_PURPOSE_REJECTED` (`-32206`).",
             "Used for billing categorisation and TTL policy (image purposes may have shorter retention)."
           ]
         },
@@ -107,32 +107,32 @@
         {
           "name": "INVALID_REQUEST",
           "code": -32203,
-          "desc": "Missing `filename` / `mime_type` / `content_b64`, malformed base64, or `executa_tool_id` / `tool_invoke_id` mismatch with the token. Note: Nexus gate uses `-32204` for this; matrix-side SDK uses `-32203`. Catch by `error_name`, not numeric code."
+          "desc": "Missing `filename` / `mime_type` / `content_b64`, malformed base64, or `executa_tool_id` / `tool_invoke_id` mismatch with the token."
         },
         {
           "name": "TOO_LARGE",
           "code": -32204,
-          "desc": "Decoded payload exceeds 8 MiB (SDK pre-check) or token's `max_file_bytes` (server-side). Gate code: `-32211`."
+          "desc": "Decoded payload exceeds 8 MiB (SDK pre-check) or token's `max_file_bytes` (server-side)."
         },
         {
           "name": "MIME_REJECTED",
           "code": -32205,
-          "desc": "MIME malformed or on the host's hard denylist (executables, `image/svg+xml`). The per-token allowlist was removed (forum #218) — any other type is accepted. Gate code: `-32210`."
+          "desc": "MIME malformed or on the host's hard denylist (executables, `image/svg+xml`). The per-token allowlist was removed (forum #218) — any other type is accepted."
         },
         {
           "name": "PURPOSE_REJECTED",
           "code": -32206,
-          "desc": "`purpose` not in `upload_token.allowed_purposes` or not in the global allowlist. Gate code: `-32212`."
+          "desc": "`purpose` not in `upload_token.allowed_purposes` or not in the global allowlist."
         },
         {
           "name": "STORAGE_ERROR",
           "code": -32207,
-          "desc": "R2 `put_object` failed; the upload was not persisted. Safe to retry. Gate code: `-32203`."
+          "desc": "R2 `put_object` failed; the upload was not persisted. Safe to retry."
         },
         {
           "name": "TIMEOUT",
           "code": -32208,
-          "desc": "SDK-local timeout. Gate code for upstream timeout: `-32205` (different number — match `error_name`)."
+          "desc": "SDK-local timeout, or an upstream timeout reported by the host."
         },
         {
           "name": "USER_DENIED",
@@ -142,7 +142,7 @@
         {
           "name": "MAX_FILES_EXCEEDED",
           "code": -32211,
-          "desc": "Per-invoke rolling counter `upl:invoke:{tool_invoke_id}` exhausted `upload_token.max_files` (default 16). Gate code: `-32206`."
+          "desc": "Reserved, not raised. There is no per-invoke file-count or total-bytes cap."
         }
       ],
       "example": "from executa_sdk import HostUploadClient, UploadError, UPLOAD_ERR_TOO_LARGE\n\nupload = HostUploadClient()\n\nasync def persist_screenshot(invoke_id: str, png: bytes) -> str:\n    try:\n        res = await upload.upload_inline(\n            filename=\"screenshot.png\",\n            mime_type=\"image/png\",\n            content=png,                       # raw bytes; SDK base64s for you\n            purpose=\"user_artifact\",\n            timeout=60.0,\n        )\n    except UploadError as e:\n        if e.code == UPLOAD_ERR_TOO_LARGE:\n            # SDK pre-checked 8 MiB cap. Switch to negotiate + confirm.\n            return await persist_via_presigned(invoke_id, png)\n        raise\n    return res[\"download_url\"]                  # ~30 min TTL; persist r2_key for repeat presigns\n",
@@ -150,8 +150,7 @@
         "**8 MiB hard cap** on raw bytes (`INLINE_MAX_BYTES`). For larger payloads use `host/uploadFile · negotiate` + `· confirm`. The SDK pre-checks (`MAX_INLINE_BYTES = 8 * 1024 * 1024`) so you don't burn a round-trip.",
         "**Returned `download_url` expires in ~30 min** (`R2_TRANSIENT_PRESIGN_EXPIRY = 1800s`). Persist the `r2_key` if you'll need to re-mint the URL later; do not store the URL itself in long-lived state.",
         "**No de-duplication** — uploading the same bytes twice creates two R2 objects and counts twice against the user's quota. Memoise client-side.",
-        "**Per-invoke quotas are enforced** — `upload_token.max_files` (default 16) and `max_total_bytes` (default 80 MiB) are shared across `inline` + `confirm` within one `invoke_id`. Plan accordingly for batch operations.",
-        "**Error code numbering diverges between the Agent SDK and the Nexus gate** (see the Errors table). Always switch on `error_name` strings, not raw codes."
+        "**No per-invoke quotas.** Only the single-file cap `upload_token.max_file_bytes` (default 20 MiB) applies; there is no cap on the number of files or the total bytes per invoke."
       ]
     },
     {
@@ -277,7 +276,7 @@
         {
           "name": "MAX_FILES_EXCEEDED",
           "code": -32211,
-          "desc": "Per-invoke files counter exhausted (note: negotiate alone does NOT increment the counter; confirm does)."
+          "desc": "Reserved, not raised. There is no per-invoke file-count or total-bytes cap."
         }
       ],
       "example": "import httpx\nfrom executa_sdk import HostUploadClient\n\nupload = HostUploadClient()\n\nasync def upload_large_video(invoke_id: str, video_bytes: bytes) -> dict:\n    # 1. Negotiate — get a presigned PUT URL.\n    neg = await upload.negotiate(\n        filename=\"capture.mp4\",\n        mime_type=\"video/mp4\",\n        size_bytes=len(video_bytes),\n        purpose=\"user_artifact\",\n    )\n    # 2. PUT direct to R2. Must use exact headers + within `expires_in` seconds.\n    async with httpx.AsyncClient() as http:\n        r = await http.put(neg[\"put_url\"], content=video_bytes, headers=neg[\"headers\"], timeout=300.0)\n        r.raise_for_status()\n    # 3. Confirm — get a transient download URL.\n    return await upload.confirm(r2_key=neg[\"r2_key\"])\n",
@@ -285,7 +284,7 @@
         "**PUT URL TTL is 5 min** (`DEFAULT_PRESIGN_PUT_EXPIRY = 300`). For very large uploads on slow links, the plugin must complete within this window; otherwise re-negotiate (and abandon the stale URL — R2 won't 'time out' the URL, the signature just becomes invalid).",
         "**`size_bytes` is advisory at sign time, enforced at confirm time.** Over-shipping bytes succeeds at R2 but `confirm` rejects with `UPLOAD_TOO_LARGE` (`head_object.ContentLength > max_file_bytes`). Under-shipping is allowed but wastes the quota you reserved.",
         "**Headers must match exactly** — copy `headers` verbatim into the PUT. Adding or omitting any of them invalidates the signature.",
-        "**Negotiate does not count against `max_files`** — only `confirm` does, since negotiate may be cancelled. This means a misbehaving plugin can spam negotiate; the host throttles via the `upload_token` TTL (10 min) and Nexus's per-user rate-limit middleware.",
+        "**Negotiate reserves nothing** — a negotiated upload that is never confirmed leaves no record. The host throttles via the `upload_token` TTL (10 min) and Nexus's per-user rate-limit middleware.",
         "**No partial / resumable uploads** — R2 multipart is not exposed to plugins. If your payload is larger than `max_file_bytes` (platform constant 20 MiB), split it into multiple files application-side."
       ]
     },
@@ -296,7 +295,7 @@
       "group": "Host upload · short-lived host-stored objects",
       "since": "protocol v2.0",
       "direction": "Plugin → Agent → Nexus REST → R2 HEAD",
-      "summary": "Step 2 of the two-phase upload: after a successful R2 PUT, register the object with the host. The host HEADs R2 to verify the bytes landed, increments the per-invoke files+bytes counters, and returns a short-lived download URL — symmetric to the `inline` result. Must be called within the same `tool_invoke_id` that minted the upload_token.",
+      "summary": "Step 2 of the two-phase upload: after a successful R2 PUT, register the object with the host. The host HEADs R2 to verify the bytes landed and returns a short-lived download URL — symmetric to the `inline` result. Must be called within the same `tool_invoke_id` that minted the upload_token.",
       "wire": {
         "json_rpc_method": "host/uploadFile",
         "transport": "stdio JSON-RPC 2.0 (line-delimited)",
@@ -316,7 +315,7 @@
           "summary": "The exact `r2_key` returned by the preceding `negotiate` call.",
           "notes": [
             "Validated server-side: must start with `exec-uploads/{env}/{user_uuid}/` AND contain `/{executa_tool_id}/` AND `/{tool_invoke_id}/`. Cross-invoke or cross-tool reuse → `UPLOAD_INVALID_REQUEST` (`-32203`).",
-            "If R2 has no object at the key (PUT failed, never happened, or expired) → `UPLOAD_NOT_FOUND` (`-32212` wire / `-32213` gate). Treat as 'retry the negotiate+PUT pair'."
+            "If R2 has no object at the key (PUT failed, never happened, or expired) → `UPLOAD_NOT_FOUND` (`-32212`). Treat as 'retry the negotiate+PUT pair'."
           ]
         },
         {
@@ -330,7 +329,7 @@
       ],
       "returns": {
         "type": "dict",
-        "desc": "Same shape as `inline` (also `UploadResult`):\n• `r2_key: str` — echoed.\n• `mime_type: str` — read from R2 `head_object.ContentType` (so this is the value that was on the PUT, not what was originally negotiated; usually identical).\n• `bytes_size: int` — `head_object.ContentLength`; the authoritative byte count.\n• `download_url: str` — transient HTTPS GET URL, **~30 min TTL** (`R2_TRANSIENT_PRESIGN_EXPIRY`).\n• `expires_in: int` — seconds until `download_url` 403s.\n\nThe SDK wraps with `{\"mode\": \"confirm\", ...}`. This call **increments** the per-invoke files (+1) and bytes (+`bytes_size`) counters — if it pushes either past the token cap, the call rolls back the increment and raises `UPLOAD_MAX_FILES_EXCEEDED` / `UPLOAD_MAX_BYTES_EXCEEDED`."
+        "desc": "Same shape as `inline` (also `UploadResult`):\n• `r2_key: str` — echoed.\n• `mime_type: str` — read from R2 `head_object.ContentType` (so this is the value that was on the PUT, not what was originally negotiated; usually identical).\n• `bytes_size: int` — `head_object.ContentLength`; the authoritative byte count.\n• `download_url: str` — transient HTTPS GET URL, **~30 min TTL** (`R2_TRANSIENT_PRESIGN_EXPIRY`).\n• `expires_in: int` — seconds until `download_url` 403s.\n\nThe SDK wraps with `{\"mode\": \"confirm\", ...}`."
       },
       "errors": [
         {
@@ -356,12 +355,12 @@
         {
           "name": "MAX_FILES_EXCEEDED",
           "code": -32211,
-          "desc": "Confirming would push per-invoke files counter past `max_files`. Confirm is what charges the counter, not negotiate."
+          "desc": "Reserved, not raised. There is no per-invoke file-count or total-bytes cap."
         },
         {
           "name": "NOT_FOUND",
           "code": -32212,
-          "desc": "R2 has no object at `r2_key` — PUT failed silently or was never attempted. Wire code may also appear as `-32213` from the gate."
+          "desc": "R2 has no object at `r2_key` — PUT failed silently or was never attempted."
         }
       ],
       "example": "# Continued from `negotiate` example.\nresult = await upload.confirm(r2_key=neg[\"r2_key\"])\n#  →  {\"mode\": \"confirm\", \"r2_key\": \"...\", \"mime_type\": \"video/mp4\",\n#       \"bytes_size\": 7340032, \"download_url\": \"https://...\", \"expires_in\": 1800}\n",

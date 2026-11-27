@@ -478,6 +478,49 @@
         "Legacy backend can be slow on large buckets (it sorts the entire dict in memory); the APS backend uses an indexed `LIKE 'prefix%'` scan.",
         "Order is byte-wise ascending on the raw `key` string — Unicode is collated by codepoint, not locale."
       ]
+    },
+    {
+      "slug": "storage-quota",
+      "name": "storage.quota",
+      "kind": "Host API method · iframe surface",
+      "group": "Storage",
+      "since": "dispatcher / `@anna-ai/app-schema` 0.35.0 (2026-11-18) · callable from any `@anna-ai/app-runtime` (the `storage` namespace is a generic proxy)",
+      "direction": "Bundle (iframe) → Host RPC → APS quota service",
+      "summary": "The calling **user's** global storage quota. Quota is enforced per user across every scope and every App's bucket, so this — not a size sum over `storage.list` — is the only correct denominator for a \"storage used\" bar. Returns aggregate numbers only (no keys, no values) and needs no declaration.",
+      "wire": {
+        "json_rpc_method": "storage.quota",
+        "auth": "Handled by the host page — the bundle never sees the token. Transport details (`POST /api/v1/anna-apps/runtime/rpc`, `X-Anna-App-Token`, envelope wrapping) are described once in the section overview.",
+        "streaming": false
+      },
+      "signature": "anna.storage.quota(args?: {}, opts?: {timeoutMs?: number}) => Promise<{used_bytes: number, quota_bytes: number, entries_count: number, percent: number, plan_name: string|null, plan_label: string|null}>",
+      "params": [],
+      "returns": {
+        "type": "{ used_bytes, quota_bytes, entries_count, percent, plan_name, plan_label }",
+        "desc": "• `used_bytes` — bytes the user currently stores, across `user`, every App and every tool bucket.\n• `quota_bytes` — the plan's storage quota; `-1` means unlimited.\n• `entries_count` — number of stored entries.\n• `percent` — `used_bytes / quota_bytes` as a `0`–`1` fraction, capped at `1`; `0` on an unlimited plan.\n• `plan_name` / `plan_label` — the user's plan identifier and its display label."
+      },
+      "errors": [
+        {
+          "name": "not_implemented",
+          "code": "not_implemented",
+          "desc": "`anna-app dev` in its default in-memory storage mode — the harness never invents quota numbers. Degrade silently: hide the usage bar."
+        },
+        {
+          "name": "unknown_method",
+          "code": "unknown_method",
+          "desc": "The host predates dispatcher 0.35.0. Degrade the same way."
+        },
+        {
+          "name": "not_found",
+          "code": "not_found",
+          "desc": "The window's user no longer exists."
+        }
+      ],
+      "example": "// Storage usage bar for a file-manager style App.\ntry {\n  const q = await anna.storage.quota();\n  bar.hidden = false;\n  bar.value = q.quota_bytes < 0 ? 0 : q.percent;            // 0–1 fraction\n  label.textContent = q.quota_bytes < 0\n    ? `${fmt(q.used_bytes)} used`\n    : `${fmt(q.used_bytes)} of ${fmt(q.quota_bytes)} (${q.plan_label})`;\n} catch (e) {\n  if (e.code !== \"not_implemented\" && e.code !== \"unknown_method\") throw e;\n  bar.hidden = true;                                        // local harness / older host\n}\n",
+      "limitations": [
+        "Takes no `scope` / `owner`: there is exactly one answer per user. It cannot report how much a single App or bucket uses.",
+        "Under `anna-app dev` the real quota is returned only with `--storage aps` and a signed-in account (CLI ≥ 0.1.68); otherwise `not_implemented`.",
+        "A point-in-time read — concurrent writes from other Apps or tools change it; do not cache it across a write you are about to make."
+      ]
     }
   ]
 }

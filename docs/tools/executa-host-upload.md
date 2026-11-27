@@ -4,7 +4,7 @@ description: "Hand a file (or its bytes) to Anna; the host stores it in shared R
 section: tools
 slug: executa-host-upload
 order: 13
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 7
 ---
 
@@ -13,13 +13,13 @@ estimated_minutes: 7
 Available from Executa protocol **v2** onward; pairs naturally with [Image Generation](/developers/tools/executa-image) (persist a generated PNG outside its 30-minute window) and [Sampling](/developers/tools/executa-sampling) (persist an LLM summary).
 
 > [!TIP]
-> Use Host Upload for **ephemeral / shareable** artefacts (≤ 80 MiB total per invoke, short presigned URLs). For durable per-user data that survives across invokes — caches, notes, files in the user's drive — use [Persistent Storage (APS)](/developers/tools/executa-storage) instead.
+> Use Host Upload for **ephemeral / shareable** artefacts (≤ 20 MiB per file, short presigned URLs). For durable per-user data that survives across invokes — caches, notes, files in the user's drive — use [Persistent Storage (APS)](/developers/tools/executa-storage) instead.
 
 ## One pre-condition
 
 End-to-end `host/uploadFile` access requires **v2 negotiation**: reply to `initialize` with `protocolVersion: "2.0"` and a non-empty `capabilities.upload` claim (an empty object is fine). Without it the host answers `UPLOAD_NOT_NEGOTIATED (-32210)`.
 
-There is no manifest declaration and no user toggle: the host mints an `upload_token` on **every** invoke of every installed, enabled Executa. `UPLOAD_NOT_GRANTED (-32201)` in production means the Executa is not installed or the user disabled it. The per-invoke caps (`maxFiles` 16, `maxFileBytes` 20 MiB, `maxTotalBytes` 80 MiB) are platform constants carried in the token. There is **no MIME allowlist**: any type that is not on the host's hard denylist (executables, `image/svg+xml`) is accepted — Office formats included. Inline-rendering risk is controlled at serve time instead: every `download_url` carries a signed `Content-Disposition` (`inline` only for `image/*` / `audio/*` / `video/*` / `application/pdf`, `attachment` for everything else).
+There is no manifest declaration and no user toggle: the host mints an `upload_token` on **every** invoke of every installed, enabled Executa. `UPLOAD_NOT_GRANTED (-32201)` in production means the Executa is not installed or the user disabled it. The single-file cap (`maxFileBytes` 20 MiB) is a platform constant carried in the token; there is no cap on the number of files or the total bytes per invoke. There is **no MIME allowlist**: any type that is not on the host's hard denylist (executables, `image/svg+xml`) is accepted — Office formats included. Inline-rendering risk is controlled at serve time instead: every `download_url` carries a signed `Content-Disposition` (`inline` only for `image/*` / `audio/*` / `video/*` / `application/pdf`, `attachment` for everything else).
 
 ## Wire protocol
 
@@ -91,7 +91,7 @@ The plugin then `PUT`s the bytes directly to `put_url` with `Content-Type: <mime
 }
 ```
 
-`confirm` HEADs the R2 object, validates the upload landed, settles the byte counter against the per-invoke quota, and returns the canonical envelope (with `download_url`).
+`confirm` HEADs the R2 object, validates the upload landed, and returns the canonical envelope (with `download_url`).
 
 ## Result shape
 
@@ -191,7 +191,7 @@ The plugin sees these JSON-RPC errors (wire codes & names are normative in the A
 | `-32208` | `TIMEOUT`                   | Provider call exceeded the host wall-clock. |
 | `-32209` | `USER_DENIED`               | User declined an in-the-moment confirm prompt. |
 | `-32210` | `UPLOAD_NOT_NEGOTIATED`     | v2 not negotiated, or reverse-RPC invoked outside an invoke context. |
-| `-32211` | `MAX_FILES_EXCEEDED`        | Per-invoke `maxFiles` hit. |
+| `-32211` | `MAX_FILES_EXCEEDED`        | **Reserved, not raised.** There is no per-invoke file-count or total-bytes cap. |
 | `-32212` | `NOT_FOUND`                 | `confirm` on an unknown `r2_key` (object not uploaded yet, or wrong tool / invoke). |
 | `-32213` | `PRESIGN_FAILED`            | Host could not sign the PUT URL. |
 | `-32602` | `MISSING_INVOKE_CONTEXT` / `UNKNOWN_INVOKE_CONTEXT` | Reverse RPC could not be correlated with a parent invoke — see below. |
@@ -221,14 +221,12 @@ Single-invoke-at-a-time plugins keep working without the field (the host falls b
 |---|---|---|
 | Inline payload (decoded) | **8 MiB** | `INLINE_MAX_BYTES` |
 | Single-file size cap | **20 MiB** | `upload_token.max_file_bytes` (platform constant) |
-| Per-invoke total bytes | **80 MiB** | `upload_token.max_total_bytes` |
-| Per-invoke file count | **16** | `upload_token.max_files` (platform constant) |
 | Presigned PUT URL TTL | **300 s** | `DEFAULT_PRESIGN_PUT_EXPIRY` |
 | Returned GET URL TTL | **~30 min** | `R2_TRANSIENT_PRESIGN_EXPIRY` |
 | `upload_token` TTL | **600 s** (10 min) | JWT `aud=executa-upload` |
 | Allowed `purpose` values | `image_input`, `image_reference`, `user_artifact` | protocol whitelist |
 
-Treat `QUOTA_EXCEEDED`, `MAX_FILES_EXCEEDED`, and `TOO_LARGE` as **non-retryable** within the same invocation; treat `STORAGE_ERROR` / `TIMEOUT` as retryable with backoff (≤ 2 attempts).
+Treat `QUOTA_EXCEEDED` and `TOO_LARGE` as **non-retryable** within the same invocation; treat `STORAGE_ERROR` / `TIMEOUT` as retryable with backoff (≤ 2 attempts).
 
 ## Pitfalls
 

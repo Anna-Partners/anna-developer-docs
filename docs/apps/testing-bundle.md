@@ -4,7 +4,7 @@ description: "Drive the bundle from vitest with `mountBundle` — same access de
 section: apps
 slug: testing-bundle
 order: 17
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 4
 category: "Local Development & Testing"
 ---
@@ -72,12 +72,15 @@ describe("timer", () => {
 ## Denied calls
 
 The harness makes the same decisions as the production dispatcher: every
-Host API method is available, and only the three
+Host API method is available, and only the manifest's
 [capability declarations](/developers/apps/app-manifest#capability-declarations)
-can deny a call — `tools.invoke` on a `tool_id` outside
-`required_executas` / `optional_executas`, an undeclared `credentials`
-provider, or an undeclared cross-app storage scope. Those resolve to
-`outcome: "denied"` and the promise rejects with `HostApiError`:
+can deny a call. `mountBundle` checks three of them — `tools.invoke` on a
+`tool_id` outside `required_executas` / `optional_executas`, an undeclared
+`credentials` provider, and an undeclared cross-app storage scope. Those
+resolve to `outcome: "denied"` and the promise rejects with `HostApiError`
+(`share.*` / `conversation.*` are not checked against `ui.host_api.share` /
+`ui.host_api.conversation` here — they go straight to your mocks; production
+and `anna-app dev` do enforce them):
 
 ```ts
 await expect(

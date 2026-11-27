@@ -4,7 +4,7 @@ description: "The bugs that show up most often when authors build Executa plugin
 section: tools
 slug: executa-pitfalls
 order: 14
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 8
 ---
 
@@ -296,15 +296,15 @@ Same as Pitfall #1 — the plugin process must be long-running. The official SDK
 
 **Symptom**
 
-A reasonable sampling request fails with `-32007 MAX_TOKENS_EXCEEDED` even though `maxTokens` is well under 8 192.
+On an older platform, a reasonable sampling request failed with `-32007 MAX_TOKENS_EXCEEDED` even though `maxTokens` was well under 8 192.
 
 **Cause**
 
-The cap is **cumulative across the same `invoke_id`**, not per call. The total is a platform constant: 32 000 tokens per invoke.
+The platform used to cap the **cumulative** tokens across the same `invoke_id` (32 000) and the number of calls (8). Both caps have been removed: `-32006` is no longer raised, and `-32007` now only means a single call asked for more than 8 192 `maxTokens`.
 
 **Fix**
 
-Send fewer / smaller sampling calls per tool invocation. The cap is fixed platform-side (no longer adjustable in the user's Anna Admin panel) — shrink the workload or split it across invokes.
+Nothing to work around. Sampling is now limited only by the per-call `maxTokens` cap and the user's CU balance — so bound your own loops.
 
 ---
 
@@ -415,8 +415,7 @@ See the official demo `anna-executa-examples/examples/anna-app-long-task-demo`.
 **Symptom**
 
 `media.transcribe(...)` fails with `VIDEO_INVALID_REQUEST (-32122)` ("format is
-required for inline audio"), `AUDIO_TOO_LONG (-32143)`, or — after a few calls
-in the same invoke — `AUDIO_INVOKE_BUDGET_EXCEEDED (-32148)`. Or it simply
+required for inline audio") or `AUDIO_TOO_LONG (-32143)`. Or it simply
 returns `AUDIO_NOT_GRANTED (-32140)`.
 
 **Cause**
@@ -427,12 +426,7 @@ returns `AUDIO_NOT_GRANTED (-32140)`.
 2. **Inline is capped at 10 MB decoded** (and `audioUrl` at 25 MB / 600 s).
    16 kHz mono PCM16 wav is 32 KB per second, so ~5 min already hits the
    inline cap.
-3. **Per-invoke seconds budget.** Each call reserves its estimated duration
-   against `max_audio_seconds` (default 600 per `tool_invoke_id`). Compressed
-   formats are estimated conservatively (25 s/MB) before the provider runs,
-   then settled to the real duration — a 4 MB mp3 pre-reserves 100 s even if
-   it is only 60 s long.
-4. **`-32140` means disabled or an old host.** `AUDIO_NOT_GRANTED` is
+3. **`-32140` means disabled or an old host.** `AUDIO_NOT_GRANTED` is
    returned only when the user disabled the Executa (re-enable it under
    Installed Apps). An old host (pre 2026-10-12) answers
    `method_not_found`, which the SDKs map to `-32140` as well.
@@ -448,7 +442,7 @@ stt = await media.transcribe(audio_url=public_https_url)
 ```
 
 - Prefer `wav` for short clips: duration is measured exactly from the header,
-  so both the 600 s cap and the invoke budget are precise.
+  so the 600 s cap is precise.
 - Chunk by sentence/pause instead of sending one long buffer — it also gives
   the user earlier feedback.
 

@@ -207,7 +207,7 @@
       "group": "Audio · LLM speech synthesis",
       "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ media reverse-RPC release (2026-10-08)",
       "direction": "Plugin → Agent → Nexus `POST /copilot/media/audio/speak` → executa_media_gate → app_media_facade.audio_speak (origin=executa) → TTS provider → R2 / inline",
-      "summary": "Synchronous TTS from a plugin — same parameters, voice/length validation and model resolution as the App `audio.speak`; available to every installed, enabled Executa via the per-invoke `media_token`; a per-invoke character budget (`max_audio_chars`, 8000) applies.",
+      "summary": "Synchronous TTS from a plugin — same parameters, voice/length validation and model resolution as the App `audio.speak`; available to every installed, enabled Executa via the per-invoke `media_token`. There is no per-invoke character budget.",
       "wire": {
         "json_rpc_method": "audio/speak",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -221,7 +221,7 @@
           "name": "text",
           "type": "string",
           "required": true,
-          "summary": "≤ model `maxCharsPerCall`; also counted against the per-invoke `max_audio_chars` budget.",
+          "summary": "≤ model `maxCharsPerCall`.",
           "notes": []
         },
         {
@@ -252,7 +252,7 @@
         {
           "name": "AUDIO_TEXT_TOO_LONG",
           "code": -32142,
-          "desc": "Over the model cap (`data.allowed.maxCharsPerCall`), **or** the per-invoke `max_audio_chars` budget (default 8000) is exhausted — message says `per-invoke audio chars exceeded: {n}/{cap}` and the reservation is rolled back.",
+          "desc": "Over the model cap (`data.allowed.maxCharsPerCall`).",
           "retryable": false
         },
         {
@@ -276,7 +276,7 @@
       ],
       "billing": {
         "request_type": "EXECUTA_TTS",
-        "model": "per character after success; per-invoke reservation in Redis `media:invoke:{tool_invoke_id}.audio_chars` (claim `max_audio_chars`, default 8000) → `AUDIO_TEXT_TOO_LONG`"
+        "model": "per character after success"
       },
       "example": "out = host.audio.speak(text=\"Rendering complete.\", format=\"mp3\",  # voice omitted → model default\n                       metadata={\"executa_invoke_id\": ctx.invoke_id})\nplay(out[\"url\"])",
       "limitations": [
@@ -290,7 +290,7 @@
       "group": "Audio · LLM speech recognition",
       "since": "protocol v2.0 · media_token (aud executa-media) · matrix ≥ 2026-10-12 (`METHOD_AUDIO_TRANSCRIBE`) · nexus 1.1.0-beta.189",
       "direction": "Plugin → Agent → Nexus `POST /copilot/media/audio/transcribe` → executa_media_gate._gate_audio_transcribe → app_media_facade.audio_transcribe (request_type=EXECUTA_STT) → STT provider",
-      "summary": "Synchronous STT (≤ 10 min) from a plugin — 1:1 mirror of the App `audio.transcribe` contract under `audio/speak`'s security model; available to every installed, enabled Executa via the per-invoke `media_token`; a per-invoke seconds budget (`max_audio_seconds`, 600) applies.",
+      "summary": "Synchronous STT (≤ 10 min) from a plugin — 1:1 mirror of the App `audio.transcribe` contract under `audio/speak`'s security model; available to every installed, enabled Executa via the per-invoke `media_token`. There is no per-invoke seconds budget.",
       "wire": {
         "json_rpc_method": "audio/transcribe",
         "transport": "stdio JSON-RPC 2.0 (line-delimited); Agent → Nexus REST",
@@ -367,7 +367,7 @@
         {
           "name": "AUDIO_INVOKE_BUDGET_EXCEEDED",
           "code": -32148,
-          "desc": "Per-invoke seconds budget exhausted — message `per-invoke audio seconds exceeded: {n}/{cap}`; the reservation is rolled back.",
+          "desc": "Reserved, not raised. There is no per-invoke transcription budget.",
           "retryable": false
         },
         {
@@ -379,7 +379,7 @@
       ],
       "billing": {
         "request_type": "EXECUTA_STT",
-        "model": "per audio second after success; per-invoke reservation in Redis `media:invoke:{tool_invoke_id}.audio_seconds` (claim `max_audio_seconds`, default 600; wav estimated exactly, other formats 25 s/MB, settled to real `durationSec`) → `AUDIO_INVOKE_BUDGET_EXCEEDED`"
+        "model": "per audio second after success"
       },
       "example": "stt = host.audio.transcribe(audio_bytes=wav_16k_mono, format=\"wav\", language=\"zh\")\nquestion = stt[\"text\"]",
       "limitations": [

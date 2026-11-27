@@ -4,7 +4,7 @@ description: "Open a full-duplex voice session from your bundle — streaming AS
 section: apps
 slug: app-ui-audio-session
 order: 17
-updated: 2026-11-02
+updated: 2026-11-27
 estimated_minutes: 10
 category: "App UI"
 ---
@@ -22,7 +22,9 @@ speech back while the user can barge in. Two things are specific to Apps:
   pre-emption.
 
 The LLM behind the session is **your App's agent session** (`llm: "agent"`,
-same tool surface as [`anna.agent.session`](/developers/apps/llm-and-agent)) or
+same tool surface as [`anna.agent.session`](/developers/apps/llm-and-agent)),
+one of the user's **durable conversations** (`llm: "conversation"` — see
+[Talking to a durable conversation](#talking-to-a-durable-conversation)), or
 nothing at all (`llm: "none"` — ASR events + `say()` only).
 
 > **Choose the right audio surface.** `audio.speak` / `audio.transcribe`
@@ -36,6 +38,7 @@ nothing at all (`llm: "none"` — ASR events + `say()` only).
 > | Live conversation, partial transcripts, barge-in | **`audio.session`** |
 > | Low-latency spoken alerts while the user does something else | **`audio.session`** with `llm: "none"` + `say()` |
 > | Push-to-talk question answered by *your* agent with *your* live context | **`audio.session`** with `llm: "agent"` + `setContext()` |
+> | A voice call inside a chat thread the user comes back to | **`audio.session`** with `llm: "conversation"` + `conversation_uuid` |
 
 ## How it reaches the host
 
@@ -161,10 +164,11 @@ Three details that are easy to get wrong:
 
 | Field | Default | Notes |
 |---|---|---|
-| `llm` | `"agent"` | `"agent"` = your App's agent session (server-minted, 2 h token auto-refreshed; 30 min idle TTL — after a long silence the next turn transparently starts a fresh history). `"none"` = ASR + `say()` only. |
-| `submode`, `fixed_client_id` | `"auto"` | Same as `anna.agent.session`. |
+| `llm` | `"agent"` | `"agent"` = your App's agent session (server-minted, 2 h token auto-refreshed; 30 min idle TTL — after a long silence the next turn transparently starts a fresh history). `"conversation"` = one of the user's durable conversations (needs `conversation_uuid`). `"none"` = ASR + `say()` only. |
+| `conversation_uuid` | — | Required for `llm: "conversation"`: a conversation your App owns (from [`conversation.list` / `conversation.create`](/developers/apps/app-ui-conversation)). |
+| `submode`, `fixed_client_id` | `"auto"` | Same as `anna.agent.session`. `llm: "agent"` only. |
 | `system` | — | System prompt for `llm: "agent"`, ≤ 8 KB. The live context is appended inside a `<live_context>` fence on every run. |
-| `context` | — | Initial live context, ≤ 4 KB; same semantics as `setContext()`. |
+| `context` | — | Initial live context, ≤ 4 KB; same semantics as `setContext()`. Used by `llm: "agent"` only. |
 | `voice`, `language`, `speed` | model default / `zh` / `1.0` | Voice must exist on the resolved TTS model (`llm.catalog({serviceType:'tts'})`); unknown voices fall back to the default and the effective one is echoed in `vs.models.voice`. Apps **cannot** choose ASR/TTS models — the user's realtime-model preferences apply. |
 | `maxDurationSec` | host cap (3 h) | Clamped; effective value in `vs.maxDurationSec`. On expiry: `error{code:"session_timeout"}` then `ended` — reopen if you need more. |
 
@@ -177,7 +181,7 @@ a catch-all. Full field-level detail: [`audio.session` in the Reference](/develo
 | Event | Payload | When |
 |---|---|---|
 | `asr_partial` / `asr_final` | `{text}` | Live transcript; `asr_final` is one sentence and triggers the LLM (if any). |
-| `llm_start` / `llm_partial` / `llm_done` | `{user_text}` / `{text}` / `{text}` | Reply streaming (`llm: "agent"` only). |
+| `llm_start` / `llm_partial` / `llm_done` | `{user_text}` / `{text}` / `{text}` | Reply streaming (`llm: "agent"` and `llm: "conversation"`). |
 | `tts_audio` / `tts_done` | `{audio: base64 PCM16}` / `{}` | Feed `player.enqueue` / `player.flush`. |
 | `interrupted` | `{source: "barge_in" \| "say"}` | Current reply + TTS were cut; `player.stop()`. |
 | `say_start` / `say_done` | `{say_id, chars}` / `{say_id, status: done \| interrupted \| replaced \| error}` | Lifecycle of `say()`. |
@@ -202,6 +206,45 @@ a catch-all. Full field-level detail: [`audio.session` in the Reference](/develo
 
 `say` is billed like any TTS (`APP_TTS` per character); first audio typically
 arrives well under a second because no LLM is involved.
+
+## Talking to a durable conversation
+
+`llm: "conversation"` answers each spoken sentence inside one of the user's
+[durable conversations](/developers/apps/app-ui-conversation) instead of a
+sandbox agent session — the reply comes from the user's own agent, with their
+memory, persona and tools, and **every spoken turn is persisted in that
+conversation's history**.
+
+```js
+const { conversations } = await anna.conversation.list();
+const vs = await anna.audio.session({
+  llm: "conversation",
+  conversation_uuid: conversations.find((c) => c.is_default).uuid,
+  language: "en",
+});
+```
+
+What differs from `llm: "agent"`:
+
+- **Declaration.** The manifest must set `ui.host_api.conversation: true`
+  (plus `microphone` in `browser_permissions`, as for any voice session).
+  Without it the open is rejected with `conversation_not_declared`.
+- **Ownership.** `conversation_uuid` must be a conversation your App can
+  reach through `conversation.*`; anything else is rejected with `not_found`.
+  A missing `conversation_uuid` is `invalid_arg`.
+- **The conversation decides the model and the prompt.** `system`, `submode`
+  and `fixed_client_id` do not apply, and the live context (`context` /
+  `setContext()`) is accepted but **not** passed to the model. `say()` works
+  as usual.
+- **Voice turns are not attachable.** While a call is active
+  `conversation.status` reports a running task without a `stream_id`; render
+  the call from the `llm_*` events and reload `conversation.messages` when it
+  ends — see [Recovering a run](/developers/apps/app-ui-conversation#recovering-a-run).
+- **Billing.** ASR and TTS are billed to the voice session as below; the reply
+  itself is billed as a turn of that conversation.
+- **Not mocked locally.** The `anna-app dev` voice relay only knows `agent`
+  and `none` and rejects `llm: "conversation"` with `invalid_request` — test
+  this mode against the platform.
 
 ## Live context: what to put in, what to keep out
 
@@ -229,7 +272,8 @@ Two rules:
 ## Cost model — only what you send is billed
 
 ASR is billed per *recognised* second (`APP_STT`), TTS per synthesised
-character (`APP_TTS`); LLM turns are billed by the agent session as usual. An
+character (`APP_TTS`); LLM turns are billed by the agent session (or, for
+`llm: "conversation"`, by the conversation) as usual. An
 open-but-silent session costs **nothing**, so:
 
 - Gate `sendAudio` behind push-to-talk or your own wake-word / VAD
@@ -253,6 +297,8 @@ runtime failures arrive as `error` events.
 | `quota_exhausted` | CU pool empty (at open or during the periodic check) |
 | `asr_not_available` / `tts_not_available` | No realtime ASR / TTS model routable for this user |
 | `invalid_request` | Bad `llm`, empty `say` text, message before start |
+| `conversation_not_declared` | `llm: "conversation"` without `ui.host_api.conversation: true` in the manifest |
+| `not_found` / `invalid_arg` | `llm: "conversation"` with a `conversation_uuid` your App does not own / without one |
 | `context_too_large` / `system_too_large` / `say_too_long` | 4 KB / 8 KB / 1000-char caps (`setContext` / `say` are rejected client-side by the SDK; `system` is checked by the host at open) |
 | `session_timeout` | `maxDurationSec` reached; `ended` follows |
 | `asr_error` / `tts_error` / `tts_peer_closed` / `tts_upstream_error` / `llm_timeout` / `processing_error` | Provider failure during a turn; the session normally survives |
@@ -288,7 +334,8 @@ checklist.
 `SpeechRecognition` stands in for ASR, your local `agent.session` for the LLM,
 `speechSynthesis` for TTS. Event names and payload shapes match production, so
 the loop above runs unchanged; latency, voices and `tts_audio` PCM are **not**
-representative — verify those on staging.
+representative — verify those on staging. `llm: "conversation"` is not
+available in the harness (`invalid_request`).
 
 The reference App is
 [`anna-app-voice-demo`](https://github.com/whtcjdtc2007/anna-executa-examples/tree/main/examples/anna-app-voice-demo)
@@ -299,5 +346,6 @@ timing and the usage summary).
 
 - [App UI Media](/developers/apps/app-ui-media) — the synchronous `audio.speak` / `audio.transcribe` surface
 - [LLM & Agent](/developers/apps/llm-and-agent) — agent sessions, submodes, tool surface
+- [Durable conversations](/developers/apps/app-ui-conversation) — the `conversation.*` surface behind `llm: "conversation"`
 - [App UI Host API](/developers/apps/app-ui-host-api) — envelope, generic errors
 - [Reference · `audio.*`](/developers/reference/host-api-audio) — every field, event and limit

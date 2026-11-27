@@ -4,7 +4,7 @@ description: "How the assistant summons, updates, and closes your app windows vi
 section: apps
 slug: app-ui-llm
 order: 15
-updated: 2026-04-28
+updated: 2026-11-24
 estimated_minutes: 4
 category: "App UI"
 ---
@@ -97,10 +97,6 @@ User:    @research-suite please dig into ECM-related immune evasion.
 LLM →    open_app_view(app_id=254, payload={"topic": "ECM"})
          (Window appears.)
 
-LLM →    chat.append_artifact (from inside the iframe, NOT a tool the LLM calls)
-         {"artifact": {"kind": "app_event", "summary": "Started research on ECM",
-                       "payload_ref": "windows/<wid>/runtime_state"}}
-
 iframe → tools.invoke(tool_id=browser, args={"url": "…"})
 iframe → storage.set({key: "findings", value: [...]})
 
@@ -110,7 +106,7 @@ LLM →    update_app_view(window_uuid="…",
 LLM:     "I summarised five papers in the workspace — open it to read."
 ```
 
-The iframe should **always** post a chat artifact when it produces something the user might want to refer back to (a finding, a chart, a draft). The `chat.append_artifact` call goes through the host RPC; the artifact card appears in the active chat in realtime (note: cards are not yet persisted — they disappear on refresh; thread persistence is a later phase).
+Keep results the user might want to refer back to (a finding, a chart, a draft) in your App's own state — `storage.*` or `runtime_state` — and let the assistant point to them. `chat.append_artifact` is **deprecated**: the call still succeeds, but no surface displays the card any more.
 
 ## Full SSE event stream
 

@@ -268,7 +268,7 @@
       "group": "Audio",
       "since": "Introduced anna-app-runtime v0.21.0 / nexus 1.1.0-beta.189 (2026-10-12); documented with schema 0.27.0 (2026-10-14). Not part of `host_api/methods.json` — relayed locally by the host bridge.",
       "direction": "Bundle (iframe) → postMessage `audio.session.*` → host bridge → WS /api/v1/anna-apps/runtime/voice → VoiceGateway (streaming ASR → LLMBackend[AppAgent | None] → streaming TTS) → WS events → bridge event `audio.session` → VoiceSession handle",
-      "summary": "Full-duplex realtime voice session for an App: stream 16 kHz PCM16 microphone audio up, receive streaming ASR partials/finals, the LLM's streaming reply (your App's agent session, or no LLM at all) and streaming TTS audio down, with barge-in. Two App-specific primitives: `setContext(text)` injects live App state (≤4 KB) into the **next** turn's system prompt (never into history), and `say(text)` speaks arbitrary text through the same streaming TTS without an LLM round-trip. The bundle never holds a token; the host page owns the socket.",
+      "summary": "Full-duplex realtime voice session for an App: stream 16 kHz PCM16 microphone audio up, receive streaming ASR partials/finals, the LLM's streaming reply (your App's agent session, one of the user's durable conversations, or no LLM at all) and streaming TTS audio down, with barge-in. Two App-specific primitives: `setContext(text)` injects live App state (≤4 KB) into the **next** turn's system prompt (never into history), and `say(text)` speaks arbitrary text through the same streaming TTS without an LLM round-trip. The bundle never holds a token; the host page owns the socket.",
       "wire": {
         "json_rpc_method": "audio.session.open · audio.session.send · audio.session.flush · audio.session.context · audio.session.say · audio.session.interrupt · audio.session.close (bridge-local; never forwarded to /runtime/rpc)",
         "auth": "Handled by the host page — the bundle never sees a token and opens no network connection. Unlike the other `audio.*` rows this is **not** a dispatcher RPC: `audio.session.*` requests are intercepted by the host bridge (`anna-app-host-bridge.js`, or the anna-mobile shell) which owns the WebSocket `wss://{host}/api/v1/anna-apps/runtime/voice?window_uuid=…` (cookie-authenticated — web session or the mobile shell's scoped `anna_mobile_rt`), checks the window slot, relays messages both ways and tears the socket down when the window closes or the iframe reloads. Hosts without the relay answer `unknown_method` / `not_supported`.",
@@ -276,16 +276,28 @@
         "timeout_s": null,
         "http_equivalent": "WS /api/v1/anna-apps/runtime/voice?window_uuid=<uuid> (host-bridge only; the main-chat equivalent is WS /api/v1/copilot/voice)"
       },
-      "signature": "anna.audio.session(config: {llm?: 'agent'|'none', submode?: 'auto'|'fixed', fixed_client_id?: string, voice?: string, language?: string, speed?: number, context?: string, system?: string, maxDurationSec?: number}) => Promise<VoiceSession>\n\nVoiceSession {\n  sessionId: string; audioConfig: {format:'pcm', sample_rate:24000, channels:1, bits_per_sample:16}; models: {asr, tts, voice}; maxDurationSec: number; asrIdleTimeoutSec: number|null;\n  sendAudio(pcm16: Int16Array|ArrayBuffer|Uint8Array): number;   // 16 kHz mono; auto-chunked ≤32 KB; fire-and-forget\n  flushAudio(): void;                                           // push-to-talk released → finalize the pending sentence now\n  setContext(text: string): Promise<void>;                      // ≤4 KB, replace semantics, applies from the next utterance\n  say(text: string, opts?: {priority?: 'normal'|'high', interrupt?: boolean, sayId?: string}): Promise<{sayId: string}>;  // ≤1000 chars, TTS-only\n  interrupt(): Promise<void>;\n  end(): Promise<{duration, total_asr_seconds, total_tts_characters, reason}>;\n  on(event, handler): () => void;  off(event, handler): void;   // event '*' receives (event, payload)\n}",
+      "signature": "anna.audio.session(config: {llm?: 'agent'|'conversation'|'none', conversation_uuid?: string, submode?: 'auto'|'fixed', fixed_client_id?: string, voice?: string, language?: string, speed?: number, context?: string, system?: string, maxDurationSec?: number}) => Promise<VoiceSession>\n\nVoiceSession {\n  sessionId: string; audioConfig: {format:'pcm', sample_rate:24000, channels:1, bits_per_sample:16}; models: {asr, tts, voice}; maxDurationSec: number; asrIdleTimeoutSec: number|null;\n  sendAudio(pcm16: Int16Array|ArrayBuffer|Uint8Array): number;   // 16 kHz mono; auto-chunked ≤32 KB; fire-and-forget\n  flushAudio(): void;                                           // push-to-talk released → finalize the pending sentence now\n  setContext(text: string): Promise<void>;                      // ≤4 KB, replace semantics, applies from the next utterance\n  say(text: string, opts?: {priority?: 'normal'|'high', interrupt?: boolean, sayId?: string}): Promise<{sayId: string}>;  // ≤1000 chars, TTS-only\n  interrupt(): Promise<void>;\n  end(): Promise<{duration, total_asr_seconds, total_tts_characters, reason}>;\n  on(event, handler): () => void;  off(event, handler): void;   // event '*' receives (event, payload)\n}",
       "params": [
         {
           "name": "llm",
-          "type": "'agent' | 'none'",
+          "type": "'agent' | 'conversation' | 'none'",
           "required": false,
           "default": "agent",
-          "summary": "`agent` routes each final utterance through **this App's agent session** (`POST /copilot/app/agent`, server-minted token; tool surface = `ui.host_api.agent.tools`). `none` runs ASR + TTS only — you get `asr_*` events and can `say()` your own text.",
+          "summary": "`agent` routes each final utterance through **this App's agent session** (`POST /copilot/app/agent`, server-minted token; tool surface = `ui.host_api.agent.tools`). `conversation` answers inside one of the user's durable conversations (`conversation_uuid`): the user's own agent with their memory, persona and tools, every spoken turn persisted in that conversation. `none` runs ASR + TTS only — you get `asr_*` events and can `say()` your own text.",
           "notes": [
-            "`agent` runs a sandbox agent session for this App — nothing to declare; host-kit tools follow `ui.host_api.agent.tools`."
+            "`agent` runs a sandbox agent session for this App — nothing to declare; host-kit tools follow `ui.host_api.agent.tools`.",
+            "`conversation` requires `ui.host_api.conversation: true` in the manifest (else `conversation_not_declared`). `submode`, `fixed_client_id` and `system` do not apply to it, and the live context (`context` / `setContext()`) is accepted but not passed to the model."
+          ]
+        },
+        {
+          "name": "conversation_uuid",
+          "type": "string",
+          "required": "when `llm:'conversation'`",
+          "default": null,
+          "summary": "The durable conversation that answers — one your App can reach through `conversation.*` (from `conversation.list` / `conversation.create`).",
+          "notes": [
+            "Missing → `invalid_arg`; a conversation that belongs to another App or user → `not_found`.",
+            "Voice turns are not attachable: while the call is active `conversation.status` reports a running task without a `stream_id` — reload `conversation.messages` when it ends."
           ]
         },
         {
@@ -397,6 +409,18 @@
           "retryable": false
         },
         {
+          "name": "conversation_not_declared",
+          "code": null,
+          "desc": "`llm:'conversation'` without `ui.host_api.conversation: true` in the manifest.",
+          "retryable": false
+        },
+        {
+          "name": "not_found / invalid_arg",
+          "code": null,
+          "desc": "`llm:'conversation'` with a `conversation_uuid` your App does not own / without one.",
+          "retryable": false
+        },
+        {
           "name": "context_too_large / system_too_large / say_too_long",
           "code": null,
           "desc": "`context` >4 KB, `system` >8 KB, `say.text` >1000 chars. The SDK rejects `setContext` / `say` client-side with the same codes before sending.",
@@ -429,7 +453,7 @@
       ],
       "billing": {
         "request_type": "APP_STT (per recognised audio second) · APP_TTS (per synthesised character, replies and `say()` alike)",
-        "model": "The user's realtime ASR / TTS preferences; `llm:'agent'` turns are billed by the agent session itself (not double-counted).",
+        "model": "The user's realtime ASR / TTS preferences; `llm:'agent'` turns are billed by the agent session itself and `llm:'conversation'` turns as turns of that conversation (not double-counted).",
         "pricing": "Only audio you actually `sendAudio()` is recognised and billed — an idle open session costs nothing. Gate the microphone behind push-to-talk or a wake word; `end()` returns `{total_asr_seconds, total_tts_characters}` for your own accounting."
       },
       "example": "const mic = anna.audio.mic({ sampleRate: 16000, onChunk: (pcm16) => { if (talking) vs.sendAudio(pcm16); } });\nawait mic.start();            // prompts for the microphone (iframe gets allow=\"microphone\" from ui.browser_permissions)\nmic.setMuted(true);           // push-to-talk gate\n\nconst vs = await anna.audio.session({ llm: 'agent', language: 'zh', system: 'Answer in one short sentence.', maxDurationSec: 1800 });\nconst player = anna.audio.player({ sampleRate: vs.audioConfig.sample_rate });\n\nvs.on('asr_final',  ({ text })  => transcript.append(text));\nvs.on('llm_partial',({ text })  => reply.textContent += text);\nvs.on('tts_audio',  ({ audio }) => player.enqueue(audio));\nvs.on('tts_done',   ()          => player.flush());\nvs.on('interrupted',()          => player.stop());          // barge-in\nvs.on('ended',      (usage)     => console.log(usage.total_asr_seconds, usage.total_tts_characters));\n\nptt.onpointerdown = () => { talking = true;  mic.setMuted(false); };\nptt.onpointerup   = () => { talking = false; mic.setMuted(true); vs.flushAudio(); };\n\nsetInterval(() => vs.setContext(JSON.stringify(gameState)), 1000);   // ≤4 KB, replaces, next turn\nawait vs.say('Careful, top lane.', { priority: 'high' });            // TTS-only, preempts\n\nanna.on('host.app_state', ({ state }) => { if (state !== 'active') vs.end(); });  // mobile: foreground-only\nawait vs.end();",
@@ -440,7 +464,8 @@
         "`setContext` is replace-only and applies from the **next** utterance. The composed per-run system prompt (your `system` + the `<live_context>` fence) is validated like any App system prompt — boundary-forging tokens (`<system>`, `<safety`, `<app_system_prompt>`, `system:`) fail the turn with `processing_error` — and html-escaped by the agent builder, so markup in your context is inert; never put instructions the user cannot see in it. `say` has a single pending slot server-side (`normal` queues one; a newer one replaces it → `say_done{status:'replaced'}`); any interruption drops the pending say.",
         "One session per window; no per-user cap. Session lifetime ≤3 h. Apps cannot choose ASR/TTS models (user preferences apply); `vad.silenceMs` is not configurable.",
         "Mobile (anna-mobile shell): foreground-only — WKWebView suspends `getUserMedia` in the background; listen to `host.app_state` and pause/end the session. Android requires a development build (Expo Go cannot grant the WebView microphone).",
-        "Agent-session idle TTL is 30 min: after a long silence the next turn transparently re-creates the agent session (history resets; `context` is unaffected)."
+        "Agent-session idle TTL is 30 min: after a long silence the next turn transparently re-creates the agent session (history resets; `context` is unaffected).",
+        "`llm:'conversation'` is not mocked by `anna-app dev`: the harness voice relay accepts only `agent` / `none` and rejects it with `invalid_request` — test it against the platform."
       ]
     },
     {

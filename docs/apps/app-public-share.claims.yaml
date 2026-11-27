@@ -1,0 +1,8 @@
+# Machine-checkable claims for docs/apps/app-public-share.md.
+host_api_methods:
+  - share.publish
+  - share.list
+  - share.revoke
+  - share.update
+  - files.upload_init
+  - files.upload_finalize

@@ -9,3 +9,20 @@ host_api_methods:
   - tools.getJob
   - tools.listJobs
   - llm.catalog
+  - share.publish
+  - share.list
+  - share.revoke
+  - share.update
+  - conversation.list
+  - conversation.create
+  - conversation.update
+  - conversation.delete
+  - conversation.messages
+  - conversation.send
+  - conversation.status
+  - conversation.cancel
+  - conversation.modify
+  - conversation.options
+  - chat.append_artifact
+  - chat.write_message
+  - storage.quota
